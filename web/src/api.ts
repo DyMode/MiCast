@@ -370,6 +370,8 @@ export interface DebugState {
       input?: { ahead_ms: number; buffered_ms: number; starved_ms: number };
       /** Pacing sleep: how long the pump held itself back to realtime. */
       pace?: { sleeps: number; total_ms: number; max_ms: number };
+      /** Branch buffer depth vs its time budget (where paced pumps can lose PCM). */
+      tee?: { depth_ms: number; capacity_ms: number; dropped: number };
       pipeline_drops?: { in: number; out: number };
     }>;
     /** Live sender sessions split by ingress; absent on older backends. */

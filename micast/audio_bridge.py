@@ -201,6 +201,7 @@ class AudioBridge:
                     if (pipeline := self.pipeline_for_stream(receiver_id)) is not None
                     else {}
                 ),
+                "tee": self.entry_tee_depth_ms(receiver_id),
                 "flowing": self._stream_server.is_flowing(receiver_id),
                 "latency": self._stream_server.latency_metrics(receiver_id),
             }
@@ -1851,6 +1852,28 @@ class AudioBridge:
                 if int(state.get("queue_drops") or 0):
                     return True
         return False
+
+    def _tee_for_entry(self, entry_id: str):
+        for mapping in (self._airplay2_tees, self._tees):
+            tee = mapping.get(entry_id)
+            if tee is not None:
+                return tee
+        return None
+
+    def entry_tee_depth_ms(self, entry_id: str) -> dict[str, float]:
+        """How much audio a branch is holding back, against its budget.
+
+        A branch sitting at its capacity is the one place where a paced pump
+        loses real audio, so this has to be visible next to the loss counters.
+        """
+        tee = self._tee_for_entry(entry_id)
+        if tee is None:
+            return {}
+        return {
+            "depth_ms": round(tee.depth_ms(), 1),
+            "capacity_ms": round(tee.capacity_ms(), 1),
+            "dropped": tee.dropped_chunks,
+        }
 
     def entry_pace_stats(self, entry_id: str) -> dict[str, float]:
         """Aggregated pacing sleep for an entry's pipelines (1x hold-backs)."""

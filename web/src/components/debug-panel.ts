@@ -143,6 +143,9 @@ function entryLabel(entryId: string, state: State): string {
  */
 export function renderStatusOverview(debug: DebugState | null, state: State): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
+  const teeDepths = Object.values(debug?.diagnostics?.streams || {})
+    .map((item) => item.tee)
+    .filter((item): item is { depth_ms: number; capacity_ms: number; dropped: number } => !!item);
   const streams = Object.values(debug?.diagnostics?.streams || {});
   const audio = debug?.diagnostics?.audio;
   const entries = debug?.diagnostics?.entries || {};
@@ -239,7 +242,11 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       state: streamState,
       value: !playing
         ? "无连接"
-        : `${flowingClients} 台音箱取流${droppedMs ? ` · 丢弃 ${droppedMs}ms` : ""}`,
+        : `${flowingClients} 台音箱取流${
+            teeDepths.length
+              ? ` · 缓冲 ${Math.round(Math.max(...teeDepths.map((item) => item.depth_ms)))}ms`
+              : ""
+          }${droppedMs ? ` · 丢弃 ${droppedMs}ms` : ""}`,
     },
     {
       label: "音箱",
@@ -374,6 +381,9 @@ export function renderAudioPath(debug: DebugState | null): string {
   if (!audio) {
     return `<div class="cell"><span class="cell-subtitle">当前版本暂未提供音频路径统计</span></div>`;
   }
+  const branchDepths = Object.values(debug?.diagnostics?.streams || {})
+    .map((item) => item.tee)
+    .filter((item): item is { depth_ms: number; capacity_ms: number; dropped: number } => !!item);
   const stallState = audio.encode.stalls > 0 ? "error" : "success";
   const rows = [
     {
@@ -415,7 +425,7 @@ export function renderAudioPath(debug: DebugState | null): string {
               .map(([id, count]) => `（${id} ${count}）`)
               .join(" ")
           : ""
-      } · 编码入 ${audio.drops.encoder_in} · 编码出 ${audio.drops.encoder_out}`,
+      }${branchDepths.length ? ` · 缓冲窗口 ${Math.round(Math.max(...branchDepths.map((item) => item.capacity_ms)))}ms` : ""} · 编码入 ${audio.drops.encoder_in} · 编码出 ${audio.drops.encoder_out}`,
       value:
         audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out > 0 ? "有丢弃" : "无丢弃",
       state:
