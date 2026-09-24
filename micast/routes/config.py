@@ -420,6 +420,26 @@ def install(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"stale_session_timeout": settings.stale_session_timeout}
 
+    @router.post("/client-max-lag")
+    async def set_client_max_lag(payload: dict):
+        """Speaker clock-drift tolerance in seconds: how far a pulled stream
+        may lead real time before the delay line trims it back to live. The
+        stream server reads it per chunk, so this hot-applies."""
+        raw = payload.get("seconds")
+        try:
+            seconds = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="seconds must be a number between 0.5 and 30"
+            ) from None
+        try:
+            await apply_config_transaction(
+                lambda: settings.set_client_max_lag_seconds(seconds), persist_only
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"client_max_lag_seconds": settings.client_max_lag_seconds}
+
     @router.post("/sender-volume")
     async def set_sender_volume(payload: dict):
         mode = payload.get("mode")

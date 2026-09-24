@@ -23,6 +23,7 @@ from functools import lru_cache
 import av
 from av.filter import Graph
 
+from micast.audio_metrics import metrics
 from micast.config import settings
 
 logger = logging.getLogger(__name__)
@@ -311,6 +312,7 @@ class AudioEncoder:
             def put() -> None:
                 if _put_latest_async(out, chunk):
                     self._drop_counts["out"] += 1
+                    metrics.note_encoder_drop("out")
 
             loop.call_soon_threadsafe(put)
 
@@ -351,6 +353,7 @@ class _PCMWriter:
     def write(self, data: bytes) -> None:
         if _put_latest_sync(self._queue, data):
             self._drop_counts[self._drop_key] += 1
+            metrics.note_encoder_drop(self._drop_key)
 
     def write_eof(self) -> None:
         _put_latest_sync(self._queue, None)

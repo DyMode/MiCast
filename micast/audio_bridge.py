@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from micast.audio_metrics import metrics
 from micast.config import resolve_port, settings
 from micast.deployment import airplay2_mode
 from micast.local_airplay import LocalAirPlayProvider
@@ -46,6 +47,10 @@ class AudioBridge:
         self._airplay2_runtime: dict[str, dict] = {}
         self._airplay2_sources: dict[str, PCMSource] = {}
         self._airplay2_tees: dict[str, PCMTee] = {}
+        # Last known playback target per AirPlay 2 instance: a retarget must
+        # release the speaker the instance just left (it would otherwise keep
+        # pulling the old stream next to the new one).
+        self._airplay2_targets: dict[str, str] = {}
         self._tees: dict[str, PCMTee] = {}
         self._running = False
         self._status = "idle"
@@ -97,6 +102,10 @@ class AudioBridge:
         # Fired when a group's Xiaomi membership changed (group_id, removed dids);
         # main.py wires its reconcile_group closure here.
         self.on_group_membership_changed: Callable[[str, list[str]], Awaitable[None]] | None = None
+        # Fired when an AirPlay 2 instance is retargeted to a different speaker
+        # (old_did, instance_id): the previous speaker is still playing the old
+        # URL and must be unloaded, or it keeps pulling alongside the new one.
+        self.on_airplay2_retarget: Callable[[str, str], Awaitable[None]] | None = None
 
     @property
     def status(self) -> dict:
@@ -178,18 +187,33 @@ class AudioBridge:
                     if (pipeline := self.pipeline_for_stream(receiver_id)) is not None
                     else {}
                 ),
+                "input": (
+                    pipeline.input_stats()
+                    if (pipeline := self.pipeline_for_stream(receiver_id)) is not None
+                    else {}
+                ),
                 "flowing": self._stream_server.is_flowing(receiver_id),
                 "latency": self._stream_server.latency_metrics(receiver_id),
             }
             for receiver_id in self._stream_server.stream_ids()
         }
         airplay2_sessions = self._active_sessions & self._airplay2_entry_ids()
+        for stream in streams.values():
+            input_stats = stream.get("input") or {}
+            # AirPlay 2 has no RAOP session, so it has no input_buffer_ms of its
+            # own; the pipeline's own pacing is the equivalent measurement
+            # (buffered_ms = fed audio leading the wall clock).
+            stream["input_buffer_ms"] = int(input_stats.get("buffered_ms") or 0)
         return {
             "raop": raop,
             "streams": streams,
             "sinks": self._stream_server.sink_latency_metrics(),
             "airplay_targets": (self._airplay_targets.statuses() if self._airplay_targets else {}),
             "dlna_targets": self._dlna_targets.statuses() if self._dlna_targets else {},
+            # Cumulative, cross-reconnect counters plus a rolling event log:
+            # connection-scoped counters reset whenever a speaker reconnects,
+            # which is exactly when a periodic stutter becomes invisible.
+            "audio": metrics.snapshot(),
             # Live sender sessions, split by ingress. AirPlay 2 never opens a RAOP
             # session (shairport + PCM sources feed its pipelines), so the RAOP
             # counters alone report an idle input while an AirPlay 2 sender plays.
@@ -698,6 +722,14 @@ class AudioBridge:
             for instance_id in affected
             if key == instance_id or key.startswith(f"{instance_id}-")
         }
+        # A retarget leaves the previous speaker playing the old URL: nothing
+        # stops it (ownership only moves for the NEW did), so it keeps pulling
+        # the old stream alongside the new one. Remember what each instance was
+        # aimed at, then release the speakers that are no longer targeted.
+        previous_targets = {
+            instance_id: getattr(self, "_airplay2_targets", {}).get(instance_id)
+            for instance_id in affected
+        }
         for instance_id in sorted(affected):
             await self._stop_airplay2_pipeline(instance_id)
         await self._start_airplay2_pipelines()
@@ -710,6 +742,45 @@ class AudioBridge:
         for stream_id in stale - active:
             self._stream_server.kick_clients(stream_id)
             self._stream_server.unregister_stream(stream_id)
+        await self._release_retargeted_speakers(affected, previous_targets)
+
+    async def _release_retargeted_speakers(
+        self, affected: set[str], previous_targets: dict[str, str | None]
+    ) -> None:
+        """Stop speakers that an AirPlay 2 instance left behind on retarget."""
+        stream_server = getattr(self, "_stream_server", None)
+        if stream_server is None:
+            return
+        for instance_id in sorted(affected):
+            old_target = previous_targets.get(instance_id)
+            new_target = getattr(self, "_airplay2_targets", {}).get(instance_id)
+            if not old_target or old_target == new_target:
+                continue
+            logger.info(
+                "AirPlay 2 instance %s retargeted %s -> %s; releasing the old speaker",
+                instance_id,
+                old_target,
+                new_target or "(none)",
+            )
+            stream_ids = [
+                key
+                for key in stream_server.stream_ids()
+                if key == instance_id or key.startswith(f"{instance_id}-")
+            ]
+            for stream_id in stream_ids:
+                stream_server.kick_clients(stream_id, sink=old_target)
+            hook = self.on_airplay2_retarget
+            if hook is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(hook(old_target, instance_id), _HOOK_TIMEOUT_SECONDS)
+
+    def _resolve_airplay2_targets(self) -> dict[str, str]:
+        """Current playback target per AirPlay 2 instance, for retarget detection."""
+        return {
+            item.id: item.target_id
+            for item in settings.airplay2_instances
+            if item.target_id
+        }
 
     async def stop_airplay2(self) -> None:
         """Withdraw every entry from the compose-owned orchestrator."""
@@ -898,6 +969,9 @@ class AudioBridge:
             if instance_id not in active_instances:
                 await self._stop_airplay2_pipeline(instance_id)
                 self._airplay2_runtime.pop(instance_id, None)
+        # Refresh the retarget baseline only after the pipelines exist, so a
+        # failure to start keeps the old target recorded for the next attempt.
+        self._airplay2_targets = self._resolve_airplay2_targets()
 
         desired = [
             DesiredReceiver(key=item.id, device_id=item.id, name=item.name, protocol="airplay2")

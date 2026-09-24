@@ -75,6 +75,7 @@ class PlaybackOrchestrator:
         self.bridge.on_receiver_volume = self.on_receiver_volume
         self.bridge.on_volume_session_start = self.apply_default_volume
         self.bridge.on_audio_restarted = self.on_audio_restarted
+        self.bridge.on_airplay2_retarget = self.release_retargeted_speaker
 
     async def stop_all(self) -> None:
         """Tear down lyrics sessions (lifespan shutdown)."""
@@ -463,6 +464,19 @@ class PlaybackOrchestrator:
                 for did in self.device_manager.owned_targets(receiver_id, receiver_id)
             )
         )
+
+    async def release_retargeted_speaker(self, device_id: str, owner: str) -> None:
+        """Unload the speaker an AirPlay 2 instance was retargeted away from.
+
+        Without this the old speaker keeps the stale URL and keeps pulling the
+        instance's stream, so two speakers stream one instance side by side.
+        Ownership moves only for the NEW target, so nothing else stops it.
+        """
+        if self.device_manager.owner_of(device_id) not in (None, owner):
+            # A different receiver owns it now (e.g. classic AirPlay took the
+            # speaker over) — that receiver's playback is not ours to end.
+            return
+        await self.device_manager.stop_playback(device_id, owner=owner)
 
     async def on_audio_restarted(self):
         # Encoding or topology changed under live connections; playing speakers

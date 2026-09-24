@@ -6,6 +6,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from micast.audio_encoder import AudioEncoder, firequalizer_available, raw_pcm_format, wav_header
+from micast.audio_metrics import metrics
 from micast.config import settings
 from micast.curve_fit import (
     add_curve,
@@ -44,6 +45,10 @@ SOURCE_SILENCE_CHUNK_BYTES = 32768
 # 3.5-4.6s of silence per 6s (audible stutter, invisible to every diagnostic
 # counter). Still far below the speaker's ~2s abandonment threshold.
 SOURCE_SILENCE_GRACE_PERIODS = 3
+# Encoded output is expected at roughly the audio duration of the previous
+# chunk; a longer gap means the encoder thread stalled (nothing lost, just
+# delayed) — the one hiccup cause no drop counter can see.
+ENCODER_GAP_MS = 150.0
 
 
 class SpeakerPipeline:
@@ -116,6 +121,13 @@ class SpeakerPipeline:
         # Live-spectrum tap for the tuning page: raw post-gain PCM in, FFT
         # only when the UI polls — see micast.spectrum.
         self._spectrum = SpectrumAnalyzer(self._input_sample_rate or 44100)
+        # Input-side pacing: how far the fed audio leads (positive) or trails
+        # (negative) real time. Positive means the source is ahead of the
+        # playback clock (input buffer), negative means it starved. Surfaced in
+        # diagnostics so AirPlay 2 (which has no RAOP input_buffer_ms) can
+        # report an equivalent figure.
+        self._input_ahead_ms = 0.0
+        self._input_fed_bytes = 0
 
     def spectrum_bands(self) -> list[float] | None:
         """Latest spectrum bands (0..1), or None when the pipeline is idle."""
@@ -130,6 +142,20 @@ class SpeakerPipeline:
         if self._encoder is None:
             return {"in": 0, "out": 0}
         return self._encoder.drop_stats()
+
+    def input_stats(self) -> dict[str, float]:
+        """Input-side pacing for this pipeline.
+
+        ``ahead_ms`` > 0 means the fed audio leads the wall clock (buffered
+        input); < 0 means the source trailed real time (starvation). AirPlay 2
+        has no RAOP session counters, so this is what stands in for
+        ``input_buffer_ms`` there.
+        """
+        return {
+            "ahead_ms": round(self._input_ahead_ms, 1),
+            "buffered_ms": round(max(0.0, self._input_ahead_ms), 1),
+            "starved_ms": round(max(0.0, -self._input_ahead_ms), 1),
+        }
 
     @property
     def status(self) -> str:
@@ -516,6 +542,8 @@ class SpeakerPipeline:
             "Source stalled for %s; feeding silence to keep clients alive",
             self._stream_id,
         )
+        metrics.note_source_stall(chunk_seconds * 1000 * SOURCE_SILENCE_GRACE_PERIODS)
+        metrics.note_silence_fill()
         return b"\x00" * SOURCE_SILENCE_CHUNK_BYTES, True
 
     async def _pump_source_to_encoder(self, reader: asyncio.StreamReader, writer) -> None:
@@ -540,6 +568,8 @@ class SpeakerPipeline:
                 # must drain at 1x, not burst into the encoder and overflow
                 # client queues.
                 ahead = fed_bytes / byte_rate - (loop.time() - started_at)
+                self._input_ahead_ms = ahead * 1000
+                self._input_fed_bytes = fed_bytes
                 if self._pace_source and ahead > 0:
                     await asyncio.sleep(ahead)
                 await writer.drain()
@@ -553,6 +583,10 @@ class SpeakerPipeline:
 
     async def _pump_encoder_to_stream(self, reader) -> None:
         try:
+            rate = self._input_sample_rate or 44100
+            loop = asyncio.get_running_loop()
+            last_at = loop.time()
+            last_len = 0
             while self._running:
                 # read(32768) coalesces every immediately-pending muxer write
                 # into one ≤32KB chunk (see _EncodedReader), so all encoded
@@ -560,6 +594,19 @@ class SpeakerPipeline:
                 chunk = await reader.read(32768)
                 if not chunk:
                     break
+                now = loop.time()
+                # The encoder consumes PCM in real time, so encoded output is
+                # expected at roughly the audio duration of the previous chunk.
+                # A much longer gap means the encoder (or its thread) stalled —
+                # the concrete cause of a listener-visible hiccup that no drop
+                # counter reports, because nothing was lost, just delayed.
+                expected_ms = last_len / (rate * 4) * 1000 if last_len else 0.0
+                gap_ms = (now - last_at) * 1000
+                if last_len and gap_ms > expected_ms + ENCODER_GAP_MS:
+                    metrics.note_encoder_gap(gap_ms, expected_ms)
+                metrics.note_encode(gap_ms if last_len else 0.0)
+                last_at = now
+                last_len = len(chunk)
                 await self._stream_server.broadcast(self._stream_id, chunk)
         except asyncio.CancelledError:
             pass
@@ -590,6 +637,8 @@ class SpeakerPipeline:
                 await self._stream_server.broadcast(self._stream_id, gained)
                 fed_bytes += len(chunk)
                 ahead = fed_bytes / byte_rate - (loop.time() - started_at)
+                self._input_ahead_ms = ahead * 1000
+                self._input_fed_bytes = fed_bytes
                 if self._pace_source and ahead > 0:
                     await asyncio.sleep(ahead)
         except asyncio.CancelledError:

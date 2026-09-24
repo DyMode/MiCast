@@ -517,6 +517,11 @@ class Settings(BaseSettings):
     # data before the sweeper expires it and stops the Xiaomi playback.
     # Seconds; 0 disables the expiry entirely (pause indefinitely).
     stale_session_timeout: int = Field(default=60, ge=0)
+    # How far a speaker's pulled stream may lead real time before the delay
+    # line trims it back to live. Doubles as the tolerance for speaker clock
+    # drift: larger absorbs more drift, smaller keeps latency tight. Trims are
+    # applied in small slices (see LAG_SKIP_SLICE_SECONDS).
+    client_max_lag_seconds: float = Field(default=4.0, ge=0.5, le=30.0)
     sender_volume_mode: str = Field(default="independent", pattern=r"^(independent|linked)$")
     # Webhook (飞书自定义机器人 / WxPusher) notified when the Xiaomi login
     # expires; empty = disabled.
@@ -651,6 +656,7 @@ class Settings(BaseSettings):
             "default_volume": self.default_volume,
             "default_volume_enabled": self.default_volume_enabled,
             "stale_session_timeout": self.stale_session_timeout,
+            "client_max_lag_seconds": self.client_max_lag_seconds,
             "sender_volume_mode": self.sender_volume_mode,
             "notify_webhook_url": self.notify_webhook_url,
             "provider_account_id": self.provider_account_id,
@@ -785,6 +791,15 @@ class Settings(BaseSettings):
         if seconds < 0:
             raise ValueError("stale_session_timeout must be a non-negative integer")
         self.stale_session_timeout = seconds
+        self.save_to_file()
+
+    def set_client_max_lag_seconds(self, seconds: float) -> None:
+        """Tolerance for speaker clock drift before the delay line trims to
+        live; the stream server reads it per chunk, so it hot-applies."""
+        value = float(seconds)
+        if not 0.5 <= value <= 30.0:
+            raise ValueError("client_max_lag_seconds must be between 0.5 and 30")
+        self.client_max_lag_seconds = value
         self.save_to_file()
 
     def set_notify_webhook(self, url: str) -> None:

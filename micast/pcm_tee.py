@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import logging
 
+from .audio_metrics import metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +78,7 @@ class BoundedPCMReader:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
             self.dropped_chunks += 1
+            metrics.note_tee_drop()
             self._queue.put_nowait(data)
 
     def feed_eof(self) -> None:
@@ -88,6 +91,7 @@ class BoundedPCMReader:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
             self.dropped_chunks += 1
+            metrics.note_tee_drop()
             self._queue.put_nowait(None)
 
     def at_eof(self) -> bool:

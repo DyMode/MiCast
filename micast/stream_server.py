@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from uvicorn import Config, Server
 
 from micast.audio_encoder import MediaProxyPump, StreamFormat, mp3_silence, wav_header
+from micast.audio_metrics import metrics
 from micast.config import settings
 from micast.test_tone import test_tone_wav
 
@@ -324,6 +325,17 @@ class StreamServer:
     def client_count(self, device_id: str) -> int:
         return len(self._clients.get(device_id, set()))
 
+    def _max_lag_seconds(self) -> float:
+        """How far a client may lead before we trim it to live.
+
+        Configurable because it doubles as the tolerance for speaker clock
+        drift: a larger value absorbs more drift but grows latency.
+        """
+        try:
+            return float(settings.client_max_lag_seconds)
+        except AttributeError:  # settings fixture without the field
+            return CLIENT_MAX_LAG_SECONDS
+
     def total_clients(self) -> int:
         return sum(len(clients) for clients in self._clients.values())
 
@@ -393,6 +405,7 @@ class StreamServer:
         sink = sink or request.query_params.get("sink") or None
         receiver_id = receiver_id or request.query_params.get("receiver") or None
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
+        metrics.note_client_connect(device_id, replacing=bool(self._clients.get(device_id)))
         self._clients.setdefault(device_id, set()).add(queue)
         self._client_delay[queue] = {
             "receiver": receiver_id,
@@ -530,20 +543,25 @@ class StreamServer:
                     # Drift ceiling: a speaker whose clock trails the encoder
                     # would backlog without bound (eventually overflowing its
                     # queue). Skip the excess to live instead — one small skip
-                    # beats a permanent disconnect/reconnect rhythm.
-                    ceiling = reserve + int(byte_rate * CLIENT_MAX_LAG_SECONDS)
+                    # beats a permanent disconnect/reconnect rhythm. The excess
+                    # is only ever the growth since the previous chunk (one
+                    # chunk at a time), so this stays a small trim; the metrics
+                    # event log records how large it actually was.
+                    ceiling = reserve + int(byte_rate * self._max_lag_seconds())
                     if len(buffer) > ceiling:
                         skipped = len(buffer) - ceiling
                         del buffer[:skipped]
+                        metrics.note_lag_skip(skipped, skipped / byte_rate * 1000)
                         if state is not None:
                             state["lag_drops"] = int(state.get("lag_drops") or 0) + 1
                             if state["lag_drops"] == 1 or state["lag_drops"] % 20 == 0:
                                 logger.info(
                                     "Client %s on /stream/%s lagged %.1fs behind; "
-                                    "skipped to live (%d times)",
+                                    "skipped %dms to live (%d times)",
                                     request.client,
                                     device_id,
-                                    skipped / byte_rate,
+                                    (skipped + ceiling - reserve) / byte_rate,
+                                    skipped / byte_rate * 1000,
                                     state["lag_drops"],
                                 )
 
@@ -599,6 +617,9 @@ class StreamServer:
                             state["needs_fill"] = None
                         if state.get("ready_at") is None and len(buffer) >= reserve:
                             state["ready_at"] = time.monotonic()
+                        metrics.note_queue_depth(
+                            queue.qsize(), float(state["buffer_ms"])
+                        )
                     while len(buffer) - reserve >= PACED_CHUNK_BYTES:
                         payload = bytes(buffer[:PACED_CHUNK_BYTES])
                         del buffer[:PACED_CHUNK_BYTES]
@@ -788,17 +809,31 @@ class StreamServer:
         self._task = None
         self._server = None
 
-    def kick_clients(self, device_id: str) -> int:
-        """Close all client connections of a stream; returns how many were kicked."""
+    def kick_clients(self, device_id: str, sink: str | None = None) -> int:
+        """Close client connections of a stream; returns how many were kicked.
+
+        ``sink`` narrows it to the clients pulled for one speaker, which is how
+        a retargeted AirPlay 2 instance drops the speaker it just left behind.
+        """
         clients = self._clients.get(device_id, set())
-        count = len(clients)
+        targets = [
+            queue
+            for queue in clients
+            if sink is None or (self._client_delay.get(queue, {}) or {}).get("sink") == sink
+        ]
+        count = len(targets)
         if count:
-            logger.info("Kicking %d client(s) from /stream/%s", count, device_id)
-            for queue in clients:
+            logger.info(
+                "Kicking %d client(s) from /stream/%s%s",
+                count,
+                device_id,
+                f" (sink={sink})" if sink else "",
+            )
+            for queue in targets:
                 state = self._client_delay.get(queue)
                 if state is not None:
                     state["intentional_close"] = True
-            self._broadcast_to(device_id, None)
+            self._broadcast_to(device_id, None, only=set(targets))
         return count
 
     def begin_group_recovery(self, receiver_id: str, sinks: list[str]) -> None:
@@ -912,16 +947,21 @@ class StreamServer:
         last_get = state.get("last_get_at") or 0.0
         return (time.monotonic() - float(last_get)) > CLIENT_UNDRAINED_SECONDS
 
-    def reap_ghost_clients(self, device_id: str) -> int:
+    def reap_ghost_clients(
+        self, device_id: str, subset: set[asyncio.Queue] | None = None
+    ) -> int:
         """Close dead (half-open) client connections of one stream; returns how
         many were reaped. Mirrors kick_clients' intentional_close semantics so
         group-recovery hooks don't fire for a dead socket. Without this, every
         broadcast to a ghost queue drops one chunk — the dropped-chunks
-        counter grows for as long as the session stays active."""
+        counter grows for as long as the session stays active. ``subset``
+        limits reaping to those clients, so a targeted kick never touches
+        anything outside its scope."""
         clients = self._clients.get(device_id)
         if not clients:
             return 0
-        dead = [queue for queue in clients if self._client_is_ghost(queue)]
+        candidates = clients if subset is None else clients & subset
+        dead = [queue for queue in candidates if self._client_is_ghost(queue)]
         for queue in dead:
             state = self._client_delay.get(queue)
             if state is not None:
@@ -933,13 +973,17 @@ class StreamServer:
             logger.info("Reaped %d ghost client(s) from /stream/%s", len(dead), device_id)
         return len(dead)
 
-    def _broadcast_to(self, device_id: str, chunk: bytes | None) -> None:
+    def _broadcast_to(
+        self, device_id: str, chunk: bytes | None, only: set[asyncio.Queue] | None = None
+    ) -> None:
         clients = self._clients.get(device_id)
         if not clients:
             return
-        self.reap_ghost_clients(device_id)
+        self.reap_ghost_clients(device_id, only)
         dead: set[asyncio.Queue] = set()
         for queue in clients:
+            if only is not None and queue not in only:
+                continue
             try:
                 queue.put_nowait(chunk)
             except asyncio.QueueFull:
@@ -960,6 +1004,9 @@ class StreamServer:
                     state = self._client_delay.get(queue)
                     if state is not None:
                         state["queue_drops"] = int(state.get("queue_drops") or 0) + 1
+                        metrics.note_queue_drops(
+                            1, float(state.get("buffer_ms") or 0)
+                        )
                         if state["queue_drops"] in (1, 20, 100):
                             logger.info(
                                 "Client queue for /stream/%s overflowed; dropped "
