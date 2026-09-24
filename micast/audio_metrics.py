@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 ENCODER_STALL_MS = 200.0
 # Events worth a log line: the rare, listener-visible ones. Drop counters fire
 # in bursts and would flood the log.
-LOGGED_EVENTS = frozenset({"encoder_stall", "encoder_gap", "source_stall", "lag_skip"})
+LOGGED_EVENTS = frozenset(
+    {"encoder_stall", "encoder_gap", "source_stall", "source_gap", "lag_skip"}
+)
 
 
 def _percentile(samples: list[float], ratio: float) -> float:
@@ -43,6 +45,8 @@ class AudioMetrics:
         self.encoder_gap_max_ms = 0.0
         self.source_stall_count = 0
         self.source_stall_max_ms = 0.0
+        self.source_gap_count = 0
+        self.source_gap_max_ms = 0.0
         self.silence_fill_count = 0
         self.lag_skip_count = 0
         self.lag_skip_bytes = 0
@@ -104,6 +108,19 @@ class AudioMetrics:
             self.source_stall_max_ms = ms
         self.record_event("source_stall", ms=ms)
 
+    def note_source_gap(self, ms: float) -> None:
+        """A hole between two delivered PCM chunks, shorter than a stall.
+
+        This is the fingerprint of a bursty source: the listener hears the
+        audio arrive in lumps even though the average rate is right. Counting
+        it next to the encoder-side gaps separates "the sender delivers in
+        bursts" from "our reading introduced the bursts".
+        """
+        self.source_gap_count += 1
+        if ms > self.source_gap_max_ms:
+            self.source_gap_max_ms = ms
+        self.record_event("source_gap", ms=ms)
+
     def note_silence_fill(self) -> None:
         self.silence_fill_count += 1
 
@@ -161,6 +178,8 @@ class AudioMetrics:
             "source": {
                 "stalls": self.source_stall_count,
                 "stall_max_ms": round(self.source_stall_max_ms, 1),
+                "gaps": self.source_gap_count,
+                "gap_max_ms": round(self.source_gap_max_ms, 1),
                 "silence_fills": self.silence_fill_count,
             },
             "client": {

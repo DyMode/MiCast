@@ -1283,6 +1283,19 @@ class AudioBridge:
         self._gc_dead_streams()
         self._plan = compute_plan(settings)
 
+    @staticmethod
+    def _pipeline_needs_rebuild(pipeline) -> bool:
+        """True when a pipeline cannot serve the next session as-is.
+
+        A pipeline whose PCM reader finished reports either running == False or
+        a non-running status. Test doubles expose Mock attributes instead of
+        real ones, so both checks demand a real bool / str before acting.
+        """
+        if getattr(pipeline, "running", True) is False:
+            return True
+        status = getattr(pipeline, "status", "running")
+        return isinstance(status, str) and status != "running"
+
     async def _local_session_start(self, receiver_id: str, resume: bool = False) -> None:
         self._active_sessions.add(receiver_id)
         # A pipeline whose encoder exited cleanly (its PCM reader hit EOF when
@@ -1293,7 +1306,8 @@ class AudioBridge:
         stale = [
             key
             for key, pipeline in self._pipelines.items()
-            if (key == receiver_id or key.startswith(f"{receiver_id}-")) and not pipeline.running
+            if (key == receiver_id or key.startswith(f"{receiver_id}-"))
+            and self._pipeline_needs_rebuild(pipeline)
         ]
         if stale:
             async with self._restart_lock:
@@ -1681,7 +1695,9 @@ class AudioBridge:
                 logger.warning("session_start called without device_id in multi-receiver mode")
                 return
         pipeline = self._pipelines.get(device_id) or self._airplay2_pipelines.get(device_id)
-        if pipeline and not pipeline.running and device_id in self._airplay2_pipelines:
+        if pipeline and device_id in self._airplay2_pipelines and self._pipeline_needs_rebuild(
+            pipeline
+        ):
             # Same revival rule as classic receivers: a pipeline whose reader
             # finished needs a rebuild, not a start() that reuses it.
             async with self._restart_lock:

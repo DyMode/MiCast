@@ -46,6 +46,11 @@ SOURCE_SILENCE_CHUNK_BYTES = 32768
 # 3.5-4.6s of silence per 6s (audible stutter, invisible to every diagnostic
 # counter). Still far below the speaker's ~2s abandonment threshold.
 SOURCE_SILENCE_GRACE_PERIODS = 3
+# A wait longer than this for real source bytes (while a session is live) means
+# the sender itself delivered in lumps rather than a steady stream — the
+# "accumulate then hiccup" shape listeners report. Chunk cadence is ~170ms, so
+# the threshold sits comfortably above normal jitter.
+SOURCE_GAP_MS = 150.0
 # Encoded output is expected at roughly the audio duration of the previous
 # chunk; a longer gap means the encoder thread stalled (nothing lost, just
 # delayed) — the one hiccup cause no drop counter can see.
@@ -132,6 +137,9 @@ class SpeakerPipeline:
         # report an equivalent figure.
         self._input_ahead_ms = 0.0
         self._input_fed_bytes = 0
+        # Timestamp of the last real byte delivered by the PCM source, used to
+        # measure how long the source leaves us waiting (see SOURCE_GAP_MS).
+        self._last_source_read_at = 0.0
 
     def spectrum_bands(self) -> list[float] | None:
         """Latest spectrum bands (0..1), or None when the pipeline is idle."""
@@ -546,6 +554,21 @@ class SpeakerPipeline:
                 chunk = await asyncio.wait_for(
                     reader.read(SOURCE_SILENCE_CHUNK_BYTES), chunk_seconds
                 )
+                # How long the source made us wait for real bytes: a hole well
+                # above the chunk cadence means the SENDER delivers in bursts
+                # (the audio the listener hears arrive in lumps). Measured here
+                # rather than downstream so it cannot be confused with encoder
+                # or delay-line behaviour.
+                now = asyncio.get_running_loop().time()
+                previous_read = getattr(self, "_last_source_read_at", 0.0)
+                if chunk and previous_read:
+                    waited_ms = (now - previous_read) * 1000
+                    session_active = getattr(self, "_session_active", None)
+                    in_session = session_active is None or session_active()
+                    if waited_ms > SOURCE_GAP_MS and in_session:
+                        metrics.note_source_gap(waited_ms)
+                if chunk:
+                    self._last_source_read_at = now
                 return chunk, False
             except TimeoutError:
                 continue
@@ -622,7 +645,8 @@ class SpeakerPipeline:
                 # Only a gap while a sender session is live is a stall: the
                 # pipeline legitimately produces nothing between sessions, and
                 # counting that reported an idle afternoon as a 272s stall.
-                in_session = self._session_active is None or self._session_active()
+                session_active = getattr(self, "_session_active", None)
+                in_session = session_active is None or session_active()
                 if seen > 1 and in_session:
                     metrics.note_encode(gap_ms)
                     # The baseline is this pipeline's OWN recent cadence. The
