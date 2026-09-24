@@ -93,18 +93,39 @@ function formatDuration(seconds: number | null): string {
   return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
+const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+
+/**
+ * Live sender sessions split by ingress. AirPlay 2 runs on shairport + PCM
+ * sources and never opens a RAOP session, so counting the RAOP counters alone
+ * reported an idle input while an AirPlay 2 sender was playing. An older
+ * backend without `sessions` degrades to the RAOP-only reading.
+ */
+function inputSessions(debug: DebugState | null): { classic: number; airplay2: number; total: number } {
+  const raop = Object.values(debug?.diagnostics?.raop || {});
+  const classic = sum(raop.map((item) => item.active_sessions));
+  const airplay2 = debug?.diagnostics?.sessions?.airplay2?.length ?? 0;
+  return { classic, airplay2, total: classic + airplay2 };
+}
+
+function inputSubtitle(sessions: { classic: number; airplay2: number; total: number }): string {
+  if (sessions.total === 0) return "目前没有手机传输音频";
+  if (sessions.classic && sessions.airplay2) return `${sessions.classic} 个手机与 AirPlay 2 正在传输音频`;
+  if (sessions.airplay2) return "AirPlay 2 正在传输音频";
+  return `${sessions.classic} 个手机正在传输音频`;
+}
+
 export function renderConnectionChecks(debug: DebugState | null, state: State): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
   const streams = Object.values(debug?.diagnostics?.streams || {});
-  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
-  const activeSessions = sum(raop.map((item) => item.active_sessions));
+  const sessions = inputSessions(debug);
   const streamClients = sum(streams.filter((item) => item.flowing).map((item) => item.clients));
-  const playbackActive = activeSessions > 0 || streamClients > 0;
+  const playbackActive = sessions.total > 0 || streamClients > 0;
   const transportErrors = sum(raop.map((item) => item.dropped_packets + item.decode_errors)) + sum(streams.map((item) => item.dropped_chunks));
   const inputBufferMs = Math.max(0, ...raop.map((item) => item.input_buffer_ms || 0));
   const streamLatency = Math.max(0, ...streams.filter((item) => item.flowing).map((item) => item.latency?.estimated_ms || 0));
   const latencyMs = inputBufferMs + streamLatency;
-  const latencyLabel = activeSessions === 0
+  const latencyLabel = sessions.total === 0
     ? "等待音频"
     : streamClients === 0
       ? "等待音箱取流"
@@ -112,12 +133,12 @@ export function renderConnectionChecks(debug: DebugState | null, state: State): 
   const latencyState = streamClients === 0 ? "未测量" : latencyMs <= 500 ? "稳定" : latencyMs <= 1000 ? "较高" : "过高";
   return `
       <div class="cell">
-        <div class="cell-icon ${activeSessions > 0 ? "green" : "gray"}">${icon("antenna")}</div>
+        <div class="cell-icon ${sessions.total > 0 ? "green" : "gray"}">${icon("antenna")}</div>
         <div class="cell-content">
           <span class="cell-title">音频输入</span>
-          <span class="cell-subtitle">${activeSessions > 0 ? `${activeSessions} 个手机正在传输音频` : "目前没有手机传输音频"}</span>
+          <span class="cell-subtitle">${inputSubtitle(sessions)}</span>
         </div>
-        <span class="plain-state ${activeSessions > 0 ? "success" : ""}">${activeSessions > 0 ? "已连接" : "等待播放"}</span>
+        <span class="plain-state ${sessions.total > 0 ? "success" : ""}">${sessions.total > 0 ? "已连接" : "等待播放"}</span>
       </div>
       <div class="cell">
         <div class="cell-icon ${streamClients > 0 ? "green" : "gray"}">${icon("speaker")}</div>
@@ -147,8 +168,7 @@ export function renderConnectionChecks(debug: DebugState | null, state: State): 
 
 export function renderDebugPanel(state: State, debug: DebugState | null): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
-  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
-  const activeSessions = sum(raop.map((item) => item.active_sessions));
+  const sessions = inputSessions(debug);
   const selectedStream = findSelectedAirPlayStream(state, debug);
   const selectedSessionActive = selectedStream
     ? (debug?.diagnostics.raop[selectedStream.id]?.active_sessions || 0) > 0
@@ -184,7 +204,7 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
       <summary><span><strong>技术计数</strong><small>传输、时钟与编码数据</small></span></summary>
       <div class="technical-metrics">
         <span>服务：${debug?.bridge_status.status || "-"}</span>
-        <span>AirPlay 会话：${activeSessions}</span>
+        <span>AirPlay 会话：经典 ${sessions.classic} · AirPlay 2 ${sessions.airplay2}</span>
         <span>时钟响应：${sum(raop.map((item) => item.timing_responses))}/${sum(raop.map((item) => item.timing_requests))}</span>
         <span>补包：${sum(raop.map((item) => item.resend_requests))}</span>
         <span>已发送：${((debug?.stream_bytes_sent ?? 0) / 1024).toFixed(1)} KB</span>

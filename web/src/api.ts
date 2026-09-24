@@ -302,6 +302,8 @@ export interface DebugState {
   diagnostics: {
     raop: Record<string, { active_sessions: number; total_sessions: number; decode_errors: number; dropped_packets: number; resend_requests: number; timing_requests: number; timing_responses: number; input_buffer_ms: number }>;
     streams: Record<string, { clients: number; bytes_sent: number; dropped_chunks: number; flowing: boolean; latency: LatencyMetrics }>;
+    /** Live sender sessions split by ingress; absent on older backends. */
+    sessions?: { active: string[]; classic: string[]; airplay2: string[] };
   };
   logs: Array<{ time: string; level: string; logger: string; message: string }>;
 }

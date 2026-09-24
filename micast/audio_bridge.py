@@ -183,13 +183,35 @@ class AudioBridge:
             }
             for receiver_id in self._stream_server.stream_ids()
         }
+        airplay2_sessions = self._active_sessions & self._airplay2_entry_ids()
         return {
             "raop": raop,
             "streams": streams,
             "sinks": self._stream_server.sink_latency_metrics(),
             "airplay_targets": (self._airplay_targets.statuses() if self._airplay_targets else {}),
             "dlna_targets": self._dlna_targets.statuses() if self._dlna_targets else {},
+            # Live sender sessions, split by ingress. AirPlay 2 never opens a RAOP
+            # session (shairport + PCM sources feed its pipelines), so the RAOP
+            # counters alone report an idle input while an AirPlay 2 sender plays.
+            "sessions": {
+                "active": sorted(self._active_sessions),
+                "classic": sorted(self._active_sessions - airplay2_sessions),
+                "airplay2": sorted(airplay2_sessions),
+            },
         }
+
+    def _airplay2_entry_ids(self) -> set[str]:
+        """Ids whose audio arrives through the AirPlay 2 ingress.
+
+        Configured instances cover every live session; the runtime maps keep an
+        entry recognised for as long as its session lives, even when the config
+        entry was removed or disabled mid-play.
+        """
+        ids = {item.id for item in settings.airplay2_instances}
+        ids.update(self._airplay2_runtime)
+        ids.update(self._airplay2_sources)
+        ids.update(self._airplay2_tees)
+        return ids
 
     def _receiver_statuses(self) -> list[dict]:
         if settings.airplay_engine == "local":

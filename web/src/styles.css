@@ -70,6 +70,10 @@
   --header-height: 3.75rem;
   --tab-bar-height: 4rem;
   --sidebar-width: 13.5rem;
+  /* Height of the fnOS-only toolbar that hosts the theme action (see the
+     .is-fnos rules further down); 0 everywhere else so the shared layout
+     calculations below stay correct. */
+  --fnos-toolbar-height: 0rem;
 }
 
 /* Manual dark theme wins over system */
@@ -2880,9 +2884,10 @@ html.is-embedded {
   }
   /* fnOS owns the native title bar, so its embedded page has no MiCast header
      for the horizontal player. Use the quiet space below the navigation as a
-     compact sidebar controller instead. */
+     compact sidebar controller instead. The fnOS toolbar shifts that navigation
+     down, so the controller follows it. */
   .is-embedded .now-playing {
-    top: calc(var(--space-lg) + 20.75rem + var(--space-md));
+    top: calc(var(--space-lg) + 20.75rem + var(--space-md) + var(--fnos-toolbar-height));
     left: max(
       var(--space-2xl),
       calc((100vw - 1180px) / 2 + var(--space-2xl))
@@ -2890,7 +2895,7 @@ html.is-embedded {
     right: auto;
     bottom: auto;
     width: var(--sidebar-width);
-    max-height: calc(100dvh - 24rem);
+    max-height: calc(100dvh - 24rem - var(--fnos-toolbar-height));
     padding: var(--space-sm);
     border-radius: var(--radius-lg);
     background: var(--surface);
@@ -2957,16 +2962,31 @@ html.is-embedded {
   .is-fnos .app-brand { gap: 0; }
 }
 
-/* fnOS supplies the native mobile title bar. Keep the web app content below
-   it, without rendering a second header row inside the app surface. */
+/* fnOS supplies the native title bar above the web view, so the MiCast header is
+   dropped — but its theme action must stay reachable. It gets a slim toolbar row
+   of its own instead of floating in a corner: a fixed button covered the link-map
+   legend, the settings switches and the last row of every scroll list, and the
+   bottom band belongs to the tab bar, the player and fnOS's own playback pill.
+   A row in the shell can never be covered — the scroll container ends above it. */
+html.is-fnos { --fnos-toolbar-height: 2.75rem; }
 .is-fnos .app-header { display: none; }
 .is-fnos .app-body { padding-top: 0; }
+/* The toolbar owns the top gap the page padding used to provide. */
+html.is-fnos .main-content { padding-top: var(--space-2xs); }
+.fnos-toolbar { display: none; }
+.is-fnos .fnos-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  height: calc(var(--fnos-toolbar-height) + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top)
+    max(var(--space-md), env(safe-area-inset-right))
+    0
+    max(var(--space-md), env(safe-area-inset-left));
+}
 .fnos-theme-toggle { display: none; }
 .is-fnos .fnos-theme-toggle {
-  position: fixed;
-  top: var(--space-sm);
-  right: max(var(--space-md), env(safe-area-inset-right));
-  z-index: 85;
   display: grid;
   width: 2.75rem;
   height: 2.75rem;
@@ -2975,6 +2995,17 @@ html.is-embedded {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: var(--shadow-sm);
+}
+
+@media (min-width: 1024px) {
+  /* Line the toolbar up with the app body's own frame and gutter. */
+  .is-fnos .fnos-toolbar {
+    width: 100%;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding-right: max(var(--space-2xl), env(safe-area-inset-right));
+    padding-left: max(var(--space-2xl), env(safe-area-inset-left));
+  }
 }
 
 .now-playing-icon {
@@ -3827,7 +3858,7 @@ html.is-embedded {
 
   /* Link map: the empty state must not compete with inactive nodes and the legend. */
   .main-content[data-active-section="topology"] {
-    min-height: calc(100dvh - var(--header-height));
+    min-height: calc(100dvh - var(--header-height) - var(--fnos-toolbar-height));
   }
   .topology-stage {
     min-height: 20rem;

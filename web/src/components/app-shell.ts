@@ -35,6 +35,12 @@ export function renderAppShell(
         </div>
       </header>
 
+      <div class="fnos-toolbar">
+        <button class="icon-button fnos-theme-toggle" id="fnos-theme-toggle" aria-label="切换主题" title="${themeLabel(theme)}">
+          ${themeIcon(theme)}
+        </button>
+      </div>
+
       <div class="app-body">
         <nav class="sidebar" role="tablist" aria-label="主导航">
           ${navItems
@@ -65,9 +71,6 @@ export function renderAppShell(
           )
           .join("")}
       </nav>
-      <button class="icon-button fnos-theme-toggle" id="fnos-theme-toggle" aria-label="切换主题" title="${themeLabel(theme)}">
-        ${themeIcon(theme)}
-      </button>
     </div>
   `;
 }
