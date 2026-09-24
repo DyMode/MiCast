@@ -582,7 +582,9 @@ class StreamServer:
                             held -= len(head)
                             skipped += len(head)
                         if skipped:
-                            metrics.note_lag_skip(skipped, skipped / byte_rate * 1000)
+                            metrics.note_lag_skip(
+                            skipped, skipped / byte_rate * 1000, device_id
+                        )
                         if skipped and state is not None:
                             state["lag_drops"] = int(state.get("lag_drops") or 0) + 1
                             if state["lag_drops"] == 1 or state["lag_drops"] % 20 == 0:

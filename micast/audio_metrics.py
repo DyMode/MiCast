@@ -92,7 +92,7 @@ class AudioMetrics:
                 f" ({detail})" if detail else "",
             )
 
-    def note_encode(self, ms: float) -> None:
+    def note_encode(self, ms: float, entry: str | None = None) -> None:
         self.encode_count += 1
         self._encode_samples.append(ms)
         if ms > self.encode_max_ms:
@@ -101,9 +101,9 @@ class AudioMetrics:
             self.encode_stall_count += 1
             if ms > self.encode_stall_max_ms:
                 self.encode_stall_max_ms = ms
-            self.record_event("encoder_stall", ms=ms)
+            self.record_event("encoder_stall", ms=ms, entry=entry, label="编码停顿")
 
-    def note_encoder_gap(self, ms: float, expected_ms: float) -> None:
+    def note_encoder_gap(self, ms: float, expected_ms: float, entry: str | None = None) -> None:
         self.encoder_gap_count += 1
         if ms > self.encoder_gap_max_ms:
             self.encoder_gap_max_ms = ms
@@ -111,15 +111,17 @@ class AudioMetrics:
             "encoder_gap",
             ms=ms,
             detail=f"expected {expected_ms:.0f}ms",
+            entry=entry,
+            label="编码输出间隔",
         )
 
-    def note_source_stall(self, ms: float) -> None:
+    def note_source_stall(self, ms: float, entry: str | None = None) -> None:
         self.source_stall_count += 1
         if ms > self.source_stall_max_ms:
             self.source_stall_max_ms = ms
-        self.record_event("source_stall", ms=ms)
+        self.record_event("source_stall", ms=ms, entry=entry, label="音源停滞")
 
-    def note_source_gap(self, ms: float) -> None:
+    def note_source_gap(self, ms: float, entry: str | None = None) -> None:
         """A hole between two delivered PCM chunks, shorter than a stall.
 
         This is the fingerprint of a bursty source: the listener hears the
@@ -130,17 +132,17 @@ class AudioMetrics:
         self.source_gap_count += 1
         if ms > self.source_gap_max_ms:
             self.source_gap_max_ms = ms
-        self.record_event("source_gap", ms=ms)
+        self.record_event("source_gap", ms=ms, entry=entry, label="音源空缺")
 
     def note_silence_fill(self) -> None:
         self.silence_fill_count += 1
 
-    def note_lag_skip(self, bytes_: int, ms: float) -> None:
+    def note_lag_skip(self, bytes_: int, ms: float, entry: str | None = None) -> None:
         self.lag_skip_count += 1
         self.lag_skip_bytes += bytes_
         if ms > self.lag_skip_max_ms:
             self.lag_skip_max_ms = ms
-        self.record_event("lag_skip", ms=ms)
+        self.record_event("lag_skip", ms=ms, entry=entry, label="延迟线跳过")
 
     def note_queue_drops(self, count: int, queue_ms: float) -> None:
         self.queue_drop_count += count
@@ -168,7 +170,9 @@ class AudioMetrics:
         self.client_connect_count += 1
         if replacing:
             self.client_reconnect_count += 1
-            self.record_event("client_reconnect", detail=device_id)
+            self.record_event(
+                "client_reconnect", detail=device_id, entry=device_id, label="音箱重连"
+            )
 
     # -- reporting ---------------------------------------------------------
     def snapshot(self) -> dict:

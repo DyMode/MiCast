@@ -123,6 +123,11 @@ function ringStateClass(state: RingState): string {
   return "";
 }
 
+/** Stream ids carry suffixes (-q1, -L, -R); several of them belong to one entry. */
+function baseEntryId(streamId: string): string {
+  return streamId.replace(/-q\d+$/, "").replace(/-(L|R)$/, "");
+}
+
 function entryLabel(entryId: string, state: State): string {
   const receiver = state.fullConfig?.receivers?.find((item) => item.id === entryId);
   if (receiver?.name) return receiver.name;
@@ -166,16 +171,16 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
     .map(([entryId, health]) => {
       const label = ENTRY_STATE_LABELS[health.state] || health.state;
       const action = health.last_action ? ENTRY_ACTION_LABELS[health.last_action.replace(/\(rate-limited\)$/, "")] || health.last_action : "";
-      const detail = [
-        health.reason,
+      const parts = [
+        health.reason && !label.includes(health.reason) && !health.reason.includes(label)
+          ? health.reason
+          : "",
         action ? `已${action}${health.last_action_ok === true ? "·已恢复" : health.escalations > 1 ? `（第 ${health.escalations} 次）` : ""}` : "",
         health.buffer_override_s ? `缓冲已加大到 ${health.buffer_override_s}s` : "",
-      ]
-        .filter(Boolean)
-        .join(" · ");
+      ].filter(Boolean);
       return {
-        severity: health.state === "unhealthy" ? "bad" : health.state === "bursty" ? "warn" : "warn",
-        text: `${entryLabel(entryId, state)}：${label}${detail ? ` · ${detail}` : ""}`,
+        severity: health.state === "unhealthy" ? "bad" : "warn",
+        text: `${entryLabel(entryId, state)}：${[label, ...parts].join(" · ")}`,
       };
     });
 
@@ -234,12 +239,18 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       state: streamState,
       value: !playing
         ? "无连接"
-        : `${flowingClients} 路取流${droppedMs ? ` · 丢弃 ${droppedMs}ms` : ""}`,
+        : `${flowingClients} 台音箱取流${droppedMs ? ` · 丢弃 ${droppedMs}ms` : ""}`,
     },
     {
       label: "音箱",
       state: speakerState,
-      value: !playing ? "未连接" : flowingClients > 0 ? "正在接收" : "未取流",
+      value: !playing
+        ? "未连接"
+        : flowingClients > 1
+          ? `${flowingClients} 台正在接收`
+          : flowingClients === 1
+            ? "正在接收"
+            : "未取流",
     },
   ];
 
@@ -253,11 +264,34 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
           : speakerState === "ok" && sourceState !== "bad" && encodeState !== "bad"
             ? "正在播放"
             : "播放异常";
+  const serving = Object.entries(debug?.diagnostics?.streams || {}).filter(
+    ([, item]) => item.clients > 0,
+  );
+  const servingNames = [...new Set(serving.map(([id]) => entryLabel(baseEntryId(id), state)))];
+  const perStreamLatency = serving
+    .map(([, item]) => (item.input_buffer_ms || 0) + (item.latency?.estimated_ms || 0))
+    .filter((value) => value > 0);
+  const format = `${debug?.audio_config.format.toUpperCase()} ${
+    debug?.audio_config.sample_rate ? `${debug.audio_config.sample_rate / 1000}k` : ""
+  }`.trim();
+  const latencyText = perStreamLatency.length
+    ? perStreamLatency.length > 1
+      ? `${Math.min(...perStreamLatency)}–${Math.max(...perStreamLatency)}ms`
+      : `约 ${perStreamLatency[0]}ms`
+    : "";
   const headlineDetail = !playing
     ? sessions.total === 0
       ? "没有正在投放的音频"
       : "发送端在场但还没有音箱取流"
-    : `${debug?.audio_config.format.toUpperCase()} ${debug?.audio_config.sample_rate ? `${debug.audio_config.sample_rate / 1000}k` : ""} · 延迟约 ${latencyMs}ms`;
+    : [
+        servingNames.length > 1
+          ? `${servingNames.length} 路播放中 · ${servingNames.join(" / ")}`
+          : servingNames[0],
+        format,
+        latencyText ? `延迟 ${latencyText}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
 
   const events = (audio?.events || []).slice(-5).reverse();
 
@@ -314,7 +348,8 @@ function formatEvent(
 ): string {
   const time = formatClock(event.at);
   if (event.entry && event.label) {
-    return `${time} ${entryLabel(event.entry, state)} ${event.label}`;
+    const suffix = event.ms ? ` ${Math.round(event.ms)}ms` : "";
+    return `${time} ${entryLabel(event.entry, state)} ${event.label}${suffix}`;
   }
   if (DETAIL_EVENTS.has(event.kind) && event.detail) {
     return `${time} ${event.detail}`;

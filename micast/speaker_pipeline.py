@@ -582,7 +582,7 @@ class SpeakerPipeline:
                     session_active = getattr(self, "_session_active", None)
                     in_session = session_active is None or session_active()
                     if waited_ms > SOURCE_GAP_MS and in_session:
-                        metrics.note_source_gap(waited_ms)
+                        metrics.note_source_gap(waited_ms, self._stream_id)
                 if chunk:
                     self._last_source_read_at = now
                     gaps = getattr(self, "_source_gaps", None)
@@ -597,7 +597,9 @@ class SpeakerPipeline:
         )
         # Report the silence the source actually produced: the grace window is
         # a constant, so quoting it back hid whether a stall was 0.5s or 30s.
-        metrics.note_source_stall((asyncio.get_running_loop().time() - started) * 1000)
+        metrics.note_source_stall(
+            (asyncio.get_running_loop().time() - started) * 1000, self._stream_id
+        )
         metrics.note_silence_fill()
         return b"\x00" * SOURCE_SILENCE_CHUNK_BYTES, True
 
@@ -667,7 +669,7 @@ class SpeakerPipeline:
                 session_active = getattr(self, "_session_active", None)
                 in_session = session_active is None or session_active()
                 if seen > 1 and in_session:
-                    metrics.note_encode(gap_ms)
+                    metrics.note_encode(gap_ms, self._stream_id)
                     # The baseline is this pipeline's OWN recent cadence. The
                     # first cut of this metric derived it from the previous
                     # chunk's byte length over the PCM byte rate — but these
@@ -678,7 +680,7 @@ class SpeakerPipeline:
                     if len(intervals) >= 10:
                         typical = sorted(intervals)[len(intervals) // 2]
                         if gap_ms > max(typical * 2.5, typical + ENCODER_GAP_MS):
-                            metrics.note_encoder_gap(gap_ms, typical)
+                            metrics.note_encoder_gap(gap_ms, typical, self._stream_id)
                     intervals.append(gap_ms)
                 await self._stream_server.broadcast(self._stream_id, chunk)
         except asyncio.CancelledError:
