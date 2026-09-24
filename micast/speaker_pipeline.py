@@ -105,7 +105,6 @@ class SpeakerPipeline:
         self._session_active = session_active
         self._on_source_stall = on_source_stall
         self._stall_task: asyncio.Task | None = None
-        self._recovery_task: asyncio.Task | None = None
         self._aux_tasks: set[asyncio.Task] = set()
         self._generation = 0
         self._source_restart_lock = asyncio.Lock()
@@ -140,6 +139,9 @@ class SpeakerPipeline:
         # Timestamp of the last real byte delivered by the PCM source, used to
         # measure how long the source leaves us waiting (see SOURCE_GAP_MS).
         self._last_source_read_at = 0.0
+        # Recent waits between source chunks: the supervisor reads their shape
+        # to tell a steady source from a bursty one.
+        self._source_gaps: deque[float] = deque(maxlen=20)
 
     def spectrum_bands(self) -> list[float] | None:
         """Latest spectrum bands (0..1), or None when the pipeline is idle."""
@@ -154,6 +156,26 @@ class SpeakerPipeline:
         if self._encoder is None:
             return {"in": 0, "out": 0}
         return self._encoder.drop_stats()
+
+    def source_idle_ms(self) -> float | None:
+        """Milliseconds since the PCM source last delivered real bytes.
+
+        ``None`` means this pipeline has not read anything yet (no session has
+        fed it), which the supervisor treats differently from a stalled one.
+        """
+        last = getattr(self, "_last_source_read_at", 0.0)
+        if not last:
+            return None
+        return max(0.0, (time.monotonic() - last) * 1000)
+
+    def source_bursty(self) -> bool:
+        """True when the source keeps leaving long gaps between chunks.
+
+        A handful of long waits in the recent window is the fingerprint of a
+        sender that delivers in lumps — the "accumulate then hiccup" shape.
+        """
+        gaps = getattr(self, "_source_gaps", ())
+        return sum(1 for gap in gaps if gap > SOURCE_GAP_MS) >= 4
 
     def input_stats(self) -> dict[str, float]:
         """Input-side pacing for this pipeline.
@@ -408,18 +430,12 @@ class SpeakerPipeline:
         self._stall_task = None
 
         current = asyncio.current_task()
-        if self._recovery_task and self._recovery_task is not current:
-            self._recovery_task.cancel()
-            await asyncio.gather(self._recovery_task, return_exceptions=True)
-        if self._recovery_task is not current:
-            self._recovery_task = None
         # The stall-recovery aux task runs INSIDE this pipeline and reaches
         # stop() via bridge._recover_stalled_source -> rebuild. Cancelling and
         # gathering the current task here makes Task.cancel recurse into its
         # own gather child (~1000 frames, RecursionError on py3.14) and wedges
         # the stop forever — the exact "AirPlay 2 dead after PCM stall" crash.
-        # Skip the current task like _recovery_task above; it unwinds on its
-        # own once stop() returns.
+        # Skip the current task; it unwinds on its own once stop() returns.
         for task in list(self._aux_tasks):
             if task is not current:
                 task.cancel()
@@ -569,6 +585,9 @@ class SpeakerPipeline:
                         metrics.note_source_gap(waited_ms)
                 if chunk:
                     self._last_source_read_at = now
+                    gaps = getattr(self, "_source_gaps", None)
+                    if gaps is not None:
+                        gaps.append(waited_ms if previous_read else 0.0)
                 return chunk, False
             except TimeoutError:
                 continue
@@ -731,29 +750,12 @@ class SpeakerPipeline:
                     self._stream_id,
                     code,
                 )
-                self._status = "restarting"
-                if self._recovery_task is None or self._recovery_task.done():
-                    generation = self._generation
-                    self._recovery_task = asyncio.create_task(self._delayed_restart(generation))
+                # Recovery belongs to the audio supervisor (one authority, one
+                # ladder, verified afterwards). This watcher only records the
+                # fault: several observers each restarting on their own was the
+                # churn the supervisor replaced.
+                self._status = "error"
         except asyncio.CancelledError:
             pass
         except Exception:
             logger.exception("Error watching encoder for %s", self._stream_id)
-
-    async def _delayed_restart(self, generation: int) -> None:
-        try:
-            await asyncio.sleep(3)
-            # A manual/config-driven rebuild supersedes this recovery. Without
-            # the generation check an old encoder failure can stop a healthy
-            # replacement pipeline several seconds later.
-            if self._running and self._generation == generation:
-                await self.stop()
-                await self.start()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Delayed pipeline recovery failed for %s", self._stream_id)
-            self._status = "error"
-        finally:
-            if self._recovery_task is asyncio.current_task():
-                self._recovery_task = None

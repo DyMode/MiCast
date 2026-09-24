@@ -51,6 +51,10 @@ class AudioBridge:
         # release the speaker the instance just left (it would otherwise keep
         # pulling the old stream next to the new one).
         self._airplay2_targets: dict[str, str] = {}
+        # Set by attach_device_manager(): the supervisor re-issues playback
+        # through it (the bridge itself never talks to speakers directly).
+        self._device_manager = None
+        self._supervisor = None
         self._tees: dict[str, PCMTee] = {}
         self._running = False
         self._status = "idle"
@@ -210,6 +214,9 @@ class AudioBridge:
             "sinks": self._stream_server.sink_latency_metrics(),
             "airplay_targets": (self._airplay_targets.statuses() if self._airplay_targets else {}),
             "dlna_targets": self._dlna_targets.statuses() if self._dlna_targets else {},
+            # Per-entry health: which state the arbiter put each entry in,
+            # its reason, and the last recovery action it took.
+            "entries": self._supervisor.snapshot() if self._supervisor else {},
             # Cumulative, cross-reconnect counters plus a rolling event log:
             # connection-scoped counters reset whenever a speaker reconnects,
             # which is exactly when a periodic stutter becomes invisible.
@@ -1756,6 +1763,133 @@ class AudioBridge:
         """How many speakers are currently pulling a stream (ground truth for
         "is audio really flowing out")."""
         return self._stream_server.client_count(stream_id)
+
+    # -- supervisor primitives ---------------------------------------------
+    # The audio supervisor owns the recovery policy; these are the idempotent
+    # building blocks it drives (and the signals it judges from).
+    def attach_device_manager(self, device_manager) -> None:
+        """Give the supervisor primitives access to the speaker controller."""
+        self._device_manager = device_manager
+
+    def attach_supervisor(self, supervisor) -> None:
+        """Expose the health arbiter's state in diagnostics."""
+        self._supervisor = supervisor
+
+    def entry_ids(self) -> list[str]:
+        """Every audio entry: classic receivers plus AirPlay 2 instances."""
+        return sorted(set(self._pipelines) | set(self._airplay2_pipelines))
+
+    def entry_stream_ids(self, entry_id: str) -> list[str]:
+        return [
+            stream_id
+            for stream_id in self._stream_server.stream_ids()
+            if stream_id == entry_id or stream_id.startswith(f"{entry_id}-")
+        ]
+
+    def entry_targets(self, entry_id: str) -> list[str]:
+        return settings.receiver_targets(entry_id)
+
+    def entry_pipeline_usable(self, entry_id: str) -> bool:
+        """False when no pipeline can serve the next session as-is.
+
+        A pipeline whose PCM reader finished (clean encoder exit) looks idle
+        forever; reviving it needs a rebuild, so it must not be mistaken for
+        "healthy but quiet".
+        """
+        streams = self.entry_stream_ids(entry_id)
+        pipelines = [
+            pipeline
+            for stream_id in streams
+            if (pipeline := self.pipeline_for_stream(stream_id)) is not None
+        ]
+        if not pipelines:
+            return False
+        return all(
+            pipeline.running and pipeline.status == "running" for pipeline in pipelines
+        )
+
+    def entry_source_idle_ms(self, entry_id: str) -> float | None:
+        """Milliseconds since the entry's PCM source last delivered real bytes."""
+        idles = [
+            idle
+            for stream_id in self.entry_stream_ids(entry_id)
+            if (pipeline := self.pipeline_for_stream(stream_id)) is not None
+            and (idle := pipeline.source_idle_ms()) is not None
+        ]
+        if not idles:
+            return None
+        return max(idles)
+
+    def entry_source_bursty(self, entry_id: str) -> bool:
+        """True when the source delivers in lumps rather than steadily."""
+        return any(
+            pipeline.source_bursty()
+            for stream_id in self.entry_stream_ids(entry_id)
+            if (pipeline := self.pipeline_for_stream(stream_id)) is not None
+        )
+
+    def stream_served(self, stream_id: str) -> bool:
+        """A speaker is connected AND bytes moved recently (``is_flowing``)."""
+        return self._stream_server.client_count(stream_id) > 0 and (
+            self._stream_server.is_flowing(stream_id)
+        )
+
+    async def rebuild_entry(self, entry_id: str) -> None:
+        """Give an entry fresh pipelines (new PCM reader and tee). Idempotent."""
+        async with self._restart_lock:
+            if entry_id in self._airplay2_pipelines or entry_id in self._airplay2_sources:
+                await self._rebuild_airplay2_instances_locked({entry_id})
+            else:
+                await self._rebuild_classic_entries_locked({entry_id})
+        logger.info("Audio supervisor rebuilt entry %s", entry_id)
+
+    async def recover_source(self, entry_id: str) -> None:
+        """Restart the entry's PCM source without touching the speaker."""
+        stream_ids = self.entry_stream_ids(entry_id)
+        await self._recover_stalled_source(stream_ids[0] if stream_ids else entry_id)
+
+    async def kick_entry_clients(self, entry_id: str) -> None:
+        """Drop the entry's speaker connections so they re-attach fresh."""
+        for stream_id in self.entry_stream_ids(entry_id):
+            self._stream_server.kick_clients(stream_id)
+
+    async def reissue_entry_play(self, entry_id: str) -> None:
+        """Re-issue the entry's play command with a fresh cache-buster.
+
+        Ownership is checked per speaker: a speaker that moved to another
+        receiver (a protocol switch, say) must not be stolen back.
+        """
+        url = self._stream_url_for_entry(entry_id)
+        if not url or self._device_manager is None:
+            return
+        for did in self.entry_targets(entry_id):
+            owner = self._device_manager.owner_of(did)
+            if owner not in (None, entry_id):
+                continue
+            suffix = settings.stream_suffix(entry_id, did)
+            play_url = f"{url}{suffix}/for/{entry_id}/{did}?s={time.time_ns()}"
+            try:
+                await self._device_manager.play_stream(
+                    did, play_url, owner=entry_id, force=True
+                )
+            except Exception:
+                logger.exception("Supervisor play re-issue failed for %s on %s", entry_id, did)
+
+    def _stream_url_for_entry(self, entry_id: str) -> str | None:
+        for stream_id in self.entry_stream_ids(entry_id):
+            url = f"http://{settings.effective_stream_host}:{settings.stream_port}/stream/{stream_id}"
+            return url
+        return None
+
+    def set_entry_buffer(self, entry_id: str, seconds: float | None) -> None:
+        """Widen (or release) one entry's delay-line reserve.
+
+        Bursty sources are the stall cause no recovery action can fix; extra
+        slack is the remedy, applied per entry so other speakers keep their
+        latency. ``None`` restores the global default.
+        """
+        for stream_id in self.entry_stream_ids(entry_id):
+            self._stream_server.set_buffer_override(stream_id, seconds)
 
     def drop_stream_clients(self, receiver_id: str) -> None:
         """Close speaker-side HTTP connections of a receiver's streams.

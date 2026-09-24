@@ -270,6 +270,67 @@ export function renderAudioPath(debug: DebugState | null): string {
       </div>`;
 }
 
+
+const ENTRY_STATE_LABELS: Record<string, string> = {
+  idle: "空闲",
+  starting: "启动中",
+  healthy: "正常",
+  degraded_our_side: "MiCast 侧异常",
+  degraded_speaker: "音箱侧异常",
+  bursty: "音源成团",
+  unhealthy: "未能恢复",
+};
+
+const ENTRY_ACTION_LABELS: Record<string, string> = {
+  pipeline_rebuild: "重建管道",
+  source_restart: "重启音源",
+  play_reissue: "重发播放",
+  client_kick: "重连音箱",
+};
+
+/**
+ * Per-entry health from the audio supervisor: the single authority that
+ * decides whether an entry is delivering audio and which recovery step it has
+ * reached. Surfaced here so a stuck entry explains itself instead of needing a
+ * manual pipeline rebuild.
+ */
+export function renderEntryHealth(debug: DebugState | null): string {
+  const entries = debug?.diagnostics?.entries;
+  if (!entries || Object.keys(entries).length === 0) {
+    return `<div class="cell"><span class="cell-subtitle">当前版本暂未提供条目健康状态</span></div>`;
+  }
+  return Object.entries(entries)
+    .map(([entryId, health]) => {
+      const label = ENTRY_STATE_LABELS[health.state] || health.state;
+      const recovering =
+        health.state === "degraded_our_side" ||
+        health.state === "degraded_speaker" ||
+        health.state === "unhealthy";
+      const action = health.last_action
+        ? ENTRY_ACTION_LABELS[health.last_action.replace(/\(rate-limited\)$/, "")] ||
+          health.last_action
+        : "";
+      const detail = [
+        health.reason,
+        action ? `已执行：${action}${health.last_action_ok === true ? "（已恢复）" : ""}` : "",
+        health.escalations ? `升级 ${health.escalations} 次` : "",
+        health.buffer_override_s ? `缓冲 ${health.buffer_override_s}s` : "",
+        `${health.for_s}s`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+      <div class="cell">
+        <div class="cell-content">
+          <span class="cell-title">${entryId}</span>
+          <span class="cell-subtitle">${detail}</span>
+        </div>
+        <span class="plain-state ${recovering ? "error" : "success"}">${label}</span>
+      </div>`;
+    })
+    .join("");
+}
+
 export function renderDebugPanel(state: State, debug: DebugState | null): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
   const sessions = inputSessions(debug);
@@ -296,6 +357,11 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
     <div class="group-header">音频路径</div>
     <div class="group" data-audio-path>
       ${renderAudioPath(debug)}
+    </div>
+
+    <div class="group-header">条目健康</div>
+    <div class="group" data-entry-health>
+      ${renderEntryHealth(debug)}
     </div>
 
     <div class="group-header">维护</div>

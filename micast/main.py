@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from micast import __version__
 from micast.access import COOKIE_NAME, AccessManager
 from micast.audio_bridge import AudioBridge
+from micast.audio_supervisor import AudioSupervisor
 from micast.config import resolve_port, settings
 from micast.deployment import airplay2_mode
 from micast.dlna import DlnaService
@@ -43,6 +44,13 @@ from micast.routes import (
 from micast.runtime_log import install_asyncio_exception_filter, install_runtime_log
 from micast.xiaomi.auth import XiaomiAuth
 from micast.xiaomi.device_manager import DeviceManager
+
+
+async def _run_audio_supervisor(supervisor: AudioSupervisor) -> None:
+    """Drive the supervisor's ladder for the lifetime of the app."""
+    while True:
+        await asyncio.sleep(2.0)
+        await supervisor.tick()
 
 
 @asynccontextmanager
@@ -120,6 +128,15 @@ async def lifespan(app: FastAPI):
     orchestrator.attach()
     # Routes reach the group-membership reconciler through app.state.
     app.state.reconcile_group = orchestrator.reconcile_group
+
+    # One authority decides whether each entry is delivering audio and drives
+    # the recovery ladder; see micast/audio_supervisor.py for why the previous
+    # six independent observers were replaced.
+    bridge.attach_device_manager(device_manager)
+    supervisor = AudioSupervisor(bridge, device_manager)
+    bridge.attach_supervisor(supervisor)
+    app.state.audio_supervisor = supervisor
+    start_background(_run_audio_supervisor(supervisor), name="audio-supervisor")
 
     await bridge.start()
     await dlna_service.start()

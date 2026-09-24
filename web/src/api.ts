@@ -310,6 +310,17 @@ export interface AudioPathMetrics {
   events: Array<{ at: number; kind: string; ms: number | null; detail: string | null }>;
 }
 
+/** One entry's health as the audio supervisor sees it. */
+export interface EntryHealthSnapshot {
+  state: "idle" | "starting" | "healthy" | "degraded_our_side" | "degraded_speaker" | "bursty" | "unhealthy";
+  for_s: number;
+  reason: string;
+  escalations: number;
+  last_action: string;
+  last_action_ok: boolean | null;
+  buffer_override_s: number | null;
+}
+
 export interface DebugState {
   logged_in: boolean;
   selected_device_id: string | null;
@@ -338,6 +349,8 @@ export interface DebugState {
     sessions?: { active: string[]; classic: string[]; airplay2: string[] };
     /** Cumulative audio-path black box; absent on older backends. */
     audio?: AudioPathMetrics;
+    /** Per-entry health from the audio supervisor; absent on older backends. */
+    entries?: Record<string, EntryHealthSnapshot>;
   };
   logs: Array<{ time: string; level: string; logger: string; message: string }>;
 }

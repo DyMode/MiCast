@@ -176,19 +176,3 @@ async def test_silent_source_without_session_is_left_alone(monkeypatch):
         assert source.stops == 0
     finally:
         await pipeline.stop()
-
-
-@pytest.mark.asyncio
-async def test_stale_encoder_recovery_cannot_restart_new_generation(monkeypatch):
-    source = StarvingSource()
-    pipeline = _pipeline(source, lambda: False)
-    pipeline._running = True
-    pipeline._generation = 4
-    pipeline.stop = AsyncMock()
-    pipeline.start = AsyncMock()
-    monkeypatch.setattr("micast.speaker_pipeline.asyncio.sleep", AsyncMock())
-
-    await pipeline._delayed_restart(3)
-
-    pipeline.stop.assert_not_awaited()
-    pipeline.start.assert_not_awaited()

@@ -115,6 +115,7 @@ class StreamServer:
         # across formats (a wav chunk carries ~100x the audio of an mp3
         # frame), so drops are also tracked in bytes and converted to an
         # estimated duration via the stream's byte rate.
+        self._buffer_overrides: dict[str, float] = {}
         self.dropped_bytes: dict[str, int] = {}
         # Observed output byte rate per stream (EMA), used to express drops in
         # milliseconds for formats whose StreamFormat has no nominal byte_rate
@@ -325,6 +326,18 @@ class StreamServer:
     def stream_ids(self) -> list[str]:
         return list(self._streams.keys())
 
+    def set_buffer_override(self, device_id: str, seconds: float | None) -> None:
+        """Per-stream delay-line reserve override (see the audio supervisor).
+
+        A bursty upstream is the one stall cause no recovery action can fix;
+        extra slack in this stream's buffer is the remedy, and scoping it per
+        stream keeps every other speaker at its configured latency.
+        """
+        if seconds is None:
+            self._buffer_overrides.pop(device_id, None)
+        else:
+            self._buffer_overrides[device_id] = float(seconds)
+
     def client_count(self, device_id: str) -> int:
         return len(self._clients.get(device_id, set()))
 
@@ -492,7 +505,9 @@ class StreamServer:
             # pcm); for flac the broadcast-observed EMA once it is trustworthy.
             # Until then the client stays on the transparent passthrough.
             byte_rate = self._delay_line_byte_rate(device_id)
-            buffer_seconds = settings.stream_buffer_seconds
+            buffer_seconds = self._buffer_overrides.get(
+                device_id, settings.stream_buffer_seconds
+            )
             initial_buffer = int(byte_rate * buffer_seconds) if byte_rate else 0
             # Delay alignment: extra bytes held back per client so this speaker
             # trails its siblings. Re-read live each chunk — a smaller value
