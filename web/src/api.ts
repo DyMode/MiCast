@@ -76,6 +76,8 @@ export interface FullConfig {
   dlna_status: { status: string; detail: string };
   selected_device_id: string | null;
   ports?: PortStatus[];
+  /** Present on newer backends; AirPlay 2 instances are entries too. */
+  airplay2_instances?: Array<{ id: string; name: string }>;
   receivers: ReceiverDefinition[];
   groups: SpeakerGroup[];
   speaker_names: Record<string, string>;
@@ -295,7 +297,14 @@ export interface PlaybackState {
 export interface AudioPathMetrics {
   encode: { chunks: number; p50_ms: number; p95_ms: number; max_ms: number; stalls: number; stall_max_ms: number };
   encoder_gap: { count: number; max_ms: number };
-  source: { stalls: number; stall_max_ms: number; silence_fills: number };
+  source: {
+    stalls: number;
+    stall_max_ms: number;
+    silence_fills: number;
+    /** Holes between delivered chunks: a bursty sender's fingerprint. */
+    gaps?: number;
+    gap_max_ms?: number;
+  };
   client: {
     connects: number;
     reconnects: number;
@@ -307,7 +316,15 @@ export interface AudioPathMetrics {
     queue_peak_ms: number;
   };
   drops: { tee: number; encoder_in: number; encoder_out: number };
-  events: Array<{ at: number; kind: string; ms: number | null; detail: string | null }>;
+  events: Array<{
+    at: number;
+    kind: string;
+    ms: number | null;
+    detail: string | null;
+    /** Entry the event belongs to, plus the user-facing phrasing. */
+    entry?: string | null;
+    label?: string | null;
+  }>;
 }
 
 /** One entry's health as the audio supervisor sees it. */
@@ -337,6 +354,8 @@ export interface DebugState {
       clients: number;
       bytes_sent: number;
       dropped_chunks: number;
+      /** Cross-format drop estimate in milliseconds. */
+      dropped_ms?: number;
       flowing: boolean;
       latency: LatencyMetrics;
       /** AirPlay 2 has no RAOP session, so its input figure comes from the

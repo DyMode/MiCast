@@ -8,7 +8,7 @@ import {
   renderAppShell,
   updateThemeToggle,
 } from "./components/app-shell";
-import { bindDebugPanel, bindStreamKicks, renderConnectionChecks, renderDebugPanel, renderStreamRows, updateRuntimeLog, type DebugState } from "./components/debug-panel";
+import { bindDebugPanel, bindStreamKicks, renderStatusOverview, renderDebugPanel, renderStreamRows, updateRuntimeLog, type DebugState } from "./components/debug-panel";
 import { bindDevicesView, renderDevicesView } from "./components/devices-view";
 import { bindTuningView, disposeTuningView, renderTuningView } from "./components/tuning-view";
 import { renderQRSheet, bindQRSheet } from "./components/qr-sheet";
@@ -975,7 +975,7 @@ async function init() {
       } else {
         updateRuntimeLog(log, debug, log.dataset.filter || "micast");
         const checks = document.querySelector<HTMLElement>("[data-connection-checks]");
-        if (checks) checks.innerHTML = renderConnectionChecks(debug, store.get());
+        if (checks) checks.innerHTML = renderStatusOverview(debug, store.get());
         const streamList = document.querySelector<HTMLElement>("[data-stream-list]");
         if (streamList) {
           streamList.innerHTML = renderStreamRows(debug, store.get());

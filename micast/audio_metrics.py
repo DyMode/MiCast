@@ -63,14 +63,25 @@ class AudioMetrics:
 
     # -- recording ---------------------------------------------------------
     def record_event(
-        self, kind: str, *, ms: float | None = None, detail: str | None = None
+        self,
+        kind: str,
+        *,
+        ms: float | None = None,
+        detail: str | None = None,
+        entry: str | None = None,
+        label: str | None = None,
     ) -> None:
+        """``detail`` is engineer-facing (log files, reports); ``entry`` plus
+        ``label`` let the diagnostics page say the same thing in the user's
+        words instead of quoting internal fields."""
         self._events.append(
             {
                 "at": time.time(),
                 "kind": kind,
                 "ms": round(ms, 1) if ms is not None else None,
                 "detail": detail,
+                "entry": entry,
+                "label": label,
             }
         )
         if kind in LOGGED_EVENTS:

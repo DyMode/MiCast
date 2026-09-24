@@ -58,10 +58,28 @@ STATE_DEGRADED_SPEAKER = "degraded_speaker"
 STATE_BURSTY = "bursty"
 STATE_UNHEALTHY = "unhealthy"
 
+
 LEVEL_SOURCE = "source_restart"
 LEVEL_REBUILD = "pipeline_rebuild"
 LEVEL_REISSUE = "play_reissue"
 LEVEL_KICK = "client_kick"
+
+# User-facing wording for the diagnostics page (details stay engineer-facing).
+STATE_LABELS = {
+    STATE_IDLE: "空闲",
+    STATE_STARTING: "启动中",
+    STATE_HEALTHY: "正常",
+    STATE_DEGRADED_OUR_SIDE: "MiCast 侧异常",
+    STATE_DEGRADED_SPEAKER: "音箱侧异常",
+    STATE_BURSTY: "音源成团",
+    STATE_UNHEALTHY: "未能恢复",
+}
+LEVEL_LABELS = {
+    LEVEL_SOURCE: "重启音源",
+    LEVEL_REBUILD: "重建管道",
+    LEVEL_REISSUE: "重发播放",
+    LEVEL_KICK: "重连音箱",
+}
 
 
 @dataclass
@@ -90,6 +108,8 @@ class EntryHealth:
         metrics.record_event(
             "health",
             detail=f"{self.entry_id}={state}" + (f" {reason}" if reason else ""),
+            entry=self.entry_id,
+            label=f"转为 {STATE_LABELS.get(state, state)}",
         )
         return True
 
@@ -248,7 +268,12 @@ class AudioSupervisor:
                 entry.entry_id,
                 entry.state,
             )
-            metrics.record_event("recovered", detail=entry.entry_id)
+            metrics.record_event(
+                "recovered",
+                detail=entry.entry_id,
+                entry=entry.entry_id,
+                label="已恢复",
+            )
         entry.escalations = 0
         entry.last_action_ok = True if entry.last_action else entry.last_action_ok
         entry.unhealthy_since = 0.0
@@ -278,7 +303,12 @@ class AudioSupervisor:
         entry.last_action = level
         entry.last_action_at = now
         entry.last_action_ok = None
-        metrics.record_event("recovery", detail=f"{entry.entry_id} {level} #{entry.escalations}")
+        metrics.record_event(
+            "recovery",
+            detail=f"{entry.entry_id} {level} #{entry.escalations}",
+            entry=entry.entry_id,
+            label=f"自动{LEVEL_LABELS.get(level, level)}（第 {entry.escalations} 次）",
+        )
         logger.info(
             "Audio supervisor: %s %s (escalation %d, %s)",
             entry.entry_id,
@@ -315,6 +345,8 @@ class AudioSupervisor:
         metrics.record_event(
             "buffer_raised",
             detail=f"{entry.entry_id} {entry.buffer_override:.2f}s",
+            entry=entry.entry_id,
+            label=f"缓冲加大到 {entry.buffer_override:.2f}s",
         )
         logger.info(
             "Audio supervisor: widened %s delay line to %.2fs (bursty source)",

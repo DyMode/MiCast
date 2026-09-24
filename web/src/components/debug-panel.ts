@@ -108,79 +108,220 @@ function inputSessions(debug: DebugState | null): { classic: number; airplay2: n
   return { classic, airplay2, total: classic + airplay2 };
 }
 
-function inputSubtitle(sessions: { classic: number; airplay2: number; total: number }): string {
-  if (sessions.total === 0) return "目前没有手机传输音频";
-  if (sessions.classic && sessions.airplay2) return `${sessions.classic} 个手机与 AirPlay 2 正在传输音频`;
-  if (sessions.airplay2) return "AirPlay 2 正在传输音频";
-  return `${sessions.classic} 个手机正在传输音频`;
+type RingState = "ok" | "warn" | "bad" | "idle";
+
+interface Ring {
+  label: string;
+  value: string;
+  state: RingState;
 }
 
-export function renderConnectionChecks(debug: DebugState | null, state: State): string {
+function ringStateClass(state: RingState): string {
+  if (state === "ok") return "success";
+  if (state === "bad") return "error";
+  if (state === "warn") return "warn";
+  return "";
+}
+
+function entryLabel(entryId: string, state: State): string {
+  const receiver = state.fullConfig?.receivers?.find((item) => item.id === entryId);
+  if (receiver?.name) return receiver.name;
+  const instance = state.fullConfig?.airplay2_instances?.find((item) => item.id === entryId);
+  return instance?.name || entryId;
+}
+
+/**
+ * The whole page's living part: one conclusion, the four rings that carry it,
+ * and — only when something is actually wrong — what the supervisor did about
+ * it. Everything here is live-updated in place by the poller, so the four
+ * rings and the alert line must stay in this container.
+ */
+export function renderStatusOverview(debug: DebugState | null, state: State): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
   const streams = Object.values(debug?.diagnostics?.streams || {});
+  const audio = debug?.diagnostics?.audio;
+  const entries = debug?.diagnostics?.entries || {};
   const sessions = inputSessions(debug);
-  const streamClients = sum(streams.filter((item) => item.flowing).map((item) => item.clients));
-  const playbackActive = sessions.total > 0 || streamClients > 0;
-  const transportErrors = sum(raop.map((item) => item.dropped_packets + item.decode_errors)) + sum(streams.map((item) => item.dropped_chunks));
-  // Input side: classic AirPlay reports it on the RAOP session; AirPlay 2 has
-  // no RAOP session, so its figure rides on the stream (pipeline pacing).
+  const flowingClients = sum(streams.filter((item) => item.flowing).map((item) => item.clients));
+  const playing = sessions.total > 0 || flowingClients > 0;
+  const transportErrors =
+    sum(raop.map((item) => item.dropped_packets + item.decode_errors)) +
+    sum(streams.map((item) => item.dropped_chunks));
+  const droppedMs = Math.max(0, ...streams.map((item) => item.dropped_ms || 0));
   const inputBufferMs = Math.max(
     0,
     ...raop.map((item) => item.input_buffer_ms || 0),
     ...streams.map((item) => item.input_buffer_ms || 0),
   );
-  const streamLatency = Math.max(0, ...streams.filter((item) => item.flowing).map((item) => item.latency?.estimated_ms || 0));
-  const latencyMs = inputBufferMs + streamLatency;
-  const latencyLabel = sessions.total === 0
-    ? "等待音频"
-    : streamClients === 0
-      ? "等待音箱取流"
-      : `约 ${latencyMs} ms（输入 ${inputBufferMs} + 链路 ${streamLatency}）`;
-  const latencyState = streamClients === 0 ? "未测量" : latencyMs <= 500 ? "稳定" : latencyMs <= 1000 ? "较高" : "过高";
+  const chainLatencyMs = Math.max(
+    0,
+    ...streams.filter((item) => item.flowing).map((item) => item.latency?.estimated_ms || 0),
+  );
+  const latencyMs = inputBufferMs + chainLatencyMs;
+
+  // Alerts are the supervisor's own words: an entry that is not simply
+  // healthy says why, and what it already tried.
+  const alerts = Object.entries(entries)
+    .filter(([, health]) => health.state !== "idle" && health.state !== "healthy")
+    .map(([entryId, health]) => {
+      const label = ENTRY_STATE_LABELS[health.state] || health.state;
+      const action = health.last_action ? ENTRY_ACTION_LABELS[health.last_action.replace(/\(rate-limited\)$/, "")] || health.last_action : "";
+      const detail = [
+        health.reason,
+        action ? `已${action}${health.last_action_ok === true ? "·已恢复" : health.escalations > 1 ? `（第 ${health.escalations} 次）` : ""}` : "",
+        health.buffer_override_s ? `缓冲已加大到 ${health.buffer_override_s}s` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return {
+        severity: health.state === "unhealthy" ? "bad" : health.state === "bursty" ? "warn" : "warn",
+        text: `${entryLabel(entryId, state)}：${label}${detail ? ` · ${detail}` : ""}`,
+      };
+    });
+
+  const sourceState: RingState = !playing
+    ? "idle"
+    : audio && audio.source.stalls > 0
+      ? "bad"
+      : entries && Object.values(entries).some((item) => item.state === "bursty")
+        ? "warn"
+        : "ok";
+  const encodeState: RingState = !playing
+    ? "idle"
+    : audio && audio.encode.stalls > 0
+      ? "bad"
+      : audio && audio.encoder_gap.count > 0
+        ? "warn"
+        : "ok";
+  const streamState: RingState = !playing
+    ? "idle"
+    : droppedMs > 0 || transportErrors > 0
+      ? "bad"
+      : flowingClients === 0
+        ? "warn"
+        : "ok";
+  const speakerState: RingState = !playing
+    ? "idle"
+    : Object.values(entries).some((item) => item.state === "unhealthy")
+      ? "bad"
+      : Object.values(entries).some((item) => item.state === "degraded_speaker")
+        ? "bad"
+        : flowingClients === 0
+          ? "warn"
+          : "ok";
+
+  const rings: Ring[] = [
+    {
+      label: "音源",
+      state: sourceState,
+      value: !playing
+        ? "无投放"
+        : sessions.airplay2 && sessions.classic
+          ? `手机 ${sessions.classic} · AirPlay 2 ${sessions.airplay2}`
+          : sessions.airplay2
+            ? "AirPlay 2"
+            : `手机 ${sessions.classic}`,
+    },
+    {
+      label: "转码",
+      state: encodeState,
+      value: audio
+        ? `${audio.encode.p95_ms}ms P95${audio.encode.stalls ? ` · 停顿 ${audio.encode.stalls} 次` : ""}`
+        : debug?.audio_config.format.toUpperCase() || "—",
+    },
+    {
+      label: "流",
+      state: streamState,
+      value: !playing
+        ? "无连接"
+        : `${flowingClients} 路取流${droppedMs ? ` · 丢弃 ${droppedMs}ms` : ""}`,
+    },
+    {
+      label: "音箱",
+      state: speakerState,
+      value: !playing ? "未连接" : flowingClients > 0 ? "正在接收" : "未取流",
+    },
+  ];
+
+  const headline =
+    debug === null
+      ? "正在读取状态…"
+      : debug.bridge_status.status !== "running"
+        ? "服务未运行"
+        : !playing
+          ? "空闲"
+          : speakerState === "ok" && sourceState !== "bad" && encodeState !== "bad"
+            ? "正在播放"
+            : "播放异常";
+  const headlineDetail = !playing
+    ? sessions.total === 0
+      ? "没有正在投放的音频"
+      : "发送端在场但还没有音箱取流"
+    : `${debug?.audio_config.format.toUpperCase()} ${debug?.audio_config.sample_rate ? `${debug.audio_config.sample_rate / 1000}k` : ""} · 延迟约 ${latencyMs}ms`;
+
+  const events = (audio?.events || []).slice(-5).reverse();
+
   return `
-      <div class="cell">
-        <div class="cell-icon ${sessions.total > 0 ? "green" : "gray"}">${icon("antenna")}</div>
-        <div class="cell-content">
-          <span class="cell-title">音频输入</span>
-          <span class="cell-subtitle">${inputSubtitle(sessions)}</span>
-        </div>
-        <span class="plain-state ${sessions.total > 0 ? "success" : ""}">${sessions.total > 0 ? "已连接" : "等待播放"}</span>
+      <div class="diagnostic-headline ${alerts.some((item) => item.severity === "bad") ? "is-bad" : alerts.length ? "is-warn" : ""}">
+        <strong>${headline}</strong>
+        <span>${headlineDetail}</span>
       </div>
-      <div class="cell">
-        <div class="cell-icon ${streamClients > 0 ? "green" : "gray"}">${icon("speaker")}</div>
-        <div class="cell-content">
-          <span class="cell-title">音箱输出</span>
-          <span class="cell-subtitle">${streamClients > 0 ? `${streamClients} 台音箱正在接收音频` : "当前没有音箱接收 MiCast 音频"}</span>
-        </div>
-        <span class="plain-state ${streamClients > 0 ? "success" : ""}">${streamClients > 0 ? "正在接收" : "未连接"}</span>
+      <div class="diagnostic-chain">
+        ${rings
+          .map(
+            (ring) => `
+        <div class="chain-row">
+          <span class="chain-dot ${ringStateClass(ring.state)}"></span>
+          <span class="chain-label">${ring.label}</span>
+          <span class="chain-value">${ring.value}</span>
+        </div>`,
+          )
+          .join("")}
       </div>
-      <div class="cell">
-        <div class="cell-icon ${playbackActive && transportErrors > 0 ? "red" : playbackActive ? "green" : "gray"}">${playbackActive && transportErrors > 0 ? "!" : playbackActive ? "✓" : "—"}</div>
-        <div class="cell-content">
-          <span class="cell-title">音频传输质量</span>
-          <span class="cell-subtitle">${!playbackActive ? "开始播放后检查当前传输质量" : transportErrors > 0 ? `当前会话检测到 ${transportErrors} 个丢包、解码或流错误` : "当前传输未检测到丢包或解码错误"}</span>
-        </div>
-        <span class="plain-state ${playbackActive ? (transportErrors > 0 ? "error" : "success") : ""}">${!playbackActive ? "等待播放" : transportErrors > 0 ? "需要检查" : "正常"}</span>
-      </div>
-      <div class="cell">
-        <div class="cell-icon ${streamClients > 0 ? (latencyMs > 1000 ? "red" : "green") : "gray"}">${icon("clock")}</div>
-        <div class="cell-content">
-          <span class="cell-title">传输延迟 <small>估算</small></span>
-          <span class="cell-subtitle">${latencyLabel}</span>
-        </div>
-        <span class="plain-state ${streamClients > 0 && latencyMs <= 500 ? "success" : latencyMs > 1000 ? "error" : ""}">${latencyState}</span>
-      </div>`;
+      ${alerts
+        .map(
+          (alert) => `
+      <div class="diagnostic-alert ${alert.severity === "bad" ? "is-bad" : ""}">${alert.text}</div>`,
+        )
+        .join("")}
+      ${
+        events.length
+          ? `<div class="diagnostic-events">${events
+              .map((event) => `<span>${formatEvent(event, state)}</span>`)
+              .join("")}</div>`
+          : ""
+      }`;
 }
 
 const EVENT_LABELS: Record<string, string> = {
   encoder_stall: "编码停顿",
   encoder_gap: "编码输出间隔",
   source_stall: "音源停滞",
+  source_gap: "音源空缺",
   lag_skip: "延迟线跳过",
   tee_drop: "PCM 分发丢弃",
   encoder_drop: "编码器丢弃",
   client_reconnect: "音箱重连",
 };
+
+// These events carry their meaning in the detail string rather than in a
+// duration; the log shows that text instead of the raw kind.
+const DETAIL_EVENTS = new Set(["health", "recovery", "recovered", "buffer_raised"]);
+
+function formatEvent(
+  event: { at: number; kind: string; ms: number | null; detail: string | null; entry?: string | null; label?: string | null },
+  state: State,
+): string {
+  const time = formatClock(event.at);
+  if (event.entry && event.label) {
+    return `${time} ${entryLabel(event.entry, state)} ${event.label}`;
+  }
+  if (DETAIL_EVENTS.has(event.kind) && event.detail) {
+    return `${time} ${event.detail}`;
+  }
+  const label = EVENT_LABELS[event.kind] || event.kind;
+  return `${time} ${label}${event.ms ? ` ${Math.round(event.ms)}ms` : ""}`;
+}
 
 function formatClock(at: number): string {
   const date = new Date(at * 1000);
@@ -294,43 +435,6 @@ const ENTRY_ACTION_LABELS: Record<string, string> = {
  * reached. Surfaced here so a stuck entry explains itself instead of needing a
  * manual pipeline rebuild.
  */
-export function renderEntryHealth(debug: DebugState | null): string {
-  const entries = debug?.diagnostics?.entries;
-  if (!entries || Object.keys(entries).length === 0) {
-    return `<div class="cell"><span class="cell-subtitle">当前版本暂未提供条目健康状态</span></div>`;
-  }
-  return Object.entries(entries)
-    .map(([entryId, health]) => {
-      const label = ENTRY_STATE_LABELS[health.state] || health.state;
-      const recovering =
-        health.state === "degraded_our_side" ||
-        health.state === "degraded_speaker" ||
-        health.state === "unhealthy";
-      const action = health.last_action
-        ? ENTRY_ACTION_LABELS[health.last_action.replace(/\(rate-limited\)$/, "")] ||
-          health.last_action
-        : "";
-      const detail = [
-        health.reason,
-        action ? `已执行：${action}${health.last_action_ok === true ? "（已恢复）" : ""}` : "",
-        health.escalations ? `升级 ${health.escalations} 次` : "",
-        health.buffer_override_s ? `缓冲 ${health.buffer_override_s}s` : "",
-        `${health.for_s}s`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      return `
-      <div class="cell">
-        <div class="cell-content">
-          <span class="cell-title">${entryId}</span>
-          <span class="cell-subtitle">${detail}</span>
-        </div>
-        <span class="plain-state ${recovering ? "error" : "success"}">${label}</span>
-      </div>`;
-    })
-    .join("");
-}
-
 export function renderDebugPanel(state: State, debug: DebugState | null): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
   const sessions = inputSessions(debug);
@@ -338,45 +442,25 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
   const selectedSessionActive = selectedStream
     ? (debug?.diagnostics.raop[selectedStream.id]?.active_sessions || 0) > 0
     : false;
+  const streamRows = Object.keys(debug?.diagnostics?.streams || {}).length;
+  const attention = Object.values(debug?.diagnostics?.entries || {}).filter(
+    (item) => item.state !== "idle" && item.state !== "healthy",
+  ).length;
   return `
     <div class="page-heading">
       <h2 class="page-title">诊断</h2>
-      <p>先查看当前连接状态；遇到无声、不同步或格式不兼容时，再运行播放诊断。</p>
+      <p>先看结论；声音不对时，链条会指出卡在哪一环。</p>
     </div>
 
-    <div class="group-header">连接检查</div>
     <div class="group diagnostic-overview" data-connection-checks>
-      ${renderConnectionChecks(debug, state)}
+      ${renderStatusOverview(debug, state)}
     </div>
 
-    <div class="group-header">传输连接</div>
-    <div class="group" data-stream-list>
-      ${renderStreamRows(debug, state)}
-    </div>
-
-    <div class="group-header">音频路径</div>
-    <div class="group" data-audio-path>
-      ${renderAudioPath(debug)}
-    </div>
-
-    <div class="group-header">条目健康</div>
-    <div class="group" data-entry-health>
-      ${renderEntryHealth(debug)}
-    </div>
-
-    <div class="group-header">维护</div>
-    <div class="group">
-      <div class="cell">
-        <div class="cell-content">
-          <span class="cell-title">刷新管道</span>
-          <span class="cell-subtitle">重建全部播放管道与连接，可清除卡住的会话和异常状态；播放会短暂中断</span>
-        </div>
-        <button class="button compact secondary" type="button" data-refresh-pipelines ${debug ? "" : "disabled"}>刷新管道</button>
+    <details class="diagnostic-details">
+      <summary><span><strong>连接明细</strong><small>${streamRows} 路流${attention ? ` · ${attention} 项待观察` : ""}</small></span></summary>
+      <div class="group" data-stream-list>
+        ${renderStreamRows(debug, state)}
       </div>
-    </div>
-
-    <details class="diagnostic-details" open>
-      <summary><span><strong>技术计数</strong><small>传输、时钟与编码数据</small></span></summary>
       <div class="technical-metrics">
         <span>服务：${debug?.bridge_status.status || "-"}</span>
         <span>AirPlay 会话：经典 ${sessions.classic} · AirPlay 2 ${sessions.airplay2}</span>
@@ -388,50 +472,59 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
       </div>
     </details>
 
-    <div class="group-header">播放诊断</div>
-    <div class="group diagnostic-workbench">
-      <div class="debug-warning"><strong>诊断会播放一段测试音频</strong><span>用来确认目标音箱能否出声，以及多台音箱是否同步；结束后会尝试恢复原播放。</span></div>
-      <label class="debug-target-row">
-        <span><strong>1. 选择诊断目标</strong><small>可以检查一台音箱或整个组合</small></span>
-        <select class="input" data-debug-target aria-label="测试目标" ${debug?.devices.length ? "" : "disabled"}>
-          ${debug === null ? `<option>正在加载音箱…</option>` : [
-            ...debug.devices.map((device) => `<option value="speaker:${escapeHtml(device.did)}" ${(debugTargetKey || `speaker:${debug.selected_device_id}`) === `speaker:${device.did}` ? "selected" : ""}>${escapeHtml(device.name)}</option>`),
-            ...(state.fullConfig?.groups ?? []).map((group) => `<option value="group:${escapeHtml(group.id)}" ${debugTargetKey === `group:${group.id}` ? "selected" : ""}>${escapeHtml(group.name)} · ${group.speaker_ids.length} 台音箱</option>`),
-          ].join("")}
-        </select>
-      </label>
-      <div class="diagnostic-step-label"><strong>2. 选择测试声音</strong><span>内置节拍适合快速检查，也可以使用熟悉的音频</span></div>
-      <div class="test-source-tabs" role="radiogroup" aria-label="测试音频来源">
-        ${([['builtin', '内置节拍'], ['upload', '上传音频'], ['url', '音频地址']] as const).map(([value, label]) => `<label><input type="radio" name="debug-source" value="${value}" ${debugTestSource === value ? "checked" : ""}><span>${label}</span></label>`).join("")}
+    <details class="diagnostic-details">
+      <summary><span><strong>播放诊断</strong><small>播放测试音频，确认音箱能否出声</small></span></summary>
+      <div class="group diagnostic-workbench">
+        <div class="debug-warning"><strong>诊断会播放一段测试音频</strong><span>用来确认目标音箱能否出声，以及多台音箱是否同步；结束后会尝试恢复原播放。</span></div>
+        <label class="debug-target-row">
+          <span><strong>1. 选择诊断目标</strong><small>可以检查一台音箱或整个组合</small></span>
+          <select class="input" data-debug-target aria-label="测试目标" ${debug?.devices.length ? "" : "disabled"}>
+            ${debug === null ? `<option>正在加载音箱…</option>` : [
+              ...debug.devices.map((device) => `<option value="speaker:${escapeHtml(device.did)}" ${(debugTargetKey || `speaker:${debug.selected_device_id}`) === `speaker:${device.did}` ? "selected" : ""}>${escapeHtml(device.name)}</option>`),
+              ...(state.fullConfig?.groups ?? []).map((group) => `<option value="group:${escapeHtml(group.id)}" ${debugTargetKey === `group:${group.id}` ? "selected" : ""}>${escapeHtml(group.name)} · ${group.speaker_ids.length} 台音箱</option>`),
+            ].join("")}
+          </select>
+        </label>
+        <div class="diagnostic-step-label"><strong>2. 选择测试声音</strong><span>内置节拍适合快速检查，也可以使用熟悉的音频</span></div>
+        <div class="test-source-tabs" role="radiogroup" aria-label="测试音频来源">
+          ${([['builtin', '内置节拍'], ['upload', '上传音频'], ['url', '音频地址']] as const).map(([value, label]) => `<label><input type="radio" name="debug-source" value="${value}" ${debugTestSource === value ? "checked" : ""}><span>${label}</span></label>`).join("")}
+        </div>
+        <div class="test-source-panel">
+          ${debugTestSource === "builtin" ? `<div><strong>内置节拍</strong><p>短促、清晰，适合确认音箱能否播放和多台音箱是否同步。</p></div>` : ""}
+          ${debugTestSource === "upload" ? `<div class="test-upload">
+            ${getTestMedia() ? `<div class="test-media-file"><div><strong>${escapeHtml(getTestMedia()!.name)}</strong><span>${formatDuration(getTestMedia()!.duration)} · ${(getTestMedia()!.size / 1048576).toFixed(1)} MB${getTestMedia()!.converted ? " · 已转换" : ""}</span></div><button class="button plain" type="button" data-remove-test-media>移除</button></div>` : `<label class="test-file-picker"><input type="file" accept=".mp3,.aac,.m4a,.flac,.wav,.ogg,.ape,audio/*" data-test-file><strong>${debugTestBusy === "upload" ? "正在处理音频…" : "选择音频文件"}</strong><span>MP3、AAC、M4A、FLAC、WAV、OGG 或 APE，最大 50 MB</span></label>`}
+          </div>` : ""}
+          ${debugTestSource === "url" ? `<label class="test-url-field"><span>音频地址</span><input type="url" data-debug-url placeholder="输入可直接访问的音频地址" class="input"></label>` : ""}
+        </div>
+        <div class="test-session-bar" aria-live="polite">
+          <div><strong>${activeTestSession ? "测试声音正在播放" : debugTestBusy ? "正在准备诊断…" : "3. 开始播放检查"}</strong><span>${activeTestSession ? "听音箱是否出声、是否同步，完成后停止" : "开始后会暂时接管所选目标"}</span></div>
+          <button class="button ${activeTestSession ? "secondary" : "primary"}" type="button" data-debug-test-action ${debugTestBusy || !selectedTestDeviceIds(state, debug).length ? "disabled" : ""}>${debugTestBusy === "start" ? "正在播放…" : debugTestBusy === "stop" ? "正在恢复…" : activeTestSession ? "结束诊断并恢复" : debugTestSource === "builtin" ? "播放测试节拍" : "播放测试音频"}</button>
+        </div>
+        <div class="diagnostic-step-label diagnostic-tools-label"><strong>单项检查</strong><span>仅在对应问题出现时使用</span></div>
+        <div class="diagnostic-utilities">
+          <button class="diagnostic-test" id="btn-debug-codecs" ${selectedTestDeviceIds(state, debug).length ? "" : "disabled"}><strong>测试音频格式</strong><span>依次播放 MP3、FLAC 和 WAV，找出可用格式</span><em>开始检查</em></button>
+          <button class="diagnostic-test" id="btn-debug-tts" ${selectedTestDeviceIds(state, debug).length !== 1 ? "" : "disabled"}><strong>测试米家语音</strong><span>让单台音箱朗读测试语句，检查账号与指令响应</span><em>开始检查</em></button>
+          <button class="diagnostic-test" id="btn-debug-play-stream" ${selectedStream ? "" : "disabled"}><strong>重新接入当前 AirPlay</strong><span>${selectedStream
+            ? selectedSessionActive ? `重新播放“${escapeHtml(selectedStream.name)}”当前收到的内容` : `“${escapeHtml(selectedStream.name)}”当前没有收到音频`
+            : "所选音箱没有对应的独立播放入口"}</span><em>尝试接入</em></button>
+        </div>
+        <label class="debug-volume volume-control test-volume-row">
+          <span><strong>音箱音量</strong><small>修改目标音箱的真实音量</small></span>
+          <input type="range" min="0" max="100" value="${state.devices.find(d => d.did === selectedTestDeviceIds(state, debug)[0])?.volume ?? 0}" id="debug-volume" ${selectedTestDeviceIds(state, debug).length ? "" : "disabled"} aria-label="测试音箱音量" style="--volume:${state.devices.find(d => d.did === selectedTestDeviceIds(state, debug)[0])?.volume ?? 0}%">
+          <output id="debug-volume-output">${state.devices.find(d => d.did === selectedTestDeviceIds(state, debug)[0])?.volume ?? "—"}</output>
+        </label>
+        <div class="cell">
+          <div class="cell-content">
+            <span class="cell-title">重建全部管道</span>
+            <span class="cell-subtitle">清掉卡住的会话与异常状态；播放会短暂中断</span>
+          </div>
+          <button class="button compact secondary" type="button" data-refresh-pipelines ${debug ? "" : "disabled"}>重建</button>
+        </div>
       </div>
-      <div class="test-source-panel">
-        ${debugTestSource === "builtin" ? `<div><strong>内置节拍</strong><p>短促、清晰，适合确认音箱能否播放和多台音箱是否同步。</p></div>` : ""}
-        ${debugTestSource === "upload" ? `<div class="test-upload">
-          ${getTestMedia() ? `<div class="test-media-file"><div><strong>${escapeHtml(getTestMedia()!.name)}</strong><span>${formatDuration(getTestMedia()!.duration)} · ${(getTestMedia()!.size / 1048576).toFixed(1)} MB${getTestMedia()!.converted ? " · 已转换" : ""}</span></div><button class="button plain" type="button" data-remove-test-media>移除</button></div>` : `<label class="test-file-picker"><input type="file" accept=".mp3,.aac,.m4a,.flac,.wav,.ogg,.ape,audio/*" data-test-file><strong>${debugTestBusy === "upload" ? "正在处理音频…" : "选择音频文件"}</strong><span>MP3、AAC、M4A、FLAC、WAV、OGG 或 APE，最大 50 MB</span></label>`}
-        </div>` : ""}
-        ${debugTestSource === "url" ? `<label class="test-url-field"><span>音频地址</span><input type="url" data-debug-url placeholder="输入可直接访问的音频地址" class="input"></label>` : ""}
-      </div>
-      <div class="test-session-bar" aria-live="polite">
-        <div><strong>${activeTestSession ? "测试声音正在播放" : debugTestBusy ? "正在准备诊断…" : "3. 开始播放检查"}</strong><span>${activeTestSession ? "听音箱是否出声、是否同步，完成后停止" : "开始后会暂时接管所选目标"}</span></div>
-        <button class="button ${activeTestSession ? "secondary" : "primary"}" type="button" data-debug-test-action ${debugTestBusy || !selectedTestDeviceIds(state, debug).length ? "disabled" : ""}>${debugTestBusy === "start" ? "正在播放…" : debugTestBusy === "stop" ? "正在恢复…" : activeTestSession ? "结束诊断并恢复" : debugTestSource === "builtin" ? "播放测试节拍" : "播放测试音频"}</button>
-      </div>
-      <div class="diagnostic-step-label diagnostic-tools-label"><strong>单项检查</strong><span>仅在对应问题出现时使用</span></div>
-      <div class="diagnostic-utilities">
-        <button class="diagnostic-test" id="btn-debug-codecs" ${selectedTestDeviceIds(state, debug).length ? "" : "disabled"}><strong>测试音频格式</strong><span>依次播放 MP3、FLAC 和 WAV，找出可用格式</span><em>开始检查</em></button>
-        <button class="diagnostic-test" id="btn-debug-tts" ${selectedTestDeviceIds(state, debug).length !== 1 ? "disabled" : ""}><strong>测试米家语音</strong><span>让单台音箱朗读测试语句，检查账号与指令响应</span><em>开始检查</em></button>
-        <button class="diagnostic-test" id="btn-debug-play-stream" ${selectedStream ? "" : "disabled"}><strong>重新接入当前 AirPlay</strong><span>${selectedStream
-          ? selectedSessionActive ? `重新播放“${escapeHtml(selectedStream.name)}”当前收到的内容` : `“${escapeHtml(selectedStream.name)}”当前没有收到音频`
-          : "所选音箱没有对应的独立播放入口"}</span><em>尝试接入</em></button>
-      </div>
-      <label class="debug-volume volume-control test-volume-row">
-        <span><strong>音箱音量</strong><small>修改目标音箱的真实音量</small></span>
-        <input type="range" min="0" max="100" value="${state.devices.find(d => d.did === selectedTestDeviceIds(state, debug)[0])?.volume ?? 0}" id="debug-volume" ${selectedTestDeviceIds(state, debug).length ? "" : "disabled"} aria-label="测试音箱音量" style="--volume:${state.devices.find(d => d.did === selectedTestDeviceIds(state, debug)[0])?.volume ?? 0}%">
-        <output id="debug-volume-output">${state.devices.find(d => d.did === selectedTestDeviceIds(state, debug)[0])?.volume ?? "—"}</output>
-      </label>
-    </div>
+    </details>
 
-    <details class="diagnostic-details" open>
-      <summary><span><strong>运行记录</strong><small>查看最近的连接与播放情况</small></span></summary>
+    <details class="diagnostic-details">
+      <summary><span><strong>运行记录</strong><small>最近的连接与播放情况</small></span></summary>
       <section class="runtime-log-panel" aria-label="运行记录">
       <div class="runtime-log-toolbar">
         <div class="live-indicator"><span></span><strong>自动更新</strong></div>
