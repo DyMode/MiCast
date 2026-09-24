@@ -517,6 +517,9 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
       <div class="group" data-stream-list>
         ${renderStreamRows(debug, state)}
       </div>
+      <div class="group" data-audio-path>
+        ${renderAudioPath(debug)}
+      </div>
       <div class="technical-metrics">
         <span>服务：${debug?.bridge_status.status || "-"}</span>
         <span>AirPlay 会话：经典 ${sessions.classic} · AirPlay 2 ${sessions.airplay2}</span>
