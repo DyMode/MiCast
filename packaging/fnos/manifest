@@ -1,5 +1,5 @@
 appname=micast
-version=0.3.2
+version=0.3.3
 display_name=MiCast
 desc="""<p>把手机、电脑上的音频投放到一台或多台小米智能音箱，通过 AirPlay / DLNA 即连即播。</p>
 <ul>

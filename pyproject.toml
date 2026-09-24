@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "micast"
-version = "0.3.2"
+version = "0.3.3"
 description = "把手机、电脑上的音频投放到一台或多台小米智能音箱。支持跨型号组播、多音箱同步和立体声组合，通过 AirPlay / DLNA 即连即播。"
 readme = "README.md"
 requires-python = ">=3.11"
