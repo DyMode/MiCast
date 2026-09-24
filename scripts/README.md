@@ -12,7 +12,7 @@
 
 fnOS 打包的真正实现是 `scripts/build-fnos.sh`（bash）：它会校验 manifest 的 Python ABI 与 `micast/__init__.py` 的 `__version__` 同 manifest `version=` 一致，构建前端，按平台拉取 Linux 依赖并用 fnpack 生成 `.fpk`。`build-fnos.ps1` 只是薄封装——在 Windows 上找到 `bash.exe`（PATH 或 Git 默认安装路径）后透传 `-Platform` 参数调用 sh 脚本，因此需要已安装 Git for Windows 或 WSL，且 `fnpack` 与 `npm` 需在 PATH 中。
 | 生成应用商店宣传图尺寸 | `python scripts/build-product-images.py`（默认把 `docs/screenshots/*.png` 转为 1780×1004） |
-| 生成商店简介用的小图 | `python scripts/build-product-images.py docs/screenshots/full --width 780 --height 440 --out-dir docs/screenshots`（`docs/screenshots/*.png` 是商店简介实际引用的尺寸，`full/` 保留 1780×1004 高清版） |
+| 重新生成商店简介图 | 简介引用 `docs/screenshots/*.png`（780 宽 UI 裁切版，fnOS 应用中心按图片原始像素渲染，只能用物理尺寸控制）；高清产品图存档在 `docs/screenshots/full/`，可由 `python scripts/build-product-images.py docs/screenshots/full --width 780 --height 642 --out-dir ...` 重新裁切 |
 | 测量音频流交付间隔 | `python scripts/measure_stream.py STREAM_URL` |
 | Windows 防火墙配置 | 管理员终端运行 `pwsh -File scripts/configure-windows-firewall.ps1` |
 
