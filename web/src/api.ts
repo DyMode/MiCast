@@ -289,6 +289,27 @@ export interface PlaybackState {
   }>;
 }
 
+/** Cumulative audio-path counters plus a rolling event log ("black box"):
+ * connection-scoped counters reset on every speaker reconnect, so a periodic
+ * stutter would otherwise be invisible in the live status. */
+export interface AudioPathMetrics {
+  encode: { chunks: number; p50_ms: number; p95_ms: number; max_ms: number; stalls: number; stall_max_ms: number };
+  encoder_gap: { count: number; max_ms: number };
+  source: { stalls: number; stall_max_ms: number; silence_fills: number };
+  client: {
+    connects: number;
+    reconnects: number;
+    lag_skips: number;
+    lag_skip_ms_max: number;
+    lag_skip_bytes: number;
+    queue_drops: number;
+    queue_peak_items: number;
+    queue_peak_ms: number;
+  };
+  drops: { tee: number; encoder_in: number; encoder_out: number };
+  events: Array<{ at: number; kind: string; ms: number | null; detail: string | null }>;
+}
+
 export interface DebugState {
   logged_in: boolean;
   selected_device_id: string | null;
@@ -301,9 +322,22 @@ export interface DebugState {
   stream_bytes_sent: number;
   diagnostics: {
     raop: Record<string, { active_sessions: number; total_sessions: number; decode_errors: number; dropped_packets: number; resend_requests: number; timing_requests: number; timing_responses: number; input_buffer_ms: number }>;
-    streams: Record<string, { clients: number; bytes_sent: number; dropped_chunks: number; flowing: boolean; latency: LatencyMetrics }>;
+    streams: Record<string, {
+      clients: number;
+      bytes_sent: number;
+      dropped_chunks: number;
+      flowing: boolean;
+      latency: LatencyMetrics;
+      /** AirPlay 2 has no RAOP session, so its input figure comes from the
+       * pipeline's own pacing (fed audio leading the wall clock). */
+      input_buffer_ms?: number;
+      input?: { ahead_ms: number; buffered_ms: number; starved_ms: number };
+      pipeline_drops?: { in: number; out: number };
+    }>;
     /** Live sender sessions split by ingress; absent on older backends. */
     sessions?: { active: string[]; classic: string[]; airplay2: string[] };
+    /** Cumulative audio-path black box; absent on older backends. */
+    audio?: AudioPathMetrics;
   };
   logs: Array<{ time: string; level: string; logger: string; message: string }>;
 }

@@ -122,14 +122,20 @@ export function renderConnectionChecks(debug: DebugState | null, state: State): 
   const streamClients = sum(streams.filter((item) => item.flowing).map((item) => item.clients));
   const playbackActive = sessions.total > 0 || streamClients > 0;
   const transportErrors = sum(raop.map((item) => item.dropped_packets + item.decode_errors)) + sum(streams.map((item) => item.dropped_chunks));
-  const inputBufferMs = Math.max(0, ...raop.map((item) => item.input_buffer_ms || 0));
+  // Input side: classic AirPlay reports it on the RAOP session; AirPlay 2 has
+  // no RAOP session, so its figure rides on the stream (pipeline pacing).
+  const inputBufferMs = Math.max(
+    0,
+    ...raop.map((item) => item.input_buffer_ms || 0),
+    ...streams.map((item) => item.input_buffer_ms || 0),
+  );
   const streamLatency = Math.max(0, ...streams.filter((item) => item.flowing).map((item) => item.latency?.estimated_ms || 0));
   const latencyMs = inputBufferMs + streamLatency;
   const latencyLabel = sessions.total === 0
     ? "等待音频"
     : streamClients === 0
       ? "等待音箱取流"
-      : `约 ${latencyMs} ms`;
+      : `约 ${latencyMs} ms（输入 ${inputBufferMs} + 链路 ${streamLatency}）`;
   const latencyState = streamClients === 0 ? "未测量" : latencyMs <= 500 ? "稳定" : latencyMs <= 1000 ? "较高" : "过高";
   return `
       <div class="cell">
@@ -166,6 +172,104 @@ export function renderConnectionChecks(debug: DebugState | null, state: State): 
       </div>`;
 }
 
+const EVENT_LABELS: Record<string, string> = {
+  encoder_stall: "编码停顿",
+  encoder_gap: "编码输出间隔",
+  source_stall: "音源停滞",
+  lag_skip: "延迟线跳过",
+  tee_drop: "PCM 分发丢弃",
+  encoder_drop: "编码器丢弃",
+  client_reconnect: "音箱重连",
+};
+
+function formatClock(at: number): string {
+  const date = new Date(at * 1000);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`;
+}
+
+/**
+ * Cumulative audio-path black box: connection-scoped counters reset on every
+ * speaker reconnect, so the live status can read all-zero while the listener
+ * hears a periodic hiccup. These counters survive reconnects, and the event
+ * log names what happened and for how long.
+ */
+export function renderAudioPath(debug: DebugState | null): string {
+  const audio = debug?.diagnostics?.audio;
+  if (!audio) {
+    return `<div class="cell"><span class="cell-subtitle">当前版本暂未提供音频路径统计</span></div>`;
+  }
+  const stallState = audio.encode.stalls > 0 ? "error" : "success";
+  const rows = [
+    {
+      title: "编码耗时",
+      subtitle: `P50 ${audio.encode.p50_ms} ms · P95 ${audio.encode.p95_ms} ms · 最长 ${audio.encode.max_ms} ms`,
+      value: audio.encode.stalls > 0 ? `${audio.encode.stalls} 次停顿` : "稳定",
+      state: stallState,
+    },
+    {
+      title: "音源供给",
+      subtitle:
+        audio.source.stalls > 0
+          ? `停滞 ${audio.source.stalls} 次（最长 ${audio.source.stall_max_ms} ms），补静音 ${audio.source.silence_fills} 次`
+          : "未检测到音源停滞",
+      value: audio.source.stalls > 0 ? "有中断" : "正常",
+      state: audio.source.stalls > 0 ? "error" : "success",
+    },
+    {
+      title: "客户端缓冲",
+      subtitle: `峰值 ${audio.client.queue_peak_ms} ms / ${audio.client.queue_peak_items} 块 · 重连 ${audio.client.reconnects} 次`,
+      value:
+        audio.client.lag_skips > 0
+          ? `跳过 ${audio.client.lag_skips} 次`
+          : audio.client.queue_drops > 0
+            ? `丢弃 ${audio.client.queue_drops} 次`
+            : "正常",
+      state: audio.client.lag_skips > 0 || audio.client.queue_drops > 0 ? "error" : "success",
+    },
+    {
+      title: "链路丢弃",
+      subtitle: `PCM ${audio.drops.tee} · 编码入 ${audio.drops.encoder_in} · 编码出 ${audio.drops.encoder_out}`,
+      value:
+        audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out > 0 ? "有丢弃" : "无丢弃",
+      state:
+        audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out > 0
+          ? "error"
+          : "success",
+    },
+  ];
+  const events = audio.events.slice(-8).reverse();
+  return `
+      ${rows
+        .map(
+          (row) => `
+      <div class="cell">
+        <div class="cell-content">
+          <span class="cell-title">${row.title}</span>
+          <span class="cell-subtitle">${row.subtitle}</span>
+        </div>
+        <span class="plain-state ${row.state === "error" ? "error" : "success"}">${row.value}</span>
+      </div>`,
+        )
+        .join("")}
+      <div class="cell">
+        <div class="cell-content">
+          <span class="cell-title">最近事件</span>
+          <span class="cell-subtitle">${
+            events.length === 0
+              ? "本次运行尚无异常事件"
+              : events
+                  .map(
+                    (event) =>
+                      `${formatClock(event.at)} ${EVENT_LABELS[event.kind] || event.kind}${
+                        event.ms ? ` ${Math.round(event.ms)} ms` : ""
+                      }`,
+                  )
+                  .join(" ｜ ")
+          }</span>
+        </div>
+      </div>`;
+}
+
 export function renderDebugPanel(state: State, debug: DebugState | null): string {
   const raop = Object.values(debug?.diagnostics?.raop || {});
   const sessions = inputSessions(debug);
@@ -187,6 +291,11 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
     <div class="group-header">传输连接</div>
     <div class="group" data-stream-list>
       ${renderStreamRows(debug, state)}
+    </div>
+
+    <div class="group-header">音频路径</div>
+    <div class="group" data-audio-path>
+      ${renderAudioPath(debug)}
     </div>
 
     <div class="group-header">维护</div>

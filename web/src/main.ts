@@ -130,6 +130,11 @@ function render(state: State) {
         store.set({ onboardingStep: "complete" });
         render(store.get());
       },
+      onTheme: (theme) => {
+        store.setUi({ theme });
+        applyTheme(theme);
+        render(store.get());
+      },
       onComplete: finishOnboarding,
     });
     shellMounted = false;

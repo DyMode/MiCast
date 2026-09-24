@@ -35,12 +35,6 @@ export function renderAppShell(
         </div>
       </header>
 
-      <div class="fnos-toolbar">
-        <button class="icon-button fnos-theme-toggle" id="fnos-theme-toggle" aria-label="切换主题" title="${themeLabel(theme)}">
-          ${themeIcon(theme)}
-        </button>
-      </div>
-
       <div class="app-body">
         <nav class="sidebar" role="tablist" aria-label="主导航">
           ${navItems
@@ -91,12 +85,12 @@ export function bindThemeToggle(
   container: HTMLElement,
   onToggle: () => void
 ) {
-  container.querySelectorAll("#theme-toggle, #fnos-theme-toggle").forEach((btn) => btn.addEventListener("click", onToggle));
+  container.querySelectorAll("#theme-toggle").forEach((btn) => btn.addEventListener("click", onToggle));
 }
 
 export function updateThemeToggle(container: ParentNode, theme: Theme) {
   const label = themeLabel(theme);
-  container.querySelectorAll<HTMLButtonElement>("#theme-toggle, #fnos-theme-toggle").forEach((btn) => {
+  container.querySelectorAll<HTMLButtonElement>("#theme-toggle").forEach((btn) => {
     btn.innerHTML = themeIcon(theme);
     btn.setAttribute("aria-label", `切换主题，当前：${label}`);
     btn.title = label;
@@ -117,6 +111,28 @@ export function applyTheme(theme: Theme) {
     const dark = theme === "dark" || (theme === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
     meta.content = dark ? "rgb(14, 14, 16)" : "rgb(245, 245, 247)";
   }
+}
+
+/**
+ * The 外观 control shared by the setup flow and the settings page. Segments
+ * carry `data-theme`, so a section only has to bind `[data-theme]` clicks to
+ * `store.setUi({ theme })` + `applyTheme`; state lives in `ui.theme`, which the
+ * store persists.
+ */
+export function renderThemeControl(theme: Theme): string {
+  const options: Array<{ value: Theme; label: string }> = [
+    { value: "auto", label: "跟随系统" },
+    { value: "light", label: "浅色" },
+    { value: "dark", label: "深色" },
+  ];
+  return `<div class="segmented-control" role="group" aria-label="外观">
+    ${options
+      .map(
+        (item) => `<button class="segment ${item.value === theme ? "active" : ""}" type="button"
+              data-theme="${item.value}" aria-pressed="${item.value === theme}">${item.label}</button>`
+      )
+      .join("")}
+  </div>`;
 }
 
 function themeIcon(theme: Theme): string {

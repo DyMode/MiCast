@@ -2,6 +2,7 @@ import type { AccessStatus, AirPlayProtocol, AudioConfig, FullConfig, PortStatus
 import { api } from "../api";
 import { store, type Theme } from "../state";
 import { icon } from "../icons";
+import { renderThemeControl } from "./app-shell";
 
 interface SettingsProps {
   audio: AudioConfig | null;
@@ -97,6 +98,17 @@ export function renderSettingsView(props: SettingsProps): string {
       ${renderCell("采样率", transcoding ? "AirPlay 默认 48 kHz" : "转码已关闭，此项不生效", sampleRateHtml)}
     </div>
 
+    <div class="group-header">外观</div>
+    <div class="group">
+      <div class="cell">
+        <div class="cell-content">
+          <span class="cell-title">主题</span>
+          <span class="cell-subtitle">跟随系统时随设备的深浅色设置自动切换</span>
+        </div>
+        ${renderThemeControl(theme)}
+      </div>
+    </div>
+
     <div class="group-header">应用</div>
     <div class="group">
       <div class="cell">
@@ -105,20 +117,6 @@ export function renderSettingsView(props: SettingsProps): string {
           <span class="cell-subtitle">仅用于网页标题；播放名称跟随音箱或组合名称</span>
         </div>
         <input type="text" class="input" id="app-name-input" value="${escapeHtml(appName)}" placeholder="MiCast" style="max-width: 160px;">
-      </div>
-      <div class="cell">
-        <div class="cell-content">
-          <span class="cell-title">外观</span>
-          <span class="cell-subtitle">浅色 / 深色 / 跟随系统</span>
-        </div>
-        ${renderSegments(
-          "theme",
-          [
-            { value: "light", label: "浅色", active: theme === "light" },
-            { value: "dark", label: "深色", active: theme === "dark" },
-            { value: "auto", label: "自动", active: theme === "auto" },
-          ]
-        )}
       </div>
     </div>
 

@@ -67,13 +67,17 @@
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
   --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.1);
 
+  /* Liquid-glass material shared by the floating player surfaces — the expanded
+     panel and the collapsed pill are the same surface at two sizes, so both use
+     one background/blur/border/shadow recipe instead of two ad-hoc ones. */
+  --glass-bg: var(--player-surface);
+  --glass-border: color-mix(in srgb, var(--text) 22%, transparent);
+  --glass-blur: blur(11px) saturate(145%);
+  --glass-shadow: inset 0 1px 0 color-mix(in srgb, white 12%, transparent), 0 12px 28px rgba(0, 0, 0, 0.34);
+
   --header-height: 3.75rem;
   --tab-bar-height: 4rem;
   --sidebar-width: 13.5rem;
-  /* Height of the fnOS-only toolbar that hosts the theme action (see the
-     .is-fnos rules further down); 0 everywhere else so the shared layout
-     calculations below stay correct. */
-  --fnos-toolbar-height: 0rem;
 }
 
 /* Manual dark theme wins over system */
@@ -1566,6 +1570,11 @@ html.is-embedded {
 .setup-complete { display: grid; justify-items: start; align-content: center; min-height: 24rem; }
 .setup-complete > span { width: 3rem; height: 3rem; margin-bottom: var(--space-lg); font-size: 1.25rem; }
 .setup-complete .button { margin-top: var(--space-xl); }
+.setup-appearance { display: flex; align-items: center; gap: var(--space-md); flex-wrap: wrap; margin-top: var(--space-lg); }
+.setup-appearance > strong { font-size: 0.9375rem; }
+/* The mobile rule stretches segments to fill a settings cell; here the control
+   sizes to its labels so 跟随系统 stays on one line. */
+.setup-appearance .segment { flex: none; }
 .login-page { display: grid; place-items: center; padding: var(--space-xl); }
 .login-panel { width: min(100%, 24rem); display: grid; gap: var(--space-lg); }
 .login-brand { margin-bottom: var(--space-lg); }
@@ -2710,13 +2719,13 @@ html.is-embedded {
   right: var(--space-md);
   bottom: calc(var(--tab-bar-height) + var(--space-md));
   z-index: 90;
-  background: var(--player-surface);
-  backdrop-filter: blur(11px) saturate(145%);
-  -webkit-backdrop-filter: blur(11px) saturate(145%);
-  border: 0.5px solid color-mix(in srgb, var(--text) 22%, transparent);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 0.5px solid var(--glass-border);
   border-radius: 1.25rem;
   padding: var(--space-sm) var(--space-md);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, white 12%, transparent), 0 12px 28px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--glass-shadow);
   transform: translateY(calc(100% + var(--space-md)));
   transition: transform 350ms var(--ease-spring);
 }
@@ -2876,7 +2885,7 @@ html.is-embedded {
     box-shadow: none;
   }
   .now-playing.expanded {
-    box-shadow: inset 0 1px 0 color-mix(in srgb, white 12%, transparent), 0 12px 28px rgba(0, 0, 0, 0.34);
+    box-shadow: var(--glass-shadow);
   }
   .now-playing-master input[type="range"] { min-width: 5rem; }
   .has-playback .main-content {
@@ -2884,10 +2893,9 @@ html.is-embedded {
   }
   /* fnOS owns the native title bar, so its embedded page has no MiCast header
      for the horizontal player. Use the quiet space below the navigation as a
-     compact sidebar controller instead. The fnOS toolbar shifts that navigation
-     down, so the controller follows it. */
+     compact sidebar controller instead. */
   .is-embedded .now-playing {
-    top: calc(var(--space-lg) + 20.75rem + var(--space-md) + var(--fnos-toolbar-height));
+    top: calc(var(--space-lg) + 20.75rem + var(--space-md));
     left: max(
       var(--space-2xl),
       calc((100vw - 1180px) / 2 + var(--space-2xl))
@@ -2895,7 +2903,7 @@ html.is-embedded {
     right: auto;
     bottom: auto;
     width: var(--sidebar-width);
-    max-height: calc(100dvh - 24rem - var(--fnos-toolbar-height));
+    max-height: calc(100dvh - 24rem);
     padding: var(--space-sm);
     border-radius: var(--radius-lg);
     background: var(--surface);
@@ -2963,50 +2971,12 @@ html.is-embedded {
 }
 
 /* fnOS supplies the native title bar above the web view, so the MiCast header is
-   dropped — but its theme action must stay reachable. It gets a slim toolbar row
-   of its own instead of floating in a corner: a fixed button covered the link-map
-   legend, the settings switches and the last row of every scroll list, and the
-   bottom band belongs to the tab bar, the player and fnOS's own playback pill.
-   A row in the shell can never be covered — the scroll container ends above it. */
-html.is-fnos { --fnos-toolbar-height: 2.75rem; }
+   dropped. The theme action lives in the setup flow and in 设置 › 外观 instead of
+   a shell button: a floating one covered the link-map legend and the settings
+   switches, a fixed toolbar row cost 44px on every page, and the bottom band
+   belongs to the tab bar, the player and fnOS's own playback pill. */
 .is-fnos .app-header { display: none; }
 .is-fnos .app-body { padding-top: 0; }
-/* The toolbar owns the top gap the page padding used to provide. */
-html.is-fnos .main-content { padding-top: var(--space-2xs); }
-.fnos-toolbar { display: none; }
-.is-fnos .fnos-toolbar {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  height: calc(var(--fnos-toolbar-height) + env(safe-area-inset-top));
-  padding: env(safe-area-inset-top)
-    max(var(--space-md), env(safe-area-inset-right))
-    0
-    max(var(--space-md), env(safe-area-inset-left));
-}
-.fnos-theme-toggle { display: none; }
-.is-fnos .fnos-theme-toggle {
-  display: grid;
-  width: 2.75rem;
-  height: 2.75rem;
-  border: 0.5px solid var(--separator);
-  background: var(--surface);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: var(--shadow-sm);
-}
-
-@media (min-width: 1024px) {
-  /* Line the toolbar up with the app body's own frame and gutter. */
-  .is-fnos .fnos-toolbar {
-    width: 100%;
-    max-width: 1180px;
-    margin: 0 auto;
-    padding-right: max(var(--space-2xl), env(safe-area-inset-right));
-    padding-left: max(var(--space-2xl), env(safe-area-inset-left));
-  }
-}
 
 .now-playing-icon {
   width: 2rem;
@@ -3289,6 +3259,8 @@ html.is-fnos .main-content { padding-top: var(--space-2xs); }
     transition: opacity 160ms ease-out, transform 220ms var(--ease-spring);
     -webkit-tap-highlight-color: transparent;
   }
+  /* Collapsed player: the same liquid glass as the expanded panel — a flatter
+     surface here read as an opaque block next to it. */
   .is-fnos .header-playback-trigger.visible {
     top: auto;
     right: var(--space-md);
@@ -3299,12 +3271,12 @@ html.is-fnos .main-content { padding-top: var(--space-2xs); }
     grid-template-columns: 1.5rem minmax(0, 1fr);
     gap: var(--space-sm);
     padding: 0 var(--space-md);
-    border: 0.5px solid var(--separator-strong);
+    border: 0.5px solid var(--glass-border);
     border-radius: var(--radius-full);
-    background: var(--surface);
-    box-shadow: var(--shadow-md);
-    backdrop-filter: blur(14px) saturate(145%);
-    -webkit-backdrop-filter: blur(14px) saturate(145%);
+    background: var(--glass-bg);
+    box-shadow: var(--glass-shadow);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
   }
   .is-fnos .header-playback-trigger::before { display: none; }
   .is-fnos .header-playback-label {
@@ -3418,7 +3390,8 @@ html.is-fnos .main-content { padding-top: var(--space-2xs); }
   .app-header,
   .sidebar,
   .tab-bar,
-  .now-playing {
+  .now-playing,
+  .is-fnos .header-playback-trigger.visible {
     background: var(--elevated);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
@@ -3858,7 +3831,7 @@ html.is-fnos .main-content { padding-top: var(--space-2xs); }
 
   /* Link map: the empty state must not compete with inactive nodes and the legend. */
   .main-content[data-active-section="topology"] {
-    min-height: calc(100dvh - var(--header-height) - var(--fnos-toolbar-height));
+    min-height: calc(100dvh - var(--header-height));
   }
   .topology-stage {
     min-height: 20rem;

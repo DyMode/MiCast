@@ -1,5 +1,6 @@
-import type { State } from "../state";
+import type { State, Theme } from "../state";
 import { brandIcon, brandMark } from "../icons";
+import { renderThemeControl } from "./app-shell";
 
 function logo(): string {
   return `<span class="setup-logo">${brandMark()}</span><strong>MiCast</strong>`;
@@ -90,7 +91,9 @@ export function renderOnboarding(state: State): string {
             ${targetOptions ? `<div class="setup-credentials setup-target" data-airplay2-target hidden><label>播放目标<select class="input" name="target">${targetOptions}</select></label><p class="caption">AirPlay 2 会将声音播放到这台音箱，之后可在设置中更改。</p></div>` : ""}
             <div class="setup-actions split">${backButton}<button class="button primary" type="submit">继续</button></div>
           </form>`
-          : `<div class="setup-complete"><span>✓</span><h1>已经准备好了</h1><p>之后可随时在设置中调整。</p><div class="setup-actions"><button class="button primary" type="button" data-setup-enter>开始使用</button></div></div>`}
+          : `<div class="setup-complete"><span>✓</span><h1>已经准备好了</h1><p>之后可随时在设置中调整。</p>
+          <div class="setup-appearance"><strong>外观</strong>${renderThemeControl(state.ui.theme)}</div>
+          <div class="setup-actions"><button class="button primary" type="button" data-setup-enter>开始使用</button></div></div>`}
       </section>
     </div>
   </main>`;
@@ -105,6 +108,7 @@ export function bindOnboarding(container: HTMLElement, handlers: {
   onSkipReceivers: () => void;
   onRefreshReceivers: () => Promise<void>;
   onAirPlay2: (enabled: boolean, target: string | null) => Promise<void>;
+  onTheme: (theme: Theme) => void;
   onComplete: () => Promise<void>;
 }) {
   const form = container.querySelector<HTMLFormElement>("[data-setup-access]");
@@ -184,6 +188,9 @@ export function bindOnboarding(container: HTMLElement, handlers: {
     catch { if (button) { button.disabled = false; button.textContent = "继续"; } }
   });
   container.querySelector<HTMLElement>("[data-setup-enter]")?.addEventListener("click", handlers.onComplete);
+  container.querySelectorAll<HTMLElement>("[data-theme]").forEach((el) =>
+    el.addEventListener("click", () => handlers.onTheme(el.dataset.theme as Theme))
+  );
 }
 
 export function renderAccessLogin(access: NonNullable<State["access"]>): string {
