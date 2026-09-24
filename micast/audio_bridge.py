@@ -1285,6 +1285,19 @@ class AudioBridge:
 
     async def _local_session_start(self, receiver_id: str, resume: bool = False) -> None:
         self._active_sessions.add(receiver_id)
+        # A pipeline whose encoder exited cleanly (its PCM reader hit EOF when
+        # the previous session tore down) cannot be revived by start(): it would
+        # reuse the finished reader and exit again — that is the 3s stop/start
+        # churn seen in the field. Rebuild the entry instead, which gives it a
+        # fresh reader.
+        stale = [
+            key
+            for key, pipeline in self._pipelines.items()
+            if (key == receiver_id or key.startswith(f"{receiver_id}-")) and not pipeline.running
+        ]
+        if stale:
+            async with self._restart_lock:
+                await self._rebuild_classic_entries_locked({receiver_id})
         if not resume:
             self._volume_modes[receiver_id] = settings.sender_volume_mode
             if settings.sender_volume_mode == "independent" and self._airplay_targets:
@@ -1668,6 +1681,12 @@ class AudioBridge:
                 logger.warning("session_start called without device_id in multi-receiver mode")
                 return
         pipeline = self._pipelines.get(device_id) or self._airplay2_pipelines.get(device_id)
+        if pipeline and not pipeline.running and device_id in self._airplay2_pipelines:
+            # Same revival rule as classic receivers: a pipeline whose reader
+            # finished needs a rebuild, not a start() that reuses it.
+            async with self._restart_lock:
+                await self._rebuild_airplay2_instances_locked({device_id})
+            pipeline = self._airplay2_pipelines.get(device_id) or pipeline
         if pipeline:
             self._active_sessions.add(device_id)
             self._volume_modes[device_id] = settings.sender_volume_mode

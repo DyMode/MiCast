@@ -166,6 +166,12 @@ class SpeakerPipeline:
         return self._status
 
     @property
+    def running(self) -> bool:
+        """True while the pump/encoder tasks are live. A clean encoder exit
+        (source EOF between sessions) leaves this False until the next session."""
+        return self._running
+
+    @property
     def stream_url(self) -> str:
         return f"http://{settings.effective_stream_host}:{settings.stream_port}/stream/{self._stream_id}"
 
@@ -613,7 +619,11 @@ class SpeakerPipeline:
                 gap_ms = (now - last_at) * 1000
                 last_at = now
                 seen += 1
-                if seen > 1:
+                # Only a gap while a sender session is live is a stall: the
+                # pipeline legitimately produces nothing between sessions, and
+                # counting that reported an idle afternoon as a 272s stall.
+                in_session = self._session_active is None or self._session_active()
+                if seen > 1 and in_session:
                     metrics.note_encode(gap_ms)
                     # The baseline is this pipeline's OWN recent cadence. The
                     # first cut of this metric derived it from the previous
@@ -679,10 +689,23 @@ class SpeakerPipeline:
         try:
             await self._encoder.wait()
             if self._running:
+                code = self._encoder.returncode
+                if code == 0:
+                    # Clean EOF: the sender session ended and closed the PCM
+                    # source. Restarting here would spin start→EOF→restart every
+                    # 3s for every idle receiver (no audio, but a full encoder
+                    # teardown repeatedly). Go idle instead; the next session
+                    # starts the pipeline again (session_start / ensure_running).
+                    logger.info(
+                        "Encoder finished for %s; idle until the next session",
+                        self._stream_id,
+                    )
+                    self._status = "idle"
+                    return
                 logger.warning(
                     "Encoder exited for %s with code %s",
                     self._stream_id,
-                    self._encoder.returncode,
+                    code,
                 )
                 self._status = "restarting"
                 if self._recovery_task is None or self._recovery_task.done():

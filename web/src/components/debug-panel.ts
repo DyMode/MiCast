@@ -303,7 +303,7 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">刷新管道</span>
-          <span class="cell-subtitle">重建全部播放管道与连接（同开关 AirPlay 2 的重建），可清除卡住的会话和异常状态；播放会短暂中断</span>
+          <span class="cell-subtitle">重建全部播放管道与连接，可清除卡住的会话和异常状态；播放会短暂中断</span>
         </div>
         <button class="button compact secondary" type="button" data-refresh-pipelines ${debug ? "" : "disabled"}>刷新管道</button>
       </div>
