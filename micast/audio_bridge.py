@@ -196,6 +196,11 @@ class AudioBridge:
                     if (pipeline := self.pipeline_for_stream(receiver_id)) is not None
                     else {}
                 ),
+                "pace": (
+                    pipeline.pace_stats()
+                    if (pipeline := self.pipeline_for_stream(receiver_id)) is not None
+                    else {}
+                ),
                 "flowing": self._stream_server.is_flowing(receiver_id),
                 "latency": self._stream_server.latency_metrics(receiver_id),
             }
@@ -1139,6 +1144,8 @@ class AudioBridge:
             tee.start()
             self._airplay2_tees[instance.id] = tee
             readers = list(tee.outputs)
+            for index, variant in enumerate(variants):
+                readers[index].name = f"{instance.id}{variant['suffix']}"
         if wants_tap:
             self._target_taps[instance.id] = readers[-1]
             readers = readers[:-1]
@@ -1205,6 +1212,8 @@ class AudioBridge:
             tee.start()
             self._tees[item.id] = tee
             readers = tee.outputs
+            for index, variant in enumerate(variants):
+                readers[index].name = f"{item.id}{variant['suffix']}"
         if wants_tap:
             self._target_taps[item.id] = readers[-1]
             readers = readers[:-1]
@@ -1827,6 +1836,35 @@ class AudioBridge:
             for stream_id in self.entry_stream_ids(entry_id)
             if (pipeline := self.pipeline_for_stream(stream_id)) is not None
         )
+
+    def entry_consumer_lagging(self, entry_id: str) -> bool:
+        """True when a speaker of this entry cannot keep up with us.
+
+        Only then does widening the delay-line reserve help. A starved source
+        (lumps the reserve never fills) must not be "fixed" the same way — that
+        would hold audio back even longer and make delivery less even.
+        """
+        for stream_id in self.entry_stream_ids(entry_id):
+            if self._stream_server.dropped_chunks.get(stream_id, 0):
+                return True
+            for state in self._stream_server.client_delay_states(stream_id):
+                if int(state.get("queue_drops") or 0):
+                    return True
+        return False
+
+    def entry_pace_stats(self, entry_id: str) -> dict[str, float]:
+        """Aggregated pacing sleep for an entry's pipelines (1x hold-backs)."""
+        totals: dict[str, float] = {"sleeps": 0, "total_ms": 0.0, "max_ms": 0.0}
+        for stream_id in self.entry_stream_ids(entry_id):
+            pipeline = self.pipeline_for_stream(stream_id)
+            if pipeline is None:
+                continue
+            stats = pipeline.pace_stats()
+            totals["sleeps"] += stats["sleeps"]
+            totals["total_ms"] += stats["total_ms"]
+            totals["max_ms"] = max(totals["max_ms"], stats["max_ms"])
+        totals["total_ms"] = round(totals["total_ms"], 1)
+        return totals
 
     def stream_served(self, stream_id: str) -> bool:
         """A speaker is connected AND bytes moved recently (``is_flowing``)."""

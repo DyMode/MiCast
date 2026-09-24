@@ -315,7 +315,13 @@ export interface AudioPathMetrics {
     queue_peak_items: number;
     queue_peak_ms: number;
   };
-  drops: { tee: number; encoder_in: number; encoder_out: number };
+  drops: {
+    tee: number;
+    tee_by_entry?: Record<string, number>;
+    encoder_in: number;
+    encoder_out: number;
+  };
+  pace?: { sleeps: number; total_ms: number; max_ms: number };
   events: Array<{
     at: number;
     kind: string;
@@ -362,6 +368,8 @@ export interface DebugState {
        * pipeline's own pacing (fed audio leading the wall clock). */
       input_buffer_ms?: number;
       input?: { ahead_ms: number; buffered_ms: number; starved_ms: number };
+      /** Pacing sleep: how long the pump held itself back to realtime. */
+      pace?: { sleeps: number; total_ms: number; max_ms: number };
       pipeline_drops?: { in: number; out: number };
     }>;
     /** Live sender sessions split by ingress; absent on older backends. */

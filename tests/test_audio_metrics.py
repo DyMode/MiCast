@@ -63,7 +63,10 @@ def test_drop_layers_accumulate():
     m.note_encoder_drop("out", 3)
     snap = m.snapshot()
 
-    assert snap["drops"] == {"tee": 2, "encoder_in": 1, "encoder_out": 3}
+    drops = snap["drops"]
+    assert drops["tee"] == 2
+    assert drops["encoder_in"] == 1
+    assert drops["encoder_out"] == 3
 
 
 @pytest.mark.asyncio

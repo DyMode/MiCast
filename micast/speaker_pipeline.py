@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 
 from micast.audio_encoder import AudioEncoder, firequalizer_available, raw_pcm_format, wav_header
-from micast.audio_metrics import metrics
+from micast.audio_metrics import ENCODER_STALL_MS, metrics
 from micast.config import settings
 from micast.curve_fit import (
     add_curve,
@@ -139,6 +139,12 @@ class SpeakerPipeline:
         # Timestamp of the last real byte delivered by the PCM source, used to
         # measure how long the source leaves us waiting (see SOURCE_GAP_MS).
         self._last_source_read_at = 0.0
+        # Pacing sleep bookkeeping: the pump holds itself back to realtime
+        # between reads, and that must be visible next to the source's own
+        # waits so the two are never confused.
+        self._pace_sleeps = 0
+        self._pace_sleep_total_ms = 0.0
+        self._pace_sleep_max_ms = 0.0
         # Recent waits between source chunks: the supervisor reads their shape
         # to tell a steady source from a bursty one.
         self._source_gaps: deque[float] = deque(maxlen=20)
@@ -167,6 +173,14 @@ class SpeakerPipeline:
         if not last:
             return None
         return max(0.0, (time.monotonic() - last) * 1000)
+
+    def pace_stats(self) -> dict[str, float]:
+        """How much this pump slept to stay at 1x (see note_pace_sleep)."""
+        return {
+            "sleeps": self._pace_sleeps,
+            "total_ms": round(self._pace_sleep_total_ms, 1),
+            "max_ms": round(self._pace_sleep_max_ms, 1),
+        }
 
     def source_bursty(self) -> bool:
         """True when the source keeps leaving long gaps between chunks.
@@ -564,30 +578,28 @@ class SpeakerPipeline:
         # gaps while still answering a real stall in ~0.5s, well under the
         # speaker's ~2s abandonment. Late bytes within the grace window are
         # returned immediately — no silence, no extra beat of delay.
-        started = asyncio.get_running_loop().time()
+        call_started = asyncio.get_running_loop().time()
         for _ in range(SOURCE_SILENCE_GRACE_PERIODS):
             try:
                 chunk = await asyncio.wait_for(
                     reader.read(SOURCE_SILENCE_CHUNK_BYTES), chunk_seconds
                 )
-                # How long the source made us wait for real bytes: a hole well
-                # above the chunk cadence means the SENDER delivers in bursts
-                # (the audio the listener hears arrive in lumps). Measured here
-                # rather than downstream so it cannot be confused with encoder
-                # or delay-line behaviour.
+                # Time spent INSIDE this call — i.e. how long the source took to
+                # hand over bytes. Deliberately not measured between calls: the
+                # pump paces itself with sleep() between reads, so an inter-call
+                # interval cannot tell a stalled source from our own pacing (the
+                # metric reported our 1x chunking as "source gaps" once already).
                 now = asyncio.get_running_loop().time()
-                previous_read = getattr(self, "_last_source_read_at", 0.0)
-                if chunk and previous_read:
-                    waited_ms = (now - previous_read) * 1000
-                    session_active = getattr(self, "_session_active", None)
-                    in_session = session_active is None or session_active()
-                    if waited_ms > SOURCE_GAP_MS and in_session:
-                        metrics.note_source_gap(waited_ms, self._stream_id)
+                waited_ms = (now - call_started) * 1000
                 if chunk:
                     self._last_source_read_at = now
+                    session_active = getattr(self, "_session_active", None)
+                    in_session = session_active is None or session_active()
                     gaps = getattr(self, "_source_gaps", None)
                     if gaps is not None:
-                        gaps.append(waited_ms if previous_read else 0.0)
+                        gaps.append(waited_ms)
+                    if waited_ms > SOURCE_GAP_MS and in_session:
+                        metrics.note_source_gap(waited_ms, self._stream_id)
                 return chunk, False
             except TimeoutError:
                 continue
@@ -598,7 +610,7 @@ class SpeakerPipeline:
         # Report the silence the source actually produced: the grace window is
         # a constant, so quoting it back hid whether a stall was 0.5s or 30s.
         metrics.note_source_stall(
-            (asyncio.get_running_loop().time() - started) * 1000, self._stream_id
+            (asyncio.get_running_loop().time() - call_started) * 1000, self._stream_id
         )
         metrics.note_silence_fill()
         return b"\x00" * SOURCE_SILENCE_CHUNK_BYTES, True
@@ -636,7 +648,13 @@ class SpeakerPipeline:
                 self._input_ahead_ms = ahead * 1000
                 self._input_fed_bytes = fed_bytes
                 if self._pace_source and ahead > 0:
+                    sleep_started = loop.time()
                     await asyncio.sleep(ahead)
+                    slept_ms = (loop.time() - sleep_started) * 1000
+                    self._pace_sleeps += 1
+                    self._pace_sleep_total_ms += slept_ms
+                    self._pace_sleep_max_ms = max(self._pace_sleep_max_ms, slept_ms)
+                    metrics.note_pace_sleep(slept_ms)
                 await writer.drain()
             writer.write_eof()
             await writer.drain()
@@ -679,7 +697,11 @@ class SpeakerPipeline:
                     # several times the median interval.
                     if len(intervals) >= 10:
                         typical = sorted(intervals)[len(intervals) // 2]
-                        if gap_ms > max(typical * 2.5, typical + ENCODER_GAP_MS):
+                        # A gap that already counts as a stall must not be
+                        # recorded twice under two names.
+                        if gap_ms >= ENCODER_STALL_MS:
+                            pass
+                        elif gap_ms > max(typical * 2.5, typical + ENCODER_GAP_MS):
                             metrics.note_encoder_gap(gap_ms, typical, self._stream_id)
                     intervals.append(gap_ms)
                 await self._stream_server.broadcast(self._stream_id, chunk)

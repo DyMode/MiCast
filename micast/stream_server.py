@@ -326,6 +326,13 @@ class StreamServer:
     def stream_ids(self) -> list[str]:
         return list(self._streams.keys())
 
+    def client_delay_states(self, device_id: str) -> list[dict]:
+        """Per-client delay-line state for one stream (consumer health)."""
+        return [
+            self._client_delay.get(queue, {})
+            for queue in self._clients.get(device_id, set())
+        ]
+
     def set_buffer_override(self, device_id: str, seconds: float | None) -> None:
         """Per-stream delay-line reserve override (see the audio supervisor).
 

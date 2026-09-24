@@ -384,10 +384,15 @@ export function renderAudioPath(debug: DebugState | null): string {
     },
     {
       title: "音源供给",
-      subtitle:
+      subtitle: [
         audio.source.stalls > 0
-          ? `停滞 ${audio.source.stalls} 次（最长 ${audio.source.stall_max_ms} ms），补静音 ${audio.source.silence_fills} 次`
-          : "未检测到音源停滞",
+          ? `停滞 ${audio.source.stalls} 次（最长 ${audio.source.stall_max_ms} ms）`
+          : "无停滞",
+        `读取等待 ${audio.source.gaps ?? 0} 次${audio.source.gap_max_ms ? `（最长 ${Math.round(audio.source.gap_max_ms)} ms）` : ""}`,
+        audio.pace ? `我方节流 ${audio.pace.sleeps} 次/${Math.round(audio.pace.max_ms)} ms` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
       value: audio.source.stalls > 0 ? "有中断" : "正常",
       state: audio.source.stalls > 0 ? "error" : "success",
     },
@@ -404,7 +409,13 @@ export function renderAudioPath(debug: DebugState | null): string {
     },
     {
       title: "链路丢弃",
-      subtitle: `PCM ${audio.drops.tee} · 编码入 ${audio.drops.encoder_in} · 编码出 ${audio.drops.encoder_out}`,
+      subtitle: `PCM ${audio.drops.tee}${
+        audio.drops.tee_by_entry
+          ? Object.entries(audio.drops.tee_by_entry)
+              .map(([id, count]) => `（${id} ${count}）`)
+              .join(" ")
+          : ""
+      } · 编码入 ${audio.drops.encoder_in} · 编码出 ${audio.drops.encoder_out}`,
       value:
         audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out > 0 ? "有丢弃" : "无丢弃",
       state:

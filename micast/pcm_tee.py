@@ -62,6 +62,9 @@ class BoundedPCMReader:
     """
 
     def __init__(self, max_chunks: int = 64):
+        # Set by the owner (bridge) to the stream id this branch feeds, so a
+        # drop can be attributed instead of only counted globally.
+        self.name = ""
         self._queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=max_chunks)
         self._eof = False
         # Drops at this layer mean a downstream encoder/branch fell behind
@@ -78,7 +81,7 @@ class BoundedPCMReader:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
             self.dropped_chunks += 1
-            metrics.note_tee_drop()
+            metrics.note_tee_drop(entry=self.name or None)
             self._queue.put_nowait(data)
 
     def feed_eof(self) -> None:
@@ -91,7 +94,7 @@ class BoundedPCMReader:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
             self.dropped_chunks += 1
-            metrics.note_tee_drop()
+            metrics.note_tee_drop(entry=self.name or None)
             self._queue.put_nowait(None)
 
     def at_eof(self) -> bool:

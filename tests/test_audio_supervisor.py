@@ -40,8 +40,9 @@ class FakeClock:
 class FakeBridge:
     """Records the primitives the supervisor is allowed to drive."""
 
-    def __init__(self, signals: dict):
+    def __init__(self, signals: dict, consumer_lagging: bool = True):
         self.signals = signals
+        self.consumer_lagging = consumer_lagging
         self.calls: list[str] = []
         self.buffers: list[tuple[str, float | None]] = []
         self.targets = ["did-1"]
@@ -89,6 +90,9 @@ class FakeBridge:
 
     def set_entry_buffer(self, entry_id, seconds):
         self.buffers.append((entry_id, seconds))
+
+    def entry_consumer_lagging(self, entry_id):
+        return self.consumer_lagging
 
 
 def _signals(**overrides) -> dict:
@@ -244,9 +248,13 @@ async def test_recovery_stands_down_once_healthy_again():
 
 
 @pytest.mark.asyncio
-async def test_bursty_source_widens_then_releases_its_buffer():
+async def test_bursty_consumer_is_given_more_buffer():
+    """A speaker that cannot keep up IS helped by a wider reserve."""
     clock = FakeClock()
-    bridge = FakeBridge(_signals(session_active=True, served=True, source_bursty=True))
+    bridge = FakeBridge(
+        _signals(session_active=True, served=True, source_bursty=True),
+        consumer_lagging=True,
+    )
     supervisor = AudioSupervisor(bridge, object(), clock=clock)
     await supervisor.tick()  # marks burstiness start
     clock.advance(31)
@@ -257,6 +265,21 @@ async def test_bursty_source_widens_then_releases_its_buffer():
     clock.advance(5)
     await supervisor.tick()
     assert bridge.buffers[-1] == ("entry", None)
+
+
+@pytest.mark.asyncio
+async def test_bursty_source_without_a_slow_consumer_is_not_buffer_widened():
+    """Holding audio back does not smooth a lumpy source — only report it."""
+    clock = FakeClock()
+    bridge = FakeBridge(
+        _signals(session_active=True, served=True, source_bursty=True),
+        consumer_lagging=False,
+    )
+    supervisor = AudioSupervisor(bridge, object(), clock=clock)
+    await supervisor.tick()
+    clock.advance(70)
+    await supervisor.tick()
+    assert bridge.buffers == []
 
 
 @pytest.mark.asyncio

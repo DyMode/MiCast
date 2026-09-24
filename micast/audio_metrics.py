@@ -56,6 +56,10 @@ class AudioMetrics:
         self.queue_peak_items = 0
         self.queue_peak_ms = 0.0
         self.tee_drop_count = 0
+        self.tee_drops_by_entry: dict[str, int] = {}
+        self.pace_sleeps = 0
+        self.pace_sleep_total_ms = 0.0
+        self.pace_sleep_max_ms = 0.0
         self.encoder_in_drop_count = 0
         self.encoder_out_drop_count = 0
         self.client_connect_count = 0
@@ -155,9 +159,23 @@ class AudioMetrics:
         if ms > self.queue_peak_ms:
             self.queue_peak_ms = ms
 
-    def note_tee_drop(self, count: int = 1) -> None:
+    def note_tee_drop(self, count: int = 1, entry: str | None = None) -> None:
         self.tee_drop_count += count
-        self.record_event("tee_drop", detail=f"{count} chunk(s)")
+        if entry:
+            self.tee_drops_by_entry[entry] = self.tee_drops_by_entry.get(entry, 0) + count
+        self.record_event("tee_drop", detail=f"{count} chunk(s)", entry=entry, label="PCM 分发丢弃")
+
+    def note_pace_sleep(self, ms: float) -> None:
+        """Time the pump spent holding itself back to realtime.
+
+        A paced pump sleeps between source reads, so an inter-read interval on
+        its own cannot say whether the SOURCE paused or WE chunked it. Counting
+        the sleep separately is what separates the two.
+        """
+        self.pace_sleeps += 1
+        self.pace_sleep_total_ms += ms
+        if ms > self.pace_sleep_max_ms:
+            self.pace_sleep_max_ms = ms
 
     def note_encoder_drop(self, layer: str, count: int = 1) -> None:
         if layer == "in":
@@ -209,8 +227,14 @@ class AudioMetrics:
             },
             "drops": {
                 "tee": self.tee_drop_count,
+                "tee_by_entry": dict(self.tee_drops_by_entry),
                 "encoder_in": self.encoder_in_drop_count,
                 "encoder_out": self.encoder_out_drop_count,
+            },
+            "pace": {
+                "sleeps": self.pace_sleeps,
+                "total_ms": round(self.pace_sleep_total_ms, 1),
+                "max_ms": round(self.pace_sleep_max_ms, 1),
             },
             "events": list(self._events),
         }

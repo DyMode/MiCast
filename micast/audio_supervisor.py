@@ -325,15 +325,26 @@ class AudioSupervisor:
 
     # -- adaptive prebuffer ------------------------------------------------
     async def _adapt_buffer(self, entry: EntryHealth) -> None:
-        """Bursty source + a lagging speaker: widen that entry's delay line.
+        """Widen the delay line ONLY when the consumer, not the source, lags.
 
-        Bursty delivery is the one stall cause no recovery action can fix; the
-        remedy is more slack, applied per entry so other speakers keep their
-        latency. The override decays as soon as the source behaves again.
+        The delay line decides how much audio we hold back before sending. That
+        recovers a speaker that cannot keep up (its queue overflows) — but when
+        the SOURCE is the lumpy side, holding more back makes delivery later and
+        no smoother, and the reserve never fills anyway. A long bursty stretch
+        with no queue drops is therefore reported, not "fixed".
         """
         now = self._clock()
         if not entry.bursty_since:
             entry.bursty_since = now
+        if not self._bridge.entry_consumer_lagging(entry.entry_id):
+            if now - entry.bursty_since > 60.0:
+                metrics.record_event(
+                    "bursty_source",
+                    detail=entry.entry_id,
+                    entry=entry.entry_id,
+                    label="音源成团（供给侧，未调整缓冲）",
+                )
+                entry.bursty_since = now
             return
         if now - entry.bursty_since < 30.0:
             return
@@ -349,7 +360,7 @@ class AudioSupervisor:
             label=f"缓冲加大到 {entry.buffer_override:.2f}s",
         )
         logger.info(
-            "Audio supervisor: widened %s delay line to %.2fs (bursty source)",
+            "Audio supervisor: widened %s delay line to %.2fs (slow consumer)",
             entry.entry_id,
             entry.buffer_override,
         )
