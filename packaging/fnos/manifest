@@ -9,11 +9,11 @@ desc="""<p>把手机、电脑上的音频投放到一台或多台小米智能音
 <li>📜 带屏音箱自动显示封面与滚动歌词</li>
 <li>🩺 内置链路诊断，丢包 / 延迟一目了然</li>
 </ul>
-<p><img style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/01-player.png"/></p>
-<p><img style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/02-speakers.png"/></p>
-<p><img style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/03-eq.png"/></p>
-<p><img style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/04-links.png"/></p>
-<p><img style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/05-stereo.png"/></p>
+<p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/01-player.png"/></p>
+<p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/02-speakers.png"/></p>
+<p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/03-eq.png"/></p>
+<p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/04-links.png"/></p>
+<p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/05-stereo.png"/></p>
 <p>项目地址：<a href="https://github.com/DyMode/MiCast">DyMode/MiCast</a></p>
 """
 source=thirdparty
