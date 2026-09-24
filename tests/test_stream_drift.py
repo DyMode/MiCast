@@ -1,6 +1,7 @@
 """Client drift handling: lag ceiling skips to live, slow queues are not kicked."""
 
 import asyncio
+from collections import deque
 
 import pytest
 from fastapi import Request
@@ -8,16 +9,22 @@ from fastapi import Request
 from micast.audio_encoder import StreamFormat
 from micast.config import settings
 from micast.stream_server import (
-    CLIENT_MAX_LAG_SECONDS,
     StreamServer,
-    _mp3_aligned_drop,
+    _drop_whole_chunks,
 )
 
 
-def test_mp3_delay_reduction_uses_next_frame_boundary():
-    buffer = bytearray(b"x" * 100 + b"\xff\xfb\x90\x64" + b"y" * 100)
-    assert _mp3_aligned_drop(buffer, 90) == 100
-    assert _mp3_aligned_drop(bytearray(b"no frame"), 3) == 3
+def test_delay_cuts_drop_whole_chunks_only():
+    """Drops must stay on chunk boundaries: a byte-offset cut hands the decoder
+    a partial frame, which is how a delivered gap becomes lasting distortion."""
+    buffer = deque([b"a" * 100, b"b" * 100, b"c" * 100])
+    # 90 bytes requested: the first whole chunk goes (100), never 90 bytes of it.
+    assert _drop_whole_chunks(buffer, 90) == 100
+    assert list(buffer) == [b"b" * 100, b"c" * 100]
+    # Overshoot is bounded by one chunk.
+    assert _drop_whole_chunks(buffer, 250) == 200
+    assert buffer == deque()
+    assert _drop_whole_chunks(buffer, 10) == 0
 
 
 def _mp3_format(byte_rate: int = 40000) -> StreamFormat:
@@ -69,33 +76,35 @@ def test_kick_sentinel_still_replaces_queued_data():
 
 
 @pytest.mark.asyncio
-async def test_delay_line_caps_lag():
-    """Feeding far above the ceiling drops the oldest excess once instead of
-    disconnecting, and the rest is released normally."""
+async def test_delay_line_releases_whole_chunks_only():
+    """Every payload a client reads must be a whole broadcast chunk.
+
+    Chunks are encoder write runs, so whole-chunk release keeps the stream
+    frame-aligned. The old 1 024-byte paced slicing cut frames in half, which
+    is how a delivered gap turned into lasting distortion on players that do
+    not resync (FLAC/WAV in particular)."""
     byte_rate = 40000
     server = StreamServer()
     server.register_stream("r1", _mp3_format(byte_rate))
     response = await server._serve_stream(_request(), "r1")
     iterator = response.body_iterator
-    # Grab the state object up front: a wait_for timeout cancels the pending
-    # __anext__, which kills the generator and pops it from _client_delay.
-    state = next(iter(server._client_delay.values()))
 
-    reserve = int(byte_rate * settings.stream_buffer_seconds)
-    ceiling = reserve + int(byte_rate * CLIENT_MAX_LAG_SECONDS)
-    fed = ceiling * 2
-    server._broadcast_to("r1", b"\x01" * fed)
+    chunks = [bytes([index]) * 20_000 for index in range(1, 20)]
+    for chunk in chunks:
+        server._broadcast_to("r1", chunk)
 
-    received = bytearray()
-    for _ in range(1000):  # drain everything releasable from this broadcast
+    received = []
+    for _ in range(1000):  # drain everything releasable from this burst
         try:
-            received.extend(await asyncio.wait_for(anext(iterator), timeout=0.5))
+            received.append(await asyncio.wait_for(anext(iterator), timeout=0.5))
         except TimeoutError:
             break
 
-    assert state["lag_drops"] == 1
-    assert 0 < len(received) <= ceiling - reserve + 1024
-    assert len(received) < fed  # the excess was skipped, not delivered late
+    assert received  # the client is fed
+    for payload in received:
+        assert payload in chunks  # whole chunks only, never a slice
+    # The reserve still holds audio back (that is the delay line's job).
+    assert sum(len(item) for item in received) < sum(len(item) for item in chunks)
 
     await iterator.aclose()
 
@@ -124,12 +133,14 @@ async def test_hold_increase_mid_stream_refills_with_silence(monkeypatch):
     live_a = b"\xde\xad\xbe\xef" * 2000
     live_b = b"\xca\xfe\xba\xbe" * 2000
     server._broadcast_to("r1", live_a)
-    # Reserve is 2 000 B, so exactly five 1 024 B paced chunks are released.
-    for _ in range(5):
-        assert b"\xde\xad\xbe\xef" in await anext(iterator)  # playing live
+    # Release is chunk-granular: the first chunk stays buffered because the
+    # 2 000 B reserve cannot be given up, and the next one frees the first.
+    server._broadcast_to("r1", live_b)
+    first = await anext(iterator)
+    assert b"\xde\xad\xbe\xef" in first and b"\xca\xfe\xba\xbe" not in first
 
     hold["ms"] = 2000  # reserve grows to 80 000 B mid-stream
-    server._broadcast_to("r1", live_b)
+    server._broadcast_to("r1", live_a)
     # The refill must keep the player alive with silence instead of draining
     # the withheld audio. No wait_for timeout here: cancelling anext kills
     # the generator (see the note in test_delay_line_caps_lag).

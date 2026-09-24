@@ -164,8 +164,8 @@ def _flac_server() -> StreamServer:
 
 @pytest.mark.asyncio
 async def test_flac_delay_line_activates_with_stable_observed_rate():
-    """After enough steady broadcasts the flac delay line throttles a burst:
-    the excess is skipped to live once (lag drop), not delivered late."""
+    """With a trustworthy observed rate the flac delay line paces the client
+    through whole chunks and keeps the reserve back."""
     server = _flac_server()
     rate = 100_000
     server._observed_byte_rate["airplay2"] = float(rate)
@@ -173,25 +173,22 @@ async def test_flac_delay_line_activates_with_stable_observed_rate():
 
     response = await server._serve_stream(_request(), "airplay2")
     iterator = response.body_iterator
-    state = next(iter(server._client_delay.values()))
 
-    # Mirror test_delay_line_caps_lag: one huge burst must hit the ceiling.
-    from micast.config import settings
-    from micast.stream_server import CLIENT_MAX_LAG_SECONDS
+    chunks = [bytes([index]) * 20_000 for index in range(1, 20)]
+    for chunk in chunks:
+        server._broadcast_to("airplay2", chunk)
 
-    reserve = int(rate * settings.stream_buffer_seconds)
-    ceiling = reserve + int(rate * CLIENT_MAX_LAG_SECONDS)
-    server._broadcast_to("airplay2", b"\x01" * (ceiling * 2))
-
-    received = bytearray()
+    received = []
     for _ in range(1000):
         try:
-            received.extend(await asyncio.wait_for(anext(iterator), timeout=0.5))
+            received.append(await asyncio.wait_for(anext(iterator), timeout=0.5))
         except TimeoutError:
             break
 
-    assert state["lag_drops"] == 1  # burst skipped to live, like mp3/wav
-    assert 0 < len(received) <= ceiling - reserve + 1024
+    assert received
+    for payload in received:
+        assert payload in chunks  # whole chunks: never a frame-splitting slice
+    assert sum(len(item) for item in received) < sum(len(item) for item in chunks)
     await iterator.aclose()
 
 

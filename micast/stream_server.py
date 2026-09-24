@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,6 @@ from micast.test_tone import test_tone_wav
 
 logger = logging.getLogger(__name__)
 
-PACED_CHUNK_BYTES = 1024
 # Hard ceiling on a client's delay line. Producer (sender clock) and consumer
 # (speaker clock) always drift a little; a speaker that trails accumulates
 # backlog without bound until its queue overflows. Capping the lag skips it to
@@ -55,18 +55,21 @@ _MEDIA_UA = (
 )
 
 
-def _mp3_aligned_drop(buffer: bytearray, requested: int) -> int:
-    """Find the next plausible MP3 frame boundary after a live delay cut."""
-    start = max(0, min(len(buffer), requested))
-    stop = min(len(buffer) - 1, start + 4096)
-    for index in range(start, stop):
-        first, second = buffer[index], buffer[index + 1]
-        if first != 0xFF or second & 0xE0 != 0xE0:
-            continue
-        if second & 0x18 == 0x08 or second & 0x06 == 0:
-            continue
-        return index
-    return start
+def _drop_whole_chunks(buffer: deque[bytes], requested: int) -> int:
+    """Drop the oldest whole chunks covering ``requested`` bytes.
+
+    Returns the bytes actually dropped. Chunks are encoder write runs, so
+    dropping whole ones keeps every scrap of audio the client sees
+    frame-aligned — a byte-offset cut leaves a partial frame at the head of
+    the stream, which is how a delivered gap turns into lasting distortion on
+    players that do not resync.
+    """
+    dropped = 0
+    while buffer and dropped < requested:
+        dropped += len(buffer.popleft())
+    return dropped
+
+
 
 
 async def _serve_seekable_media(url: str, ss: float, volume_provider=None) -> StreamingResponse:
@@ -469,7 +472,15 @@ class StreamServer:
             )
             if prefix:
                 yield bytes(prefix)
-            buffer = bytearray()
+            # The delay line holds WHOLE broadcast chunks, never byte slices:
+            # each chunk is a run of complete encoder mux writes, so keeping
+            # chunk boundaries means every client always sees frame-aligned
+            # data. Slicing at an arbitrary byte offset (the old behaviour)
+            # hands a FLAC/WAV decoder a stream cut mid-frame — cheap pull
+            # players can then latch onto noise instead of resyncing, which is
+            # how a dropout turns into permanent distortion.
+            buffer: deque[bytes] = deque()
+            held = 0
             # One frame of encoded silence (~20ms) for true-underrun keepalive.
             # seconds=0 still produces one frame plus the encoder flush.
             silence = (
@@ -499,7 +510,8 @@ class StreamServer:
                         yield chunk
                         continue
 
-                    buffer.extend(chunk)
+                    buffer.append(chunk)
+                    held += len(chunk)
 
                     manual_ms = (
                         settings.sink_hold_ms(receiver_id, sink) if receiver_id and sink else 0
@@ -512,19 +524,17 @@ class StreamServer:
                     new_hold = int(byte_rate * hold_ms / 1000) if byte_rate else 0
                     skip_ms = int(state.get("skip_ms") or 0) if state else 0
                     if skip_ms:
-                        skip_bytes = min(len(buffer), int(byte_rate * skip_ms / 1000))
+                        skip_bytes = int(byte_rate * skip_ms / 1000)
                         if skip_bytes:
-                            del buffer[:skip_bytes]
+                            dropped = _drop_whole_chunks(buffer, skip_bytes)
+                            held -= dropped
                         state["skip_ms"] = 0
                     if new_hold != hold_bytes:
                         if new_hold < hold_bytes:
                             # Pull earlier: discard the staged excess from the
                             # head (oldest content) so the client skips to live.
-                            drop = min(len(buffer), hold_bytes - new_hold)
-                            if stream_format.content_type == "audio/mpeg":
-                                drop = _mp3_aligned_drop(buffer, drop)
-                            if drop:
-                                del buffer[:drop]
+                            dropped = _drop_whole_chunks(buffer, hold_bytes - new_hold)
+                            held -= dropped
                         elif state is not None:
                             # Hold grew mid-stream: the reserve must be re-filled
                             # byte-by-byte from here on. Mark it so the keepalive
@@ -548,11 +558,17 @@ class StreamServer:
                     # chunk at a time), so this stays a small trim; the metrics
                     # event log records how large it actually was.
                     ceiling = reserve + int(byte_rate * self._max_lag_seconds())
-                    if len(buffer) > ceiling:
-                        skipped = len(buffer) - ceiling
-                        del buffer[:skipped]
-                        metrics.note_lag_skip(skipped, skipped / byte_rate * 1000)
-                        if state is not None:
+                    if held > ceiling:
+                        # Never trim below the reserve: dropping the last chunk
+                        # would starve the client completely.
+                        skipped = 0
+                        while buffer and held > ceiling and held - len(buffer[0]) >= reserve:
+                            head = buffer.popleft()
+                            held -= len(head)
+                            skipped += len(head)
+                        if skipped:
+                            metrics.note_lag_skip(skipped, skipped / byte_rate * 1000)
+                        if skipped and state is not None:
                             state["lag_drops"] = int(state.get("lag_drops") or 0) + 1
                             if state["lag_drops"] == 1 or state["lag_drops"] % 20 == 0:
                                 logger.info(
@@ -565,7 +581,7 @@ class StreamServer:
                                     state["lag_drops"],
                                 )
 
-                    if len(buffer) <= reserve:
+                    if held <= reserve:
                         now = time.monotonic()
                         if state is not None and state.get("ready_at") is None and silence:
                             # Startup fill: the speaker just connected and the
@@ -586,8 +602,8 @@ class StreamServer:
                             # Keepalive with real audio: releasing below the
                             # reserve beats injecting a dropout. The delay line
                             # refills by itself once flow normalises.
-                            yield bytes(buffer)
-                            buffer.clear()
+                            while buffer:
+                                held -= len(buffer.popleft())
                             last_yield_at = now
                             if state is not None and state.get("ready_at") is None:
                                 # Real bytes flowed: this connection is out of
@@ -612,24 +628,27 @@ class StreamServer:
                                     )
                     if state is not None:
                         state["target_ms"] = hold_ms
-                        state["buffer_ms"] = round(len(buffer) / byte_rate * 1000)
-                        if len(buffer) >= reserve:
+                        state["buffer_ms"] = round(held / byte_rate * 1000)
+                        if held >= reserve:
                             state["needs_fill"] = None
-                        if state.get("ready_at") is None and len(buffer) >= reserve:
+                        if state.get("ready_at") is None and held >= reserve:
                             state["ready_at"] = time.monotonic()
                         metrics.note_queue_depth(
                             queue.qsize(), float(state["buffer_ms"])
                         )
-                    while len(buffer) - reserve >= PACED_CHUNK_BYTES:
-                        payload = bytes(buffer[:PACED_CHUNK_BYTES])
-                        del buffer[:PACED_CHUNK_BYTES]
-                        yield payload
+                    # Release whole chunks, never byte slices: chunk boundaries
+                    # are encoder write boundaries, so the client's decoder
+                    # always sees complete frames.
+                    while buffer and held - len(buffer[0]) >= reserve:
+                        head = buffer.popleft()
+                        held -= len(head)
+                        yield head
                         last_yield_at = time.monotonic()
                     if state is not None:
-                        state["buffer_ms"] = round(len(buffer) / byte_rate * 1000)
+                        state["buffer_ms"] = round(held / byte_rate * 1000)
 
-                if buffer:
-                    yield bytes(buffer)
+                while buffer:
+                    yield buffer.popleft()
             finally:
                 self._clients.get(device_id, set()).discard(queue)
                 state = self._client_delay.pop(queue, None) or {}

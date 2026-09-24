@@ -37,9 +37,13 @@ async def test_group_recovery_releases_members_on_one_future_boundary():
     first_b = asyncio.create_task(anext(response_b.body_iterator))
     await server.broadcast("group-L", b"A" * 20_000)
     await server.broadcast("group-R", b"B" * 20_000)
+    # Release is chunk-granular (every byte a client reads stays frame-aligned),
+    # so one more chunk is needed before the reserve lets the first one out.
+    await server.broadcast("group-L", b"A" * 20_000)
+    await server.broadcast("group-R", b"B" * 20_000)
 
-    assert await asyncio.wait_for(first_a, 1) == b"A" * 1024
-    assert await asyncio.wait_for(first_b, 1) == b"B" * 1024
+    assert await asyncio.wait_for(first_a, 1) == b"A" * 20_000
+    assert await asyncio.wait_for(first_b, 1) == b"B" * 20_000
     await response_a.body_iterator.aclose()
     await response_b.body_iterator.aclose()
 
@@ -65,6 +69,7 @@ async def test_sink_connected_tracks_replacement_client():
     assert not server.sink_connected("group", "speaker-b")
 
     first = asyncio.create_task(anext(response.body_iterator))
+    await server.broadcast("group-L", b"A" * 20_000)
     await server.broadcast("group-L", b"A" * 20_000)
     await asyncio.wait_for(first, 1)
     await response.body_iterator.aclose()

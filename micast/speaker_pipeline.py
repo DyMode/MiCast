@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 from micast.audio_encoder import AudioEncoder, firequalizer_available, raw_pcm_format, wav_header
@@ -49,6 +50,9 @@ SOURCE_SILENCE_GRACE_PERIODS = 3
 # chunk; a longer gap means the encoder thread stalled (nothing lost, just
 # delayed) — the one hiccup cause no drop counter can see.
 ENCODER_GAP_MS = 150.0
+# A source that was idle longer than this starts a fresh pacing baseline, so
+# diagnostics never report idle time as input starvation.
+INPUT_IDLE_RESET_SECONDS = 1.0
 
 
 class SpeakerPipeline:
@@ -530,6 +534,7 @@ class SpeakerPipeline:
         # gaps while still answering a real stall in ~0.5s, well under the
         # speaker's ~2s abandonment. Late bytes within the grace window are
         # returned immediately — no silence, no extra beat of delay.
+        started = asyncio.get_running_loop().time()
         for _ in range(SOURCE_SILENCE_GRACE_PERIODS):
             try:
                 chunk = await asyncio.wait_for(
@@ -542,7 +547,9 @@ class SpeakerPipeline:
             "Source stalled for %s; feeding silence to keep clients alive",
             self._stream_id,
         )
-        metrics.note_source_stall(chunk_seconds * 1000 * SOURCE_SILENCE_GRACE_PERIODS)
+        # Report the silence the source actually produced: the grace window is
+        # a constant, so quoting it back hid whether a stall was 0.5s or 30s.
+        metrics.note_source_stall((asyncio.get_running_loop().time() - started) * 1000)
         metrics.note_silence_fill()
         return b"\x00" * SOURCE_SILENCE_CHUNK_BYTES, True
 
@@ -553,12 +560,20 @@ class SpeakerPipeline:
             loop = asyncio.get_running_loop()
             started_at = loop.time()
             fed_bytes = 0
+            last_real_at = started_at
             while self._running:
                 chunk, synthesized = await self._read_source_chunk(reader)
                 if not chunk:
                     break
                 if not synthesized:
                     self._note_source_bytes(chunk)
+                    # Idle time is not "behind realtime": restart the pacing
+                    # baseline after a gap, otherwise a pipeline that sat idle
+                    # for minutes reports a three-minute starvation figure.
+                    if loop.time() - last_real_at > INPUT_IDLE_RESET_SECONDS:
+                        started_at = loop.time()
+                        fed_bytes = 0
+                    last_real_at = loop.time()
                 gained = self._apply_input_gain(chunk)
                 if spectrum_wanted():
                     self._spectrum.feed(gained)
@@ -583,10 +598,10 @@ class SpeakerPipeline:
 
     async def _pump_encoder_to_stream(self, reader) -> None:
         try:
-            rate = self._input_sample_rate or 44100
             loop = asyncio.get_running_loop()
             last_at = loop.time()
-            last_len = 0
+            seen = 0
+            intervals: deque[float] = deque(maxlen=60)
             while self._running:
                 # read(32768) coalesces every immediately-pending muxer write
                 # into one ≤32KB chunk (see _EncodedReader), so all encoded
@@ -595,18 +610,23 @@ class SpeakerPipeline:
                 if not chunk:
                     break
                 now = loop.time()
-                # The encoder consumes PCM in real time, so encoded output is
-                # expected at roughly the audio duration of the previous chunk.
-                # A much longer gap means the encoder (or its thread) stalled —
-                # the concrete cause of a listener-visible hiccup that no drop
-                # counter reports, because nothing was lost, just delayed.
-                expected_ms = last_len / (rate * 4) * 1000 if last_len else 0.0
                 gap_ms = (now - last_at) * 1000
-                if last_len and gap_ms > expected_ms + ENCODER_GAP_MS:
-                    metrics.note_encoder_gap(gap_ms, expected_ms)
-                metrics.note_encode(gap_ms if last_len else 0.0)
                 last_at = now
-                last_len = len(chunk)
+                seen += 1
+                if seen > 1:
+                    metrics.note_encode(gap_ms)
+                    # The baseline is this pipeline's OWN recent cadence. The
+                    # first cut of this metric derived it from the previous
+                    # chunk's byte length over the PCM byte rate — but these
+                    # are ENCODED bytes, so the "expected" value was far too
+                    # small and ordinary jitter looked like a stall (96 false
+                    # gaps in five minutes). A real encoder stall is a gap
+                    # several times the median interval.
+                    if len(intervals) >= 10:
+                        typical = sorted(intervals)[len(intervals) // 2]
+                        if gap_ms > max(typical * 2.5, typical + ENCODER_GAP_MS):
+                            metrics.note_encoder_gap(gap_ms, typical)
+                    intervals.append(gap_ms)
                 await self._stream_server.broadcast(self._stream_id, chunk)
         except asyncio.CancelledError:
             pass
@@ -621,6 +641,7 @@ class SpeakerPipeline:
             loop = asyncio.get_running_loop()
             started_at = loop.time()
             fed_bytes = 0
+            last_real_at = started_at
             if self._running:
                 # Raw PCM bypass: prepend a streaming WAV header so the stream
                 # is a valid container (and gets cached as the join prefix).
@@ -631,6 +652,11 @@ class SpeakerPipeline:
                     break
                 if not synthesized:
                     self._note_source_bytes(chunk)
+                    # See _pump_source_to_encoder: idle time is not starvation.
+                    if loop.time() - last_real_at > INPUT_IDLE_RESET_SECONDS:
+                        started_at = loop.time()
+                        fed_bytes = 0
+                    last_real_at = loop.time()
                 gained = self._apply_input_gain(chunk)
                 if spectrum_wanted():
                     self._spectrum.feed(gained)
