@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from micast import __version__
 from micast.access import COOKIE_NAME, AccessManager
 from micast.audio_bridge import AudioBridge
+from micast.audio_metrics import run_runtime_monitor
 from micast.audio_supervisor import AudioSupervisor
 from micast.config import resolve_port, settings
 from micast.deployment import airplay2_mode
@@ -119,6 +120,11 @@ async def lifespan(app: FastAPI):
         return task
 
     start_background(verify_saved_xiaomi_login(), name="verify-xiaomi-login")
+    # Runtime health for the diagnostics page: CPU load of this process and how
+    # late the event loop runs its own timer. A stutter report with every drop
+    # counter at zero needs these two numbers to tell "the box is saturated"
+    # from "the sender delivers in lumps".
+    start_background(run_runtime_monitor(), name="runtime-monitor")
 
     orchestrator = PlaybackOrchestrator(
         bridge,
@@ -128,6 +134,10 @@ async def lifespan(app: FastAPI):
     orchestrator.attach()
     # Routes reach the group-membership reconciler through app.state.
     app.state.reconcile_group = orchestrator.reconcile_group
+    # Learn what formats each speaker accepts while the house is quiet. Starting
+    # this here (rather than only after a session ends) means a fresh install
+    # fills the table in without anyone pressing "test formats".
+    orchestrator.schedule_codec_probe(delay=90.0)
 
     # One authority decides whether each entry is delivering audio and drives
     # the recovery ladder; see micast/audio_supervisor.py for why the previous

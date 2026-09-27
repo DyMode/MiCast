@@ -10,15 +10,37 @@ from miservice import MiNAService
 logger = logging.getLogger(__name__)
 COMMAND_TIMEOUT_SECONDS = 15.0
 
+# How many Xiaomi cloud calls may be in flight at once, process-wide.
+#
+# aiohttp resolves names with a threaded resolver and *shields* each lookup, so
+# a call that times out leaves its DNS lookup holding a worker thread. On a
+# device whose DNS has gone slow, unbounded cloud calls (per-speaker watchdogs,
+# the device list, format probes, token verification) fill that pool within a
+# minute, after which every lookup — including a QR login — waits behind
+# lookups that will never come back.
+CLOUD_CONCURRENCY = 2
+
 
 class MinaAPI:
     """High-level API for a single Xiaomi speaker."""
 
-    def __init__(self, service: MiNAService, device_id: str):
+    def __init__(
+        self,
+        service: MiNAService,
+        device_id: str,
+        what: str = "",
+        gate: asyncio.Semaphore | None = None,
+    ):
         self.service = service
         self.device_id = device_id
+        # What this call is FOR, so a timeout can say something useful: account
+        # level calls carry no device id, and the message used to end in a bare
+        # colon ("小米音箱命令超时（15s）：").
+        self.what = what or (f"音箱 {device_id}" if device_id else "小米云端")
+        # Optional concurrency slot (see CLOUD_CONCURRENCY).
+        self._gate = gate
 
-    async def _call(self, operation):
+    async def _call(self, operation, what: str | None = None):
         """Bound third-party calls so one device cannot hold its lock forever.
 
         miservice-fork runs on a caller-owned aiohttp ClientSession, and
@@ -26,16 +48,23 @@ class MinaAPI:
         its pool, so wait_for's timeout cancellation is connection-safe and
         never poisons the shared session.
         """
+        bounded = asyncio.wait_for(operation, timeout=COMMAND_TIMEOUT_SECONDS)
         try:
-            return await asyncio.wait_for(operation, timeout=COMMAND_TIMEOUT_SECONDS)
+            if self._gate is None:
+                return await bounded
+            # Wait for a slot *before* the timeout starts: queueing behind a
+            # degraded cloud is not the call's own fault.
+            async with self._gate:
+                return await bounded
         except TimeoutError:
             raise TimeoutError(
-                f"小米音箱命令超时（{COMMAND_TIMEOUT_SECONDS:.0f}s）：{self.device_id}"
+                f"{what or self.what}超时（{COMMAND_TIMEOUT_SECONDS:.0f}s）"
+                "：小米云端没有响应，请检查这台设备的外网连接"
             ) from None
 
     async def device_list(self) -> list[dict]:
         """Return all Xiaomi AI devices."""
-        result = await self._call(self.service.device_list())
+        result = await self._call(self.service.device_list(), "获取设备列表")
         if isinstance(result, list):
             return result
         return result.get("data", [])

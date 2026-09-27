@@ -12,13 +12,28 @@ import aiohttp
 from miservice import MiAccount, MiIOService, MiNAService, MiTokenStore
 
 from micast.config import settings
+from micast.net import new_session
 from micast.xiaomi.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
 
+# Consecutive failed cloud calls, still this fresh, mean the account cannot do
+# anything useful right now (see cloud_degraded).
+CLOUD_DEGRADED_FAILURES = 3
+CLOUD_FAILURE_FRESH_SECONDS = 600.0
+# One credential re-check per minute, even if calls keep failing. Every failed
+# call used to trigger its own verification exchange, which doubled the cloud
+# traffic exactly when the cloud was already unreachable.
+CLOUD_VERIFY_MIN_INTERVAL_SECONDS = 60.0
+
 UA = "APP/com.xiaomi.mihome APPV/6.0.103 iosPassportSDK/3.9.0 iOS/14.4 miHSTS"
 SID = "micoapi"
 QR_SID = "xiaomiio"  # QR login uses xiaomiio, then exchange for micoapi
+ACCOUNT_HOST = "account.xiaomi.com"
+# A QR request reaches Xiaomi's account servers, which may be out of reach from
+# this device. Bounded here (and again in the page) so a failed attempt ends
+# with a reason instead of an open request and a blank code.
+QR_START_TIMEOUT_SECONDS = 12.0
 
 
 def _parse_json(text: str) -> dict:
@@ -37,6 +52,10 @@ class XiaomiAuth:
     def __init__(self):
         self._token_store = TokenStore()
         self._session: aiohttp.ClientSession | None = None
+        self._cloud_failures = 0
+        self._cloud_last_ok_at = 0.0
+        self._cloud_last_failure_at = 0.0
+        self._last_recovery_attempt_at = 0.0
         self._account: MiAccount | None = None
         self._miot_account: MiAccount | None = None
         self._service: MiNAService | None = None
@@ -62,6 +81,55 @@ class XiaomiAuth:
             json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def note_cloud_result(self, ok: bool) -> None:
+        """Record whether a real cloud call just worked.
+
+        Stored tokens prove nothing: the account can look "connected" while
+        every request times out or is rejected, and then the speaker list is
+        simply empty — with no way offered to log in again. Field report
+        (0.5.2): "登录丢了没有弹出二维码让我重新登陆".
+        """
+        now = time.time()
+        was_degraded = self.cloud_degraded()
+        if ok:
+            self._cloud_failures = 0
+            self._cloud_last_ok_at = now
+            if was_degraded:
+                # The recovery moment belongs in the log: it is what tells a
+                # reader when the account became usable again.
+                logger.info("小米云端已恢复")
+            return
+        self._cloud_failures += 1
+        self._cloud_last_failure_at = now
+        if not was_degraded and self.cloud_degraded():
+            # One line per outage, not one per failed call.
+            logger.warning(
+                "小米云端连续 %d 次无响应：音箱列表、播放控制与扫码登录都会失败。"
+                "请检查这台设备的外网访问（DNS、防火墙、代理都会影响）；"
+                "恢复后会自动重新连接，不需要重新登录。",
+                self._cloud_failures,
+            )
+
+    def cloud_health(self) -> dict:
+        """Consecutive cloud failures and when the last call worked."""
+        return {
+            "failures": self._cloud_failures,
+            "last_ok_at": int(self._cloud_last_ok_at or 0),
+            "last_failure_at": int(self._cloud_last_failure_at or 0),
+        }
+
+    def cloud_degraded(self) -> bool:
+        """True when the account is unusable right now (cloud unreachable).
+
+        Several consecutive failures, the latest still recent: one timeout is a
+        hiccup, and a counter left over from an hour ago is no evidence about
+        the cloud's state now. This signal decides whether the UI offers a
+        fresh login.
+        """
+        if self._cloud_failures < CLOUD_DEGRADED_FAILURES:
+            return False
+        return (time.time() - self._cloud_last_failure_at) <= CLOUD_FAILURE_FRESH_SECONDS
+
     def connection_state(self) -> dict:
         logged_in, user_id = self.stored_identity()
         saved = self._account_state()
@@ -71,7 +139,10 @@ class XiaomiAuth:
         # tokens is an expired session, not a brand-new installation. This
         # lets the UI offer recovery after a machine-key or token-file change.
         if logged_in:
-            status = "connected"
+            # Tokens present, but say so honestly when the cloud is not
+            # answering: "connected + no devices" is the state that left the
+            # user with no way back in.
+            status = "unstable" if self.cloud_degraded() else "connected"
         elif has_provider_history and saved_status != "disconnected":
             status = "expired"
         else:
@@ -81,15 +152,15 @@ class XiaomiAuth:
             "user_id": user_id or saved.get("user_id"),
             "status": status,
             "ever_logged_in": bool(saved.get("ever_logged_in")),
+            "cloud": self.cloud_health(),
         }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            # Bounded waits: a NAS with restricted egress must surface a login
-            # failure instead of hanging the QR sheet forever.
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=20, connect=10)
-            )
+            # Through the shared factory: bounded requests *and* bounded name
+            # resolution (see micast.net — an unbounded resolver took the whole
+            # account offline on a real device).
+            self._session = new_session()
         return self._session
 
     async def _build_account(self, tokens: dict) -> MiAccount:
@@ -184,8 +255,14 @@ class XiaomiAuth:
         except XiaomiAuthError as exc:
             logger.warning("passToken definitively rejected: %s", exc)
             return "rejected"
-        except Exception:
-            logger.warning("passToken verification inconclusive (network error)")
+        except Exception as exc:
+            # Say *why*: "inconclusive" alone made a DNS failure, a TLS failure
+            # and a timeout look identical in the log.
+            logger.warning(
+                "passToken verification inconclusive (network error): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             return "unknown"
         # passToken alive but the old serviceToken failed: store the fresh pair
         # and drop cached services so the next request uses it.
@@ -218,6 +295,13 @@ class XiaomiAuth:
 
     async def recover_after_failure(self) -> str:
         """Classify a failed Xiaomi request and invalidate only when certain."""
+        now = time.monotonic()
+        if now - self._last_recovery_attempt_at < CLOUD_VERIFY_MIN_INTERVAL_SECONDS:
+            # Throttled: keep the login and let the caller see the original
+            # failure. Verifying every failure turned one unreachable cloud into
+            # a storm of account exchanges.
+            return "unknown"
+        self._last_recovery_attempt_at = now
         verdict = await self.verify_credentials()
         logger.info("Xiaomi credential verification result: %s", verdict)
         if verdict == "rejected":
@@ -288,6 +372,21 @@ class XiaomiAuth:
             return True
         return (time.time() - refreshed_at) >= max_age_seconds
 
+    async def verify_if_stale(self, max_age_seconds: float) -> str:
+        """Verify the stored login only when it has not been checked recently.
+
+        The UI polls the status endpoint every 30s, and that poll used to
+        exchange the passToken for a fresh serviceToken every single time: two
+        cloud round trips plus an encrypted token rewrite per poll, and a log
+        line reading "serviceToken healed after API failure" every 30 seconds
+        although nothing had failed — the loudest thing in a field report and
+        pure noise. A real API failure still heals immediately through
+        recover_after_failure(); token freshness has its own renewal loop.
+        """
+        if not self.renewal_due(int(max_age_seconds)):
+            return "cached"
+        return await self.verify_credentials()
+
     async def run_token_renewal(
         self, interval_seconds: int = 12 * 3600, max_age_seconds: int = 7 * 24 * 3600
     ) -> None:
@@ -322,13 +421,30 @@ class XiaomiAuth:
             quote_via=quote,
         )
 
-        async with session.get(
-            f"https://account.xiaomi.com/longPolling/loginUrl?{params}",
-            headers={"User-Agent": UA},
-            cookies={"sdkVersion": "accountsdk-18.8.15", "deviceId": device_id},
-        ) as resp:
-            text = (await resp.read()).decode("utf-8")
+        try:
+            async with session.get(
+                f"https://{ACCOUNT_HOST}/longPolling/loginUrl?{params}",
+                headers={"User-Agent": UA},
+                cookies={"sdkVersion": "accountsdk-18.8.15", "deviceId": device_id},
+                timeout=aiohttp.ClientTimeout(total=QR_START_TIMEOUT_SECONDS),
+            ) as resp:
+                text = (await resp.read()).decode("utf-8")
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            # The reason belongs in the log: the page can only show a sentence.
+            logger.warning(
+                "QR login could not reach %s: %s: %s", ACCOUNT_HOST, type(exc).__name__, exc
+            )
+            raise XiaomiAuthError(
+                f"连不上小米账号服务器（{ACCOUNT_HOST}）。"
+                "请确认这台设备能访问外网：DNS、防火墙或代理都会影响。"
+            ) from exc
+        try:
             result = _parse_json(text)
+        except ValueError as exc:
+            logger.warning("QR login got an unreadable reply from %s: %s", ACCOUNT_HOST, text[:200])
+            raise XiaomiAuthError(
+                "小米账号服务器的回应无法识别（可能被网络设备拦截，或需要代理）。"
+            ) from exc
 
         qr_url = result.get("qr")
         lp_url = result.get("lp")

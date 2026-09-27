@@ -11,7 +11,7 @@ from pathlib import Path
 
 from micast.config import settings
 from micast.xiaomi.auth import XiaomiAuth, XiaomiAuthError
-from micast.xiaomi.mina_api import MinaAPI
+from micast.xiaomi.mina_api import CLOUD_CONCURRENCY, MinaAPI
 
 # Owner tag for playback started outside MiCast streams (debug test tone/URL).
 # Watched but never restored: when the speaker goes quiet the state is cleared.
@@ -39,6 +39,47 @@ PLAY_ERROR_MAX_BACKOFF_SECONDS = 300.0
 # improving recovery in practice; three five-second misses still fit the
 # existing 15-second restore guard.
 STATUS_CHECK_INTERVAL_SECONDS = 5.0
+# The formats a speaker can be asked to play, in the app's own words:
+#
+#   mp3 / flac / wav — our encoder's output (settings.audio.format)
+#   pcm             — raw PCM straight through, which the app serves as an
+#                     ENDLESS wav stream when transcoding is off
+#
+# "wav" and "pcm" are separate capabilities on purpose: the same decoder can
+# play a finite WAV file and still reject the live-stream container.
+CODEC_FORMATS = ("mp3", "flac", "wav", "pcm")
+CODEC_LABELS = {
+    "mp3": "MP3",
+    "flac": "FLAC",
+    "wav": "WAV（转码）",
+    "pcm": "PCM（直通）",
+}
+# Raw passthrough cannot be verified from the server side: some firmware fetches
+# the stream, keeps reading every byte, and plays nothing at all. Field data
+# (2026-09): 厨房小爱 (OH2P) pulled the live PCM stream at full rate for minutes
+# and stayed silent while 四楼小爱 (OH2) decoded the same stream fine — so
+# sustained bytes are NOT evidence for "pcm". A healthy pcm pull is therefore
+# recorded as UNVERIFIED (no boolean verdict at all, so nothing downstream can
+# call it confirmed), and models already known to discard raw passthrough are
+# recorded as unsupported so no re-learned pull can resurrect a false "✓".
+PCM_UNVERIFIED_REASON = "pcm_passthrough_unverifiable"
+PCM_MODEL_UNSUPPORTED_REASON = "model_rejects_pcm_passthrough"
+PCM_UNSUPPORTED_MODELS = frozenset({"OH2P"})
+# Earlier builds recorded upper-case names and aliased "PCM/WAV" onto the WAV
+# file probe, which mixed the two: the alias is dropped on load (the truthful
+# answer is re-learned from playback) instead of being carried forward.
+LEGACY_CODEC_KEYS = {"MP3": "mp3", "FLAC": "flac", "WAV": "wav", "PCM/WAV": None}
+# A verdict older than this is shown, but no longer trusted for advice.
+CODEC_CAPABILITY_TTL_SECONDS = 30 * 24 * 3600
+# Quality/bandwidth order used to recommend a format for a group: raw PCM costs
+# ~1.4 Mbit/s and exists as a fallback, never as a first choice.
+CODEC_PREFERENCE = ("flac", "wav", "mp3", "pcm")
+# A pull shorter than this (or one that has stopped) proves nothing: some
+# firmware fetches the URL and rejects the payload immediately.
+CODEC_PULL_MIN_BYTES = 24_000
+# A cloud/ubus hiccup must not leave a speaker playing: retry the stop.
+STOP_COMMAND_ATTEMPTS = 3
+STOP_COMMAND_RETRY_SECONDS = 0.5
 
 # Cloud device-list cache; see DeviceManager._devices_fetched_at.
 DEVICE_LIST_CACHE_SECONDS = 30.0
@@ -67,6 +108,9 @@ class DeviceManager:
         # Serializes cloud commands per speaker so pause/play cannot interleave,
         # and tracks which receiver currently owns each speaker.
         self._locks: dict[str, asyncio.Lock] = {}
+        # One slot pool for every cloud call this manager makes: see
+        # CLOUD_CONCURRENCY for what unbounded calls do to a slow resolver.
+        self._cloud_gate = asyncio.Semaphore(CLOUD_CONCURRENCY)
         # Ownership keys are namespaced per ingress: bare ``receiver_id`` for
         # AirPlay/local sessions, ``dlna:{receiver_id}`` for the DLNA ingress
         # (see DlnaService._owner), and MANUAL_PLAY_OWNER ("debug") for the
@@ -149,6 +193,25 @@ class DeviceManager:
     def selected_device_id(self, value: str | None) -> None:
         settings.select_device(value)
 
+    def cloud_api(self, device_id: str) -> MinaAPI:
+        """A cloud API handle sharing this manager's concurrency slot.
+
+        Every Xiaomi call goes through here so the process-wide bound (see
+        CLOUD_CONCURRENCY) cannot be side-stepped by a new call site.
+        """
+        return MinaAPI(self._service, device_id, gate=self._cloud_gate)
+
+    def cloud_degraded(self) -> bool:
+        """True while the cloud is unreachable (see XiaomiAuth.cloud_degraded).
+
+        Everything scheduled in the background checks this before spending a
+        round trip: during an outage those calls can only add queue pressure to
+        the same resolver the user's next login has to go through.
+        """
+        # getattr: hand-built instances (tests) may not have an auth at all.
+        auth = getattr(self, "auth", None)
+        return bool(auth is not None and auth.cloud_degraded())
+
     async def refresh_service(self) -> bool:
         """Ensure MiNAService is available."""
         # XiaomiAuth replaces its cached service after silent token renewal.
@@ -170,10 +233,12 @@ class DeviceManager:
             return self._devices
         if not await self.refresh_service():
             return []
-        api = MinaAPI(self._service, "")
+        api = self.cloud_api("")
         try:
             self._devices = await api.device_list()
+            self.auth.note_cloud_result(True)
         except Exception as exc:
+            self.auth.note_cloud_result(False)
             # Never trust miservice's error text: "Login failed" also wraps
             # pure network errors, and an expired serviceToken can surface as
             # an opaque {"code": ...} body. Ask Xiaomi directly: a rejected
@@ -186,7 +251,7 @@ class DeviceManager:
                 self._devices = []
                 raise XiaomiAuthError("小米登录已失效，请重新登录") from exc
             if verdict == "healed" and await self.refresh_service():
-                self._devices = await MinaAPI(self._service, "").device_list()
+                self._devices = await self.cloud_api("").device_list()
             else:
                 raise
         self._devices_fetched_at = time.monotonic()
@@ -291,7 +356,7 @@ class DeviceManager:
                 return True
             if owner is not None and current_owner and current_owner != owner:
                 logger.info("Speaker %s ownership: %s -> %s", device_id, current_owner, owner)
-            api = MinaAPI(self._service, device_id)
+            api = self.cloud_api(device_id)
             try:
                 await api.play_music_url(url, audio_id=audio_id)
             except Exception:
@@ -311,7 +376,7 @@ class DeviceManager:
         """Search Xiaomi's music library for a song's audioID ("" if no hit)."""
         if not await self.refresh_service():
             return ""
-        api = MinaAPI(self._service, next(iter(self._playing), ""))
+        api = self.cloud_api(next(iter(self._playing), ""))
         return await api.search_audio_id(title, artist, fuzzy_fallback)
 
     async def resume(self, device_id: str) -> bool:
@@ -324,7 +389,7 @@ class DeviceManager:
         async with self._lock_for(device_id):
             if not await self.refresh_service():
                 return False
-            api = MinaAPI(self._service, device_id)
+            api = self.cloud_api(device_id)
             url = self._stream_urls.get(device_id)
             try:
                 if url:
@@ -354,7 +419,7 @@ class DeviceManager:
                 return
             if not self._service:
                 return
-            api = MinaAPI(self._service, device_id)
+            api = self.cloud_api(device_id)
             try:
                 await api.pause()
             except Exception as exc:
@@ -388,14 +453,36 @@ class DeviceManager:
                 )
                 return
             if await self.refresh_service():
-                api = MinaAPI(self._service, device_id)
+                api = self.cloud_api(device_id)
                 # player_stop alone is ignored by some firmware during
                 # player_play_music playback; pause actually cuts the audio.
-                for command in (api.pause, api.stop):
-                    try:
-                        await command()
-                    except Exception as exc:
-                        logger.warning("%s failed for %s: %s", command.__name__, device_id, exc)
+                #
+                # Retried: the cloud answers these with an occasional
+                # "ubus server internal error ... Timed out waiting 2000.00ms"
+                # (field data 0.4.1), and a stop that never landed leaves the
+                # speaker playing a stream that is still reachable — connected
+                # and silent, which looks like the app is stuck.
+                for attempt in range(STOP_COMMAND_ATTEMPTS):
+                    failed: list[str] = []
+                    for command in (api.pause, api.stop):
+                        try:
+                            await command()
+                        except Exception as exc:
+                            failed.append(command.__name__)
+                            logger.warning(
+                                "%s failed for %s: %s", command.__name__, device_id, exc
+                            )
+                    if not failed:
+                        break
+                    if attempt + 1 < STOP_COMMAND_ATTEMPTS:
+                        await asyncio.sleep(STOP_COMMAND_RETRY_SECONDS * (attempt + 1))
+                    else:
+                        logger.warning(
+                            "Giving up stopping %s after %d attempts (%s)",
+                            device_id,
+                            STOP_COMMAND_ATTEMPTS,
+                            ", ".join(failed),
+                        )
             self._playing.discard(device_id)
             self._paused.discard(device_id)
             if not keep_error:
@@ -437,17 +524,72 @@ class DeviceManager:
     def play_errors(self) -> dict[str, str]:
         return {did: entry["error"] for did, entry in self._play_errors.items()}
 
+    @staticmethod
+    def canonical_codec_format(fmt: str) -> str | None:
+        """Map any recorded/legacy format name onto the canonical one."""
+        if not fmt:
+            return None
+        if fmt in CODEC_FORMATS:
+            return fmt
+        return LEGACY_CODEC_KEYS.get(fmt)
+
     def note_codec_capability(
         self, device_id: str, fmt: str, supported: bool, reason: str = "stream_verified"
-    ) -> None:
-        if fmt:
-            self._codec_capabilities.setdefault(device_id, {})[fmt] = supported
-            self._codec_capability_meta.setdefault(device_id, {})[fmt] = {
-                "status": "supported" if supported else "unsupported",
-                "verified_at": int(time.time()),
-                "reason": reason,
-            }
-            self._schedule_codec_capability_save()
+    ) -> bool | None:
+        """Record a format verdict; returns what was stored (None = withheld).
+
+        Withheld only happens for a successful raw-pcm pull, which proves
+        nothing (see PCM_UNVERIFIED_REASON): the format keeps no boolean
+        verdict, so no group can be told it is "confirmed" for it.
+        """
+        canonical = self.canonical_codec_format(fmt)
+        if canonical is None:
+            logger.debug("Ignoring codec capability for unknown format %r", fmt)
+            return None
+        verdict: bool | None = supported
+        if canonical == "pcm" and supported:
+            if self._hardware_of(device_id) in PCM_UNSUPPORTED_MODELS:
+                verdict, reason = False, PCM_MODEL_UNSUPPORTED_REASON
+            else:
+                verdict, reason = None, PCM_UNVERIFIED_REASON
+        capabilities = self._codec_capabilities.setdefault(device_id, {})
+        if verdict is None:
+            capabilities.pop(canonical, None)
+            status = "unverified"
+        else:
+            capabilities[canonical] = verdict
+            status = "supported" if verdict else "unsupported"
+        self._codec_capability_meta.setdefault(device_id, {})[canonical] = {
+            "status": status,
+            "verified_at": int(time.time()),
+            "reason": reason,
+            "label": CODEC_LABELS.get(canonical, canonical),
+        }
+        self._schedule_codec_capability_save()
+        return verdict
+
+    def _hardware_of(self, device_id: str) -> str:
+        """Native model code for a speaker, "" when it is not known yet.
+
+        settings.speakers carries the hardware the cloud device list reported;
+        the live list is the same data, one cache fill later.
+        """
+        for speaker in settings.speakers:
+            if getattr(speaker, "did", None) == device_id:
+                return str(getattr(speaker, "hardware", "") or "").upper()
+        for device in self._devices or []:
+            if str(device.get("deviceID") or "") == device_id:
+                return str(device.get("hardware") or "").upper()
+        return ""
+
+    def cached_devices(self) -> list[dict]:
+        """Last known device list, never a cloud round trip.
+
+        Diagnostics needs the device list on a 1.5s poll and inside the report —
+        the exact moments when the cloud may be unreachable. Fetching there made
+        the page that explains a failure fail with it.
+        """
+        return list(self._devices or [])
 
     def codec_capabilities(self, device_id: str) -> dict[str, bool]:
         return dict(self._codec_capabilities.get(device_id, {}))
@@ -470,11 +612,34 @@ class DeviceManager:
                     if not isinstance(meta, dict) or meta.get("status") not in {
                         "supported",
                         "unsupported",
+                        "unverified",
                     }:
                         continue
-                    self._codec_capability_meta.setdefault(str(did), {})[str(fmt)] = dict(meta)
+                    canonical = self.canonical_codec_format(str(fmt))
+                    if canonical is None:
+                        # The retired WAV/PCM alias: unknowable which of the two
+                        # it meant, so the record is dropped, not guessed at.
+                        continue
+                    meta = dict(meta)
+                    meta["label"] = CODEC_LABELS.get(canonical, canonical)
+                    if canonical == "pcm" and meta["status"] == "supported":
+                        # Older builds wrote a "✓" for pcm from the byte pull
+                        # alone, which is exactly the claim that turned into a
+                        # silent speaker (see PCM_UNVERIFIED_REASON). Re-decide
+                        # it on load so an existing file cannot keep showing it.
+                        if self._hardware_of(str(did)) in PCM_UNSUPPORTED_MODELS:
+                            meta["status"], meta["reason"] = (
+                                "unsupported",
+                                PCM_MODEL_UNSUPPORTED_REASON,
+                            )
+                        else:
+                            meta["status"], meta["reason"] = "unverified", PCM_UNVERIFIED_REASON
+                    self._codec_capability_meta.setdefault(str(did), {})[canonical] = meta
+                    if meta["status"] == "unverified":
+                        # No verdict to carry: only the record that it was tried.
+                        continue
                     supported = meta["status"] == "supported"
-                    self._codec_capabilities.setdefault(str(did), {})[str(fmt)] = supported
+                    self._codec_capabilities.setdefault(str(did), {})[canonical] = supported
         except FileNotFoundError:
             return
         except Exception:
@@ -534,25 +699,59 @@ class DeviceManager:
             logger.exception("Failed to persist Xiaomi codec capabilities")
 
     def codec_compatibility(self, device_ids: list[str]) -> dict:
-        formats = ("MP3", "FLAC", "WAV", "PCM/WAV")
+        """Which format a group of speakers can share.
+
+        ``possible`` only excludes formats a member is KNOWN to reject;
+        ``confirmed`` requires every member to have actually played it. A
+        verdict older than CODEC_CAPABILITY_TTL_SECONDS counts as unknown, so a
+        firmware update (or a fix on our side) is never blocked by an ancient
+        "unsupported" — and the diagnosis explains itself through
+        ``unknown_members`` / ``stale_formats``.
+        """
         ids = list(dict.fromkeys(device_ids))
+        now = time.time()
         members = {did: self.codec_capabilities(did) for did in ids}
+        stale: dict[str, list[str]] = {}
+        details = {did: self.codec_capability_details(did) for did in ids}
+        for did, meta in details.items():
+            aged = [
+                fmt
+                for fmt, item in meta.items()
+                if now - float(item.get("verified_at") or 0) > CODEC_CAPABILITY_TTL_SECONDS
+            ]
+            if aged:
+                stale[did] = sorted(aged)
+        known = {
+            did: {
+                fmt: value
+                for fmt, value in caps.items()
+                if fmt not in stale.get(did, [])
+            }
+            for did, caps in members.items()
+        }
         possible = [
-            fmt for fmt in formats if all(cap.get(fmt) is not False for cap in members.values())
+            fmt for fmt in CODEC_FORMATS if all(cap.get(fmt) is not False for cap in known.values())
         ]
         confirmed = [
-            fmt for fmt in formats if ids and all(cap.get(fmt) is True for cap in members.values())
+            fmt
+            for fmt in CODEC_FORMATS
+            if ids and all(cap.get(fmt) is True for cap in known.values())
         ]
+        recommended = next(
+            (fmt for fmt in CODEC_PREFERENCE if fmt in confirmed),
+            None,
+        ) or next((fmt for fmt in CODEC_PREFERENCE if fmt in possible), None)
         status = "confirmed" if confirmed else "incompatible" if not possible else "needs_check"
         return {
             "members": members,
+            "labels": dict(CODEC_LABELS),
+            "formats": list(CODEC_FORMATS),
             "possible_common_formats": possible,
             "confirmed_common_formats": confirmed,
-            "recommended_format": "MP3"
-            if "MP3" in possible
-            else (possible[0] if possible else None),
+            "recommended_format": recommended,
             "status": status,
-            "unknown_members": [did for did, cap in members.items() if not cap],
+            "unknown_members": [did for did, cap in known.items() if not cap],
+            "stale_formats": stale,
         }
 
     async def _error_retry_loop(self) -> None:
@@ -578,6 +777,10 @@ class DeviceManager:
                 for did in pending
             ]
             await asyncio.sleep(min(delays) if delays else PLAY_ERROR_RETRY_SECONDS)
+            if self.cloud_degraded():
+                # Retrying into an unreachable cloud changes nothing and adds
+                # lookups to the resolver pool every other caller waits on.
+                continue
             for did, entry in list(self._play_errors.items()):
                 url = entry.get("url")
                 if not url:
@@ -626,7 +829,7 @@ class DeviceManager:
             raise ValueError("volume must be 0-100")
         if not await self.refresh_service():
             raise XiaomiAuthError("小米登录已失效，请重新登录")
-        api = MinaAPI(self._service, device_id)
+        api = self.cloud_api(device_id)
         await api.set_volume(volume)
         self._volumes[device_id] = volume
         return volume
@@ -638,7 +841,7 @@ class DeviceManager:
         if not await self.refresh_service():
             return None if refresh else self._volumes.get(device_id)
         try:
-            status = await MinaAPI(self._service, device_id).get_status()
+            status = await self.cloud_api(device_id).get_status()
             volume = _find_volume(status)
             if volume is not None:
                 self._volumes[device_id] = volume
@@ -693,7 +896,11 @@ class DeviceManager:
                 await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS)
                 if not self._service:
                     continue
-                api = MinaAPI(self._service, device_id)
+                if self.cloud_degraded():
+                    # Polling a cloud that is not answering only adds lookups to
+                    # the resolver pool the user's login has to pass through.
+                    continue
+                api = self.cloud_api(device_id)
                 status = await api.get_status()
                 logger.debug("Speaker %s status: %s", device_id, status)
                 play_status = _find_play_status(status)

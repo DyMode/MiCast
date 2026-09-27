@@ -18,6 +18,7 @@ import aiohttp
 from micast import __version__
 from micast.config import default_data_dir, storage_mode
 from micast.deployment import update_download_supported
+from micast.net import new_session
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ async def check_for_update(force: bool = False) -> dict:
                     return _cache
         try:
             async with (
-                aiohttp.ClientSession(timeout=_CHECK_TIMEOUT) as session,
+                new_session(timeout=_CHECK_TIMEOUT) as session,
                 session.get(API_URL, headers={"Accept": "application/vnd.github+json"}) as resp,
             ):
                 if resp.status != 200:
@@ -194,7 +195,7 @@ async def download_update(asset: dict) -> None:
     target = target_dir / name
     try:
         async with (
-            aiohttp.ClientSession(timeout=_DOWNLOAD_TIMEOUT) as session,
+            new_session(timeout=_DOWNLOAD_TIMEOUT) as session,
             session.get(url) as resp,
         ):
                 if resp.status != 200:

@@ -11,6 +11,11 @@ from micast.xiaomi.auth import XiaomiAuth
 
 logger = logging.getLogger(__name__)
 
+# How stale the stored login must be before a status poll re-verifies it. The
+# UI polls every 30s; re-exchanging the serviceToken that often is pure cloud
+# churn (and looked like a failure in every field report).
+STATUS_VERIFY_MAX_AGE_SECONDS = 1800.0
+
 router = APIRouter(prefix="/api/xiaomi", tags=["xiaomi"])
 
 # In-memory QR state (single active QR per process)
@@ -79,10 +84,17 @@ def install(auth: XiaomiAuth) -> APIRouter:
 
     @router.get("/status")
     async def xiaomi_status(verify: bool = False):
-        """Return login state; optionally verify the stored passToken."""
+        """Return login state; optionally verify the stored passToken.
+
+        The verification is gated on token age: a 30s poll must not re-exchange
+        the serviceToken every time (see XiaomiAuth.verify_if_stale). Any real
+        request that fails still heals the login immediately.
+        """
         try:
-            if verify and auth.stored_identity()[0]:
-                await auth.recover_after_failure()
+            if verify and auth.stored_identity()[0] and not auth.cloud_degraded():
+                # While the cloud is not answering, the state is already known
+                # (`unstable`); asking again would just queue another lookup.
+                await auth.verify_if_stale(STATUS_VERIFY_MAX_AGE_SECONDS)
             return auth.connection_state()
         except Exception as e:
             logger.exception("Failed to load token status")
