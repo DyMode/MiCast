@@ -210,8 +210,9 @@ def test_stereo_group_splits_into_channel_streams(fake_settings):
     snap = topology.build_topology(bridge, dm)
 
     stream_ids = {n["id"] for n in snap["nodes"] if n["kind"] == "stream"}
-    # Channel streams plus the always-present base stream (raw bypass).
-    assert stream_ids == {"stream:r1-L", "stream:r1-R", "stream:r1"}
+    # One stream per channel: the un-split base mix has no consumer here, so
+    # it is not published (see Settings.needs_plain_base).
+    assert stream_ids == {"stream:r1-L", "stream:r1-R"}
 
     pull = _edges_by_direction(snap, "pull")
     routes = {(e["from"], e["to"]) for e in pull}

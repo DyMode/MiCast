@@ -54,3 +54,30 @@ async def test_overflow_past_the_window_drops_the_oldest_chunk():
 
     assert reader.dropped_chunks > 0
     assert reader.depth_ms() <= reader.capacity_ms()
+
+
+@pytest.mark.asyncio
+async def test_variant_stream_reports_its_own_branch_depth():
+    """A -q1 stream shares its entry's tee.
+
+    Asking for the depth of `airplay2-q1` used to miss the tee map (keyed by
+    entry id) and return an empty object, which the diagnostics page rendered
+    as "缓冲 NaNms" — and, once guarded, as a missing row.
+    """
+    from micast.audio_bridge import AudioBridge
+
+    tee = PCMTee(asyncio.StreamReader(), outputs=2)  # never started: no reads
+    # The bridge names every branch after its stream id (base has no suffix).
+    tee.outputs[0].name = "airplay2"
+    tee.outputs[1].name = "airplay2-q1"
+    bridge = object.__new__(AudioBridge)
+    bridge._airplay2_tees = {"airplay2": tee}
+    bridge._tees = {}
+
+    tee.outputs[1].feed_data(b"q" * 4800)  # 25ms at 48k stereo
+
+    base = bridge.entry_tee_depth_ms("airplay2")
+    variant = bridge.entry_tee_depth_ms("airplay2-q1")
+    assert base["capacity_ms"] == variant["capacity_ms"] > 0
+    assert base["depth_ms"] == 0  # the base branch got nothing
+    assert variant["depth_ms"] == pytest.approx(25.0, abs=0.5)

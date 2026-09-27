@@ -102,7 +102,7 @@ def test_airplay2_group_instance_resolves_group_for_channel_and_variants():
     assert instance.group_for_receiver("ap2-home") is instance.groups[0]
     assert instance.receiver_channel("ap2-home", "speaker-1") == "left"
     assert instance.channel_suffix("ap2-home", "speaker-2") == "-R"
-    assert {v["suffix"] for v in instance.receiver_stream_variants("ap2-home")} == {"-L", "-R", ""}
+    assert {v["suffix"] for v in instance.receiver_stream_variants("ap2-home")} == {"-L", "-R"}
 
 
 def test_device_id_change_migrates_every_speaker_reference(tmp_path, monkeypatch):

@@ -174,11 +174,13 @@ def test_stereo_variants_combine_channel_and_eq(cfg):
         )
     ]
     variants = cfg.receiver_stream_variants("r1")
-    assert [v["suffix"] for v in variants] == ["-L", "-R", ""]
+    assert [v["suffix"] for v in variants] == ["-L", "-R"]
 
     cfg.set_speaker_eq("didA", enabled=True, bands=[5] + [0] * 9)
     variants = cfg.receiver_stream_variants("r1")
-    assert [v["suffix"] for v in variants] == ["-L-q1", "-R", ""]
+    # EQ splits the left channel off the plain -L stream; the base mix still
+    # has no consumer in a fully channel-split group.
+    assert [v["suffix"] for v in variants] == ["-L-q1", "-R"]
     assert cfg.stream_suffix("r1", "didA") == "-L-q1"
     assert cfg.stream_suffix("r1", "didB") == "-R"
 

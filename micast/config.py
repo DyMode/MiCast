@@ -1239,6 +1239,32 @@ class Settings(BaseSettings):
         points = legacy_bands_to_points(EQ_BANDS_HZ, bands)
         return self.set_speaker_eq_curve(did, enabled=enabled, points=points, preset=preset)
 
+    def needs_plain_base(self, receiver_id: str) -> bool:
+        """Whether anything can actually consume the un-split, un-EQ'd mix.
+
+        The plain base stream used to be published unconditionally. In a stereo
+        group where every member owns a channel and nothing external is
+        attached, nobody can ever ask for it (each sink resolves to its own
+        channel variant), so it was a whole extra encoder and tee branch for a
+        pair of speakers — CPU the branches that matter were competing for.
+        """
+        group = self.group_for_receiver(receiver_id)
+        if group is None or group.mode != "stereo":
+            # Mirror/single receivers serve every member from the base mix.
+            return True
+        # External consumers: DLNA renderers pull /stream/{entry} directly and
+        # the AirPlay-target tap carries the base mix.
+        if self.receiver_dlna_targets(receiver_id) or self.receiver_airplay_targets(receiver_id):
+            return True
+        # A network member without a channel assignment pulls the base stream.
+        if any(did not in group.network_channels for did in group.dlna_targets):
+            return True
+        # A speaker member with no channel plays the mix.
+        return any(
+            self.receiver_channel(receiver_id, did) is None
+            for did in self.receiver_targets(receiver_id)
+        )
+
     def receiver_stream_variants(self, receiver_id: str) -> list[dict]:
         """Streams a receiver must publish: one per (channel, EQ, loudness).
 
@@ -1292,10 +1318,11 @@ class Settings(BaseSettings):
                             "loudness": False,
                         }
                     )
-        # The plain base stream always exists: it is a cheap raw-PCM bypass
-        # (no encoder) and serves mirror speakers, DLNA renderers without a
-        # channel assignment, and anything else that just wants the mix.
-        if ("", None, False) not in seen:
+        # The plain base stream exists only when something consumes it: the
+        # cheap raw-PCM bypass for mirror speakers, DLNA renderers without a
+        # channel assignment, external targets, and anything else that just
+        # wants the mix. A channel-split group needs none of them.
+        if self.needs_plain_base(receiver_id) and ("", None, False) not in seen:
             variants.append(
                 {"suffix": "", "base": "", "channel": None, "eq": None, "loudness": False}
             )
@@ -1312,6 +1339,43 @@ class Settings(BaseSettings):
             if (variant["base"], variant["eq"], variant["loudness"]) == (base, curve, loudness):
                 return variant["suffix"]
         return base
+
+    def stream_id_for(self, receiver_id: str, did: str | None = None) -> str:
+        """Stream endpoint that serves one sink of a receiver.
+
+        The suffix already carries channel + EQ split, so this is the ONLY
+        correct way to build a play URL: appending a suffix to an already
+        suffixed stream id asks for a stream that does not exist (a 404 the
+        speaker reads as "nothing to play").
+        """
+        if did is None:
+            return receiver_id
+        return f"{receiver_id}{self.stream_suffix(receiver_id, did)}"
+
+    def stream_url_for(self, receiver_id: str, did: str | None = None) -> str:
+        """Full play URL (up to the stream name) of one receiver for one sink."""
+        return (
+            f"http://{self.effective_stream_host}:{self.stream_port}"
+            f"/stream/{self.stream_id_for(receiver_id, did)}"
+        )
+
+    def audio_entry_ids(self) -> list[str]:
+        """Every id an audio entry can have: receivers + AirPlay 2 instances."""
+        return [item.id for item in self.receivers] + [item.id for item in self.airplay2_instances]
+
+    def entry_id_of_stream(self, stream_id: str) -> str | None:
+        """Base entry id a stream id belongs to.
+
+        Stream ids are ``<entry_id>`` or ``<entry_id>-L/-R/-qN`` variants, so
+        the longest entry id the stream starts with is its owner. Recovery has
+        to act on the ENTRY (rebuild its pipelines), never on the variant.
+        """
+        matches = [
+            entry_id
+            for entry_id in self.audio_entry_ids()
+            if stream_id == entry_id or stream_id.startswith(f"{entry_id}-")
+        ]
+        return max(matches, key=len) if matches else None
 
     def add_receiver(
         self, name: str, target_type: str, target_id: str | None = None

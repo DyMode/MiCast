@@ -41,7 +41,9 @@ def test_variant_plan_stereo_group_splits_channels(monkeypatch):
     group, stereo, variants = bridge._airplay2_variant_plan(cfg)
 
     assert stereo and group is not None and group.id == "g1"
-    assert {v["suffix"] for v in variants} == {"-L", "-R", ""}
+    # Two members, one channel each, nothing external: the un-split base mix
+    # has no consumer, so it is not published (it used to be a third encoder).
+    assert {v["suffix"] for v in variants} == {"-L", "-R"}
 
 
 def test_variant_plan_mirror_group_stays_single_stream(monkeypatch):
@@ -89,7 +91,7 @@ async def test_group_topology_change_restarts_only_mapped_airplay2(monkeypatch):
 
     await bridge.rebuild_airplay2_group("g1")
 
-    bridge._stop_airplay2_pipeline.assert_awaited_once_with("ap2-group")
+    bridge._stop_airplay2_pipeline.assert_awaited_once_with("ap2-group", keep_source=False)
     bridge._start_airplay2_pipelines.assert_awaited_once()
 
 

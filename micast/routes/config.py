@@ -85,7 +85,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                 "preferred": None,
                 "actual": None,
                 "status": "hosted",
-                "detail": "由 fnOS 统一网关托管（Unix Socket），无需配置",
+                "detail": "由 fnOS 统一网关托管，无需配置",
                 "editable": False,
             }
         )
@@ -99,7 +99,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                 "preferred": _preferred("port", 3000),
                 "actual": settings.port,
                 "status": "listening",
-                "detail": "浏览器访问的管理界面端口；修改后需重启应用生效",
+                "detail": "浏览器访问端口；修改后需重启应用",
                 "editable": not env_pinned("MICAST_PORT"),
             }
         )
@@ -113,7 +113,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "preferred": _preferred("stream_port", 8080),
             "actual": settings.stream_port,
             "status": "listening",
-            "detail": "音箱从该端口拉取音频流；被占用时自动顺延",
+            "detail": "音箱拉取音频流；被占用时自动顺延",
             "editable": not env_pinned("MICAST_STREAM_PORT"),
         }
     )
@@ -128,10 +128,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "preferred": _preferred("airplay_rtsp_port", 5000),
             "actual": rtsp_ports[0] if rtsp_ports else None,
             "status": "listening" if rtsp_ports else "off",
-            "detail": (
-                "经典 AirPlay 会话端口，从首选端口起扫描 32 个"
-                + (f"；当前绑定 {', '.join(map(str, rtsp_ports))}" if len(rtsp_ports) > 1 else "")
-            ),
+            "detail": "经典 AirPlay 会话端口；被占用时自动顺延",
             "editable": not env_pinned("MICAST_AIRPLAY_RTSP_PORT"),
         }
     )
@@ -165,7 +162,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                     "preferred": _preferred("airplay2_port", 7000),
                     "actual": actual,
                     "status": "listening" if (enabled and actual) else "off",
-                    "detail": "shairport-sync 接收端口，从首选端口起扫描 32 个",
+                    "detail": "接收端口；被占用时自动顺延",
                     "editable": not env_pinned("MICAST_AIRPLAY2_PORT"),
                 }
             )
@@ -178,7 +175,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                     "preferred": None,
                     "actual": [319, 320],
                     "status": "listening" if enabled else "off",
-                    "detail": "NQPTP 的 PTP 时钟同步，协议固定端口，不可修改",
+                    "detail": "NQPTP PTP 时钟同步；由 AirPlay 2 使用",
                     "editable": False,
                 }
             )
@@ -192,7 +189,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                     "preferred": 7000,
                     "actual": 7000,
                     "status": "hosted",
-                    "detail": "接收容器独立 IP 内部端口，不存在冲突，无需配置",
+                    "detail": "接收容器内部端口，无冲突，无需配置",
                     "editable": False,
                 }
             )
@@ -206,7 +203,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "preferred": None,
             "actual": 5353,
             "status": "listening",
-            "detail": "AirPlay/DLNA 发现广播，协议固定端口，可与其他 mDNS 服务共存",
+            "detail": "AirPlay / DLNA 发现广播，可与其他 mDNS 服务共存",
             "editable": False,
         }
     )
@@ -225,7 +222,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                 "stopped": "off",
                 "error": "error",
             }.get(dlna_status, "off"),
-            "detail": (dlna.detail if dlna else "DLNA 服务不可用") + "；协议固定端口",
+            "detail": dlna.detail if dlna else "DLNA 服务不可用",
             "editable": False,
         }
     )

@@ -93,7 +93,10 @@ async def test_delay_line_releases_whole_chunks_only():
     for chunk in chunks:
         server._broadcast_to("r1", chunk)
 
-    received = []
+    received = [await asyncio.wait_for(anext(iterator), timeout=0.5)]
+    # The reserve still holds audio back while broadcasts keep flowing (that is
+    # the delay line's job)...
+    assert sum(len(item) for item in received) < sum(len(item) for item in chunks)
     for _ in range(1000):  # drain everything releasable from this burst
         try:
             received.append(await asyncio.wait_for(anext(iterator), timeout=0.5))
@@ -103,8 +106,6 @@ async def test_delay_line_releases_whole_chunks_only():
     assert received  # the client is fed
     for payload in received:
         assert payload in chunks  # whole chunks only, never a slice
-    # The reserve still holds audio back (that is the delay line's job).
-    assert sum(len(item) for item in received) < sum(len(item) for item in chunks)
 
     await iterator.aclose()
 

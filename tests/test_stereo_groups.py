@@ -50,6 +50,8 @@ def test_stereo_mode_allows_network_only_group():
     # Assigning network channels creates channel streams for DLNA to pull.
     settings.update_group("g1", network_channels={"aabbccddeeff": "left", "001122334455": "right"})
     variants = settings.receiver_stream_variants("r1")
+    # Network members without a channel assignment still need the base mix, so
+    # it stays published alongside the two channel streams.
     assert [v["suffix"] for v in variants] == ["-L", "-R", ""]
     assert settings.receiver_channel_variant_suffix("r1", "left") == "-L"
 
@@ -251,3 +253,36 @@ def test_filter_follows_channel_holder_after_swap(monkeypatch):
         ("pan", "stereo|c0=FL|c1=FL"),
         ("volume", "-6.0dB"),
     ]
+
+
+def test_plain_base_is_published_only_when_something_consumes_it():
+    """A channel-split group must not run a third encoder for nobody.
+
+    Field data (0.5.x, stereo pair): the group published base + -L-q1 + -R, but
+    every sink resolves to its own channel variant, so the base stream had no
+    possible consumer — one wasted encoder (and tee branch) on a box where the
+    branches that matter were competing for CPU.
+    """
+    settings = _settings_with_stereo_group()
+    group = settings.groups[0]
+    group.mode = "stereo"
+    group.channels = {"didA": "left", "didB": "right"}
+
+    # Both members own a channel, nothing external: the base mix is unreachable.
+    assert not settings.needs_plain_base("r1")
+    assert [v["suffix"] for v in settings.receiver_stream_variants("r1")] == ["-L", "-R"]
+
+    # A member without a channel plays the mix, so the base comes back.
+    group.channels = {"didA": "left"}
+    assert settings.needs_plain_base("r1")
+    assert "" in [v["suffix"] for v in settings.receiver_stream_variants("r1")]
+
+    # ... and so does an external consumer (DLNA renderer pulls /stream/{id}).
+    group.channels = {"didA": "left", "didB": "right"}
+    group.dlna_targets = ["udn-1"]
+    assert settings.needs_plain_base("r1")
+    assert "" in [v["suffix"] for v in settings.receiver_stream_variants("r1")]
+
+    # A mirror group serves everyone from the base mix.
+    group.mode = "mirror"
+    assert settings.needs_plain_base("r1")

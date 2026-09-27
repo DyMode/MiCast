@@ -41,6 +41,23 @@ def test_common_gain_preserves_identity_and_mutes():
     assert result[0] == -result[1]
 
 
+def test_gain_rounding_matches_python_round_sample_by_sample():
+    """The vectorised gain must stay bit-identical to ``round(s * gain)``.
+
+    It replaces a per-sample Python loop on the audio hot path (see
+    micast.volume); both round half to even, so any drift here would be an
+    audio change, not an optimisation.
+    """
+    samples = [-32768, -32767, -1001, -1, 0, 1, 999, 12345, 32766, 32767] * 40
+    pcm = struct.pack(f"<{len(samples)}h", *samples)
+    for percent in (1, 7, 33, 50, 66, 99):
+        gain = 10 ** ((percent * 0.3 - 30) / 20)
+        expected = struct.pack(
+            f"<{len(samples)}h", *[round(sample * gain) for sample in samples]
+        )
+        assert apply_pcm_gain(pcm, percent) == expected
+
+
 async def test_airplay2_pipeline_and_network_share_policy(monkeypatch):
     bridge = object.__new__(AudioBridge)
     bridge._pipelines = {}

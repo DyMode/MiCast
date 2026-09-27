@@ -46,6 +46,13 @@ class AudioBridge:
         self._airplay2_pipelines: dict[str, SpeakerPipeline] = {}
         self._airplay2_runtime: dict[str, dict] = {}
         self._airplay2_sources: dict[str, PCMSource] = {}
+        # The reader each source handed over, and the ingress settings that
+        # source was started with. Both exist so a plan-only rebuild (target,
+        # EQ, channel, delay) can re-attach pipelines to the SAME receiver
+        # process instead of restarting it — restarting shairport drops the
+        # phone's AirPlay 2 session outright.
+        self._airplay2_readers: dict[str, asyncio.StreamReader] = {}
+        self._airplay2_source_keys: dict[str, tuple] = {}
         self._airplay2_tees: dict[str, PCMTee] = {}
         # Last known playback target per AirPlay 2 instance: a retarget must
         # release the speaker the instance just left (it would otherwise keep
@@ -114,7 +121,7 @@ class AudioBridge:
     @property
     def status(self) -> dict:
         return {
-            "status": self._status,
+            "status": self._live_status(),
             "pcm_source": (
                 "AirPlay 音频" if settings.airplay_engine == "local" else settings.pcm_source
             ),
@@ -237,6 +244,25 @@ class AudioBridge:
             },
         }
 
+    def _airplay2_source_key(self, instance) -> tuple:
+        """What the receiver PROCESS itself depends on: nothing else.
+
+        shairport is started with the instance's name and the configured port,
+        around a fixed command. The target speaker, EQ curve, channel and delay
+        are all egress concerns — baked into our pipelines, not into shairport.
+        Comparing this key is what lets a retarget keep the phone's session.
+        """
+        return (
+            instance.name,
+            str(settings.airplay2_port or ""),
+            str(settings.airplay2_pcm_source),
+        )
+
+    def _airplay2_ingress_unchanged(self, instance) -> bool:
+        """True when the live receiver process already matches this instance."""
+        previous = getattr(self, "_airplay2_source_keys", {}).get(instance.id)
+        return previous is not None and previous == self._airplay2_source_key(instance)
+
     def _airplay2_entry_ids(self) -> set[str]:
         """Ids whose audio arrives through the AirPlay 2 ingress.
 
@@ -288,7 +314,7 @@ class AudioBridge:
         if settings.airplay_engine == "local":
             return {
                 "configured": True,
-                "status": self._status,
+                "status": self._live_status(),
                 "detail": "经典 AirPlay 已就绪",
             }
         return self._receiver_manager.orchestration_status
@@ -743,8 +769,14 @@ class AudioBridge:
             instance_id: getattr(self, "_airplay2_targets", {}).get(instance_id)
             for instance_id in affected
         }
+        # A plan-only rebuild keeps the receiver process: the ingress settings
+        # (name/port/command) are the only thing shairport is started with, so a
+        # retarget or an EQ change must not hang up on the sender.
+        by_id = {item.id: item for item in settings.airplay2_instances}
         for instance_id in sorted(affected):
-            await self._stop_airplay2_pipeline(instance_id)
+            instance = by_id.get(instance_id)
+            keep = instance is not None and self._airplay2_ingress_unchanged(instance)
+            await self._stop_airplay2_pipeline(instance_id, keep_source=keep)
         await self._start_airplay2_pipelines()
         stream_server = getattr(self, "_stream_server", None)
         if stream_server is None:
@@ -756,6 +788,63 @@ class AudioBridge:
             self._stream_server.kick_clients(stream_id)
             self._stream_server.unregister_stream(stream_id)
         await self._release_retargeted_speakers(affected, previous_targets)
+        # ... and play the speaker it was retargeted TO (the sender's session is
+        # still live, so no session-start event will do it for us).
+        await self._start_retargeted_speakers(affected, previous_targets)
+
+    async def _start_retargeted_speakers(
+        self, affected: set[str], previous_targets: dict[str, str | None]
+    ) -> None:
+        """Play the speakers an AirPlay 2 instance was just retargeted TO.
+
+        Nothing else does it while the sender's session is live: no session-start
+        event fires (we deliberately keep the receiver process, so the phone
+        never reconnects), and the audio-restarted hook only re-points speakers
+        that are ALREADY playing. Field data (0.4.0): retargeting mid-song left
+        the new speaker silent and the app looked stuck — "切过去回不来". Before
+        that, restarting shairport happened to end the session, the phone
+        reconnected and the new speaker got its play command by accident.
+        """
+        manager = getattr(self, "_device_manager", None)
+        if manager is None:
+            return
+        base = f"http://{settings.effective_stream_host}:{settings.stream_port}"
+        for entry_id in sorted(affected):
+            if not self.is_session_active(entry_id):
+                continue
+            # Prefer the orchestrator's play path: it records a failed start for
+            # the retry loop and verifies the speaker actually pulls the stream.
+            # A bare play here was enough to strand the new speaker for good —
+            # field data (0.4.1): the Xiaomi cloud answered one play with
+            # "ubus server internal error ... Timed out waiting 2000.00ms", the
+            # exception was only logged, and the speaker stayed silent while the
+            # interface kept saying it was casting.
+            hook = getattr(self, "on_local_stream", None)
+            if hook is not None:
+                try:
+                    await hook(entry_id, f"{base}/stream/{entry_id}", steal=False)
+                except Exception:
+                    logger.exception(
+                        "Starting the retargeted targets of %s failed", entry_id
+                    )
+                continue
+            previous = previous_targets.get(entry_id)
+            for did in self.entry_targets(entry_id):
+                if did == previous:
+                    continue
+                owner = manager.owner_of(did)
+                if owner not in (None, entry_id):
+                    continue
+                stream_id = self.play_stream_id(entry_id, did)
+                if stream_id is None:
+                    continue
+                play_url = f"{base}/stream/{stream_id}/for/{entry_id}/{did}?s={time.time_ns()}"
+                try:
+                    await manager.play_stream(did, play_url, owner=entry_id, force=True)
+                except Exception:
+                    logger.exception(
+                        "Playing the retargeted speaker %s for %s failed", did, entry_id
+                    )
 
     async def _release_retargeted_speakers(
         self, affected: set[str], previous_targets: dict[str, str | None]
@@ -1006,22 +1095,40 @@ class AudioBridge:
             ):
                 return
             if existing_ids:
-                await self._stop_airplay2_pipeline(instance.id)
+                await self._stop_airplay2_pipeline(
+                    instance.id, keep_source=self._airplay2_ingress_unchanged(instance)
+                )
             runtime = {"id": instance.id, "status": "starting", "detail": "正在启动"}
             self._airplay2_runtime[instance.id] = runtime
-            # A local (shairport) source gets the configured preferred port so
-            # run-shairport scans from it instead of always starting at 7000.
-            source_env: dict[str, str] = {}
-            if settings.airplay2_port:
-                source_env["MICAST_AIRPLAY2_PORT"] = str(settings.airplay2_port)
-            source = create_pcm_source(settings.airplay2_pcm_source, env=source_env)
-            self._airplay2_sources[instance.id] = source
-            try:
-                reader = await source.start()
-            except Exception as exc:
-                runtime.update(status="error", detail=str(exc))
-                logger.exception("Single AirPlay 2 PCM source failed")
-                return
+            # Reuse a receiver we deliberately kept alive: a plan-only rebuild
+            # (retarget, EQ, channel) must not restart shairport, because that
+            # drops the phone's AirPlay 2 session mid-song. The transport has
+            # kept draining its output into this reader the whole time.
+            source = getattr(self, "_airplay2_sources", {}).get(instance.id)
+            reader = getattr(self, "_airplay2_readers", {}).get(instance.id)
+            if source is None or reader is None or not getattr(source, "alive", False):
+                # A local (shairport) source gets the configured preferred port
+                # so run-shairport scans from it instead of always starting at
+                # 7000.
+                source_env: dict[str, str] = {}
+                if settings.airplay2_port:
+                    source_env["MICAST_AIRPLAY2_PORT"] = str(settings.airplay2_port)
+                source = create_pcm_source(settings.airplay2_pcm_source, env=source_env)
+                self._airplay2_sources[instance.id] = source
+                try:
+                    reader = await source.start()
+                except Exception as exc:
+                    runtime.update(status="error", detail=str(exc))
+                    logger.exception("Single AirPlay 2 PCM source failed")
+                    return
+                self._airplay2_readers[instance.id] = reader
+                self._airplay2_source_keys[instance.id] = self._airplay2_source_key(instance)
+            else:
+                logger.info(
+                    "AirPlay 2 source for %s kept alive across the plan rebuild "
+                    "(the sender session survives)",
+                    instance.id,
+                )
             await self._start_airplay2_variant_pipelines(
                 instance,
                 group,
@@ -1070,7 +1177,10 @@ class AudioBridge:
             ):
                 continue
             if existing_ids:
-                await self._stop_airplay2_pipeline(instance.id)
+                # Orchestrated mode: the receiver lives in another container,
+                # so reconnecting its stream is cheap and no sender session is
+                # ours to protect here — a plan change may always reconnect.
+                await self._stop_airplay2_pipeline(instance.id, keep_source=False)
 
             try:
                 source = create_pcm_source(f"tcp:{result.pcm_host}:{result.pcm_port}")
@@ -1431,6 +1541,14 @@ class AudioBridge:
     async def _recover_stalled_source(self, stream_id: str) -> None:
         """Replace the upstream receiver after PCM stalls in a live session.
 
+        Recovery is scoped to the ENTRY that owns the stream: rebuilding one
+        entry's pipelines (classic or AirPlay 2) keeps every other receiver,
+        every other speaker's HTTP connection and the sender sessions intact.
+        A full engine restart here was the field "everything gets kicked"
+        failure: one AirPlay 1 stall tore the whole app down — all speakers
+        disconnected, shairport killed, zeroconf re-registered — and it could
+        not repair the stalled reader either, so it repeated every ~10s.
+
         The rebuild tears the pipelines down before recreating them; if it
         throws, the entry is left half-stopped and the stall watchdog is
         already gone (it exits after spawning this recovery) — so a single
@@ -1445,17 +1563,31 @@ class AudioBridge:
         try:
             airplay2_ids = [item.id for item in settings.airplay2_instances if item.enabled]
             instance_id = _stream_owner(stream_id, airplay2_ids)
-            if instance_id is None:
-                await self._stall_recovery_once(self.restart)
+            if instance_id is not None:
+                self._maintenance_sessions.add(instance_id)
+                self._active_sessions.discard(instance_id)
+                try:
+                    await self._stall_recovery_once(
+                        lambda: self._rebuild_airplay2_instances({instance_id})
+                    )
+                finally:
+                    self._maintenance_sessions.discard(instance_id)
                 return
-            self._maintenance_sessions.add(instance_id)
-            self._active_sessions.discard(instance_id)
-            try:
-                await self._stall_recovery_once(
-                    lambda: self._rebuild_airplay2_instances({instance_id})
+            entry_id = settings.entry_id_of_stream(stream_id)
+            if entry_id is None:
+                # The stream belongs to no configured entry (a config change
+                # raced the watchdog): there is nothing to rebuild, and a full
+                # restart would kick unrelated senders for no reason.
+                logger.warning(
+                    "PCM stall on %s: no configured entry owns this stream; "
+                    "leaving the running sessions alone",
+                    stream_id,
                 )
-            finally:
-                self._maintenance_sessions.discard(instance_id)
+                return
+            # The sender session stays live (only this entry's pipelines are
+            # rebuilt), so the session latch stays set: clearing it would blind
+            # the stall watchdog and the supervisor for the rest of the session.
+            await self._stall_recovery_once(lambda: self.rebuild_entry(entry_id))
         finally:
             self._stall_recovery_requested = False
 
@@ -1553,6 +1685,18 @@ class AudioBridge:
         await self._stop_pipelines()
         await self._receiver_manager.stop()
         await self._stream_server.stop()
+
+    def _live_status(self) -> str:
+        """Status derived at read time, never a value cached at startup.
+
+        The local engine's receivers are created by the reconciler as the plan
+        is applied, so `start()` derived its status while no receiver existed
+        yet and froze it at "idle": the diagnostics panel then said "服务未运行"
+        while 26 MB of audio was streaming to two speakers.
+        """
+        if self._status in {"starting", "stopping", "restarting", "error"}:
+            return self._status
+        return self._derive_status()
 
     def _derive_status(self) -> str:
         receivers = (
@@ -1663,13 +1807,28 @@ class AudioBridge:
 
     async def _stop_airplay2_pipelines(self) -> None:
         instance_ids = (
-            set(self._airplay2_runtime) | set(self._airplay2_sources) | set(self._airplay2_tees)
+            set(self._airplay2_runtime)
+            | set(self._airplay2_sources)
+            | set(self._airplay2_tees)
+            | set(getattr(self, "_airplay2_readers", {}))
         )
         for instance_id in instance_ids:
             await self._stop_airplay2_pipeline(instance_id)
         self._airplay2_runtime.clear()
+        # A full stop really stops: never leave a receiver or reader behind for
+        # a later reuse (a stale shairport is worse than a restart).
+        self._airplay2_sources.clear()
+        getattr(self, "_airplay2_readers", {}).clear()
+        getattr(self, "_airplay2_source_keys", {}).clear()
 
-    async def _stop_airplay2_pipeline(self, instance_id: str) -> None:
+    async def _stop_airplay2_pipeline(self, instance_id: str, keep_source: bool = False) -> None:
+        """Stop one instance's pipelines (and, unless asked, its receiver).
+
+        ``keep_source`` leaves the receiver process and its reader running so a
+        plan-only rebuild can re-attach pipelines to the same shairport: the
+        phone's AirPlay 2 session is shairport's session, so restarting it for a
+        target/EQ change hangs up on the sender mid-song.
+        """
         stream_ids = [
             key
             for key in self._airplay2_pipelines
@@ -1695,7 +1854,11 @@ class AudioBridge:
                 await tee.stop()
             except Exception:
                 logger.exception("Error stopping AirPlay 2 PCM tee for %s", instance_id)
+        if keep_source:
+            return
         source = self._airplay2_sources.pop(instance_id, None)
+        getattr(self, "_airplay2_readers", {}).pop(instance_id, None)
+        getattr(self, "_airplay2_source_keys", {}).pop(instance_id, None)
         if source:
             try:
                 await source.stop()
@@ -1768,6 +1931,11 @@ class AudioBridge:
     def is_session_active(self, receiver_id: str) -> bool:
         """Whether a sender session is currently live for this receiver."""
         return receiver_id in self._active_sessions
+
+    def has_active_sessions(self) -> bool:
+        """True while any sender is connected — the guard for anything that
+        must not touch a speaker mid-playback (background format detection)."""
+        return bool(self._active_sessions)
 
     def stream_client_count(self, stream_id: str) -> int:
         """How many speakers are currently pulling a stream (ground truth for
@@ -1854,10 +2022,17 @@ class AudioBridge:
         return False
 
     def _tee_for_entry(self, entry_id: str):
+        """The tee owning this stream id's branch.
+
+        ``entry_tee_depth_ms`` is called with every stream id, and a variant
+        stream ({entry}-q1 / -L / -R) shares its entry's tee — looking only for
+        an exact key handed those streams an empty dict, which the diagnostics
+        page then rendered as a zero-row.
+        """
         for mapping in (self._airplay2_tees, self._tees):
-            tee = mapping.get(entry_id)
-            if tee is not None:
-                return tee
+            owner = _stream_owner(entry_id, list(mapping))
+            if owner is not None:
+                return mapping[owner]
         return None
 
     def entry_tee_depth_ms(self, entry_id: str) -> dict[str, float]:
@@ -1865,14 +2040,16 @@ class AudioBridge:
 
         A branch sitting at its capacity is the one place where a paced pump
         loses real audio, so this has to be visible next to the loss counters.
+        A variant stream reports its own branch, not its sibling's.
         """
         tee = self._tee_for_entry(entry_id)
         if tee is None:
             return {}
+        branch = next((out for out in tee.outputs if out.name == entry_id), None)
         return {
-            "depth_ms": round(tee.depth_ms(), 1),
-            "capacity_ms": round(tee.capacity_ms(), 1),
-            "dropped": tee.dropped_chunks,
+            "depth_ms": round((branch or tee).depth_ms(), 1),
+            "capacity_ms": round((branch or tee).capacity_ms(), 1),
+            "dropped": (branch or tee).dropped_chunks,
         }
 
     def entry_pace_stats(self, entry_id: str) -> dict[str, float]:
@@ -1920,27 +2097,53 @@ class AudioBridge:
         Ownership is checked per speaker: a speaker that moved to another
         receiver (a protocol switch, say) must not be stolen back.
         """
-        url = self._stream_url_for_entry(entry_id)
-        if not url or self._device_manager is None:
+        manager = getattr(self, "_device_manager", None)
+        if manager is None:
             return
+        base = f"http://{settings.effective_stream_host}:{settings.stream_port}"
         for did in self.entry_targets(entry_id):
             owner = self._device_manager.owner_of(did)
             if owner not in (None, entry_id):
                 continue
-            suffix = settings.stream_suffix(entry_id, did)
-            play_url = f"{url}{suffix}/for/{entry_id}/{did}?s={time.time_ns()}"
-            try:
-                await self._device_manager.play_stream(
-                    did, play_url, owner=entry_id, force=True
+            stream_id = self.play_stream_id(entry_id, did)
+            if stream_id is None:
+                logger.warning(
+                    "Supervisor re-issue skipped for %s on %s: no stream registered",
+                    entry_id,
+                    did,
                 )
+                continue
+            play_url = f"{base}/stream/{stream_id}/for/{entry_id}/{did}?s={time.time_ns()}"
+            try:
+                await self._device_manager.play_stream(did, play_url, owner=entry_id, force=True)
             except Exception:
                 logger.exception("Supervisor play re-issue failed for %s on %s", entry_id, did)
 
-    def _stream_url_for_entry(self, entry_id: str) -> str | None:
-        for stream_id in self.entry_stream_ids(entry_id):
-            url = f"http://{settings.effective_stream_host}:{settings.stream_port}/stream/{stream_id}"
-            return url
-        return None
+    def play_stream_id(self, entry_id: str, did: str) -> str | None:
+        """The registered stream that serves this sink of this entry.
+
+        The sink's own variant (channel/EQ/loudness split) when it is
+        registered; otherwise the entry's base stream. Both are picked from
+        what is actually published, so a re-issued play URL can never point at
+        a stream that does not exist — appending a suffix to the first
+        registered variant (the old behaviour: ``airplay2-q1`` + ``-q1``)
+        handed the speaker a 404 and left it silent for good.
+        """
+        registered = self.entry_stream_ids(entry_id)
+        if not registered:
+            return None
+        wanted = settings.stream_id_for(entry_id, did)
+        if wanted in registered:
+            return wanted
+        logger.warning(
+            "Stream %s for %s is not registered (%s); falling back to the base stream",
+            wanted,
+            did,
+            ", ".join(registered),
+        )
+        if entry_id in registered:
+            return entry_id
+        return min(registered, key=len)
 
     def set_entry_buffer(self, entry_id: str, seconds: float | None) -> None:
         """Widen (or release) one entry's delay-line reserve.

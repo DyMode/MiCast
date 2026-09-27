@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 SOURCE_STALL_TIMEOUT_SECONDS = 8.0
 SOURCE_STALL_CHECK_SECONDS = 2.0
 # When the PCM source stops delivering while HTTP clients are connected, the
-# pumps synthesize zero-PCM chunks after roughly one chunk period of stall.
+# pumps synthesize zero-PCM chunks after a grace window of stall.
 # FLAC has no precomputable silence frame (unlike mp3), so the running
 # encoder must be fed zero PCM to keep the stream's frame sequence unbroken —
 # a starved Xiaomi pull player abandons the response in ~2s. Stall watchdog
@@ -39,13 +39,22 @@ SOURCE_STALL_CHECK_SECONDS = 2.0
 # source still trips the restart watchdog above.
 SOURCE_SILENCE_CHUNK_BYTES = 32768
 # Grace window before synthesizing: a source read gets this many consecutive
-# chunk periods (~0.5s at 48k) of zero bytes before the first silence chunk.
+# chunk periods (~0.17/0.19s each at 48/44.1 kHz) of zero bytes before the
+# first silence chunk.
 # shairport's pipe writes are jittery — one late chunk (a read window without
 # bytes) must NOT inject 170ms of digital silence into a healthy stream:
 # measured on a 50-300ms-jitter source, the single-timeout trigger synthesized
 # 3.5-4.6s of silence per 6s (audible stutter, invisible to every diagnostic
 # counter). Still far below the speaker's ~2s abandonment threshold.
-SOURCE_SILENCE_GRACE_PERIODS = 3
+#
+# Field data (0.3.4, live sessions): the 3-period window fired ~25 times, all of
+# them around session transitions, and every one of those holes was 560-690ms —
+# just past the trigger, and each fill inserted 170ms of digital silence into
+# the music. Five periods (~0.85-0.93s at 44.1/48 kHz) still answers a real
+# stall well under the ~2s abandonment threshold while leaving such a hole
+# alone entirely: the source's own late chunk then arrives inside the window
+# and is delivered immediately, with no silence and no extra beat of delay.
+SOURCE_SILENCE_GRACE_PERIODS = 5
 # A wait longer than this for real source bytes (while a session is live) means
 # the sender itself delivered in lumps rather than a steady stream — the
 # "accumulate then hiccup" shape listeners report. Chunk cadence is ~170ms, so
@@ -55,6 +64,38 @@ SOURCE_GAP_MS = 150.0
 # chunk; a longer gap means the encoder thread stalled (nothing lost, just
 # delayed) — the one hiccup cause no drop counter can see.
 ENCODER_GAP_MS = 150.0
+# ... but a gap this long is not a stall: no session audio was flowing at all.
+# Between two sender sessions there is simply nothing to encode, and the
+# session latch often stays set across a switch (AirPlay 1 <-> 2 on one
+# speaker, a phone changing targets), so those idle minutes were reported as
+# "encoder stalls" of 5s, 28s, even 126s — alarming numbers next to real 200ms
+# hiccups, and the loudest row on the diagnostics page. Past this ceiling the
+# interval is rebased silently: idle time is not a fault.
+ENCODER_STALL_CEILING_MS = 5000.0
+# How far the pump may run ahead of the wall clock before it holds back.
+#
+# The signal is the SOURCE's own lead, deliberately not each branch's consumer:
+#
+#  * Every branch of one source (left/right of a stereo pair, base/EQ mix) sees
+#    the same lead values, so they stay in lockstep. Pacing each branch on its
+#    own consumer let them drift SECONDS apart — field data (0.4.2, stereo pair):
+#    the right branch ran 2.1s ahead while the left sat 16.9s behind, which is
+#    what "立体声播放很混乱" sounded like.
+#  * A consumer-side signal is also unsafe: it takes the deepest queue across
+#    clients, and a half-open "ghost" connection (the speaker replaced its
+#    socket) has a queue nobody ever drains. With that client counted, the pump
+#    stalled for good, the upstream tee (a 4s window) overflowed and threw away
+#    2507 chunks of the left channel.
+#
+# The allowance is generous on purpose: the sender's look-ahead (a phone's
+# AirPlay buffer, shairport's decoded buffer) is banked in the speakers' own
+# buffers instead of being slept away — pacing it away at exactly 1x is what
+# made every 200-400ms source hole audible.
+INPUT_LEAD_SECONDS = 2.0
+# ... and never hold the source back for long: a paused feed starves the
+# speaker's HTTP response, and with a local receiver (shairport-sync keeps only
+# 0.35s of backend buffer) it makes the sender discard audio behind our pipe.
+INPUT_MAX_SLEEP_SECONDS = 0.25
 # A source that was idle longer than this starts a fresh pacing baseline, so
 # diagnostics never report idle time as input starvation.
 INPUT_IDLE_RESET_SECONDS = 1.0
@@ -491,6 +532,37 @@ class SpeakerPipeline:
             self._last_feed_at = time.monotonic()
             self._stall_armed = False
 
+    async def _pace_source_pump(self, loop) -> None:
+        """Hold the pump back against the SOURCE's lead — never per branch.
+
+        See INPUT_LEAD_SECONDS for why the consumer-side signal had to go: it
+        decoupled the channels of a stereo pair and a single dead connection
+        could stall a branch forever.
+        """
+        if not self._pace_source:
+            return
+        ahead = self._input_ahead_ms / 1000.0
+        if ahead <= INPUT_LEAD_SECONDS:
+            return
+        await self._pace_sleep(
+            min(ahead - INPUT_LEAD_SECONDS, INPUT_MAX_SLEEP_SECONDS), loop
+        )
+
+    async def _pace_sleep(self, seconds: float, loop) -> None:
+        """Hold the pump back by ``seconds`` so the source's lead stays banked.
+
+        Bookkeeping lives here so both pumps report the same figure — the
+        diagnostics page shows how much of the runtime we spent pacing, next
+        to how much the SOURCE left us waiting.
+        """
+        sleep_started = loop.time()
+        await asyncio.sleep(seconds)
+        slept_ms = (loop.time() - sleep_started) * 1000
+        self._pace_sleeps += 1
+        self._pace_sleep_total_ms += slept_ms
+        self._pace_sleep_max_ms = max(self._pace_sleep_max_ms, slept_ms)
+        metrics.note_pace_sleep(slept_ms)
+
     async def _watch_source_stall(self) -> None:
         """Restart the PCM source when it stops producing during a live session.
 
@@ -559,7 +631,7 @@ class SpeakerPipeline:
         """Read one source chunk, synthesizing silence on source stalls.
 
         Returns (b"", False) only at EOF. While HTTP clients are connected, a
-        source that stops delivering for ~one chunk period yields a zero-PCM
+        source that stops delivering for a whole grace window yields a zero-PCM
         chunk (synthesized=True) instead of starving the encoder — see
         SOURCE_SILENCE_CHUNK_BYTES. With no clients connected this degenerates
         to a plain blocking read: silence would be pure CPU burn with nobody
@@ -573,13 +645,11 @@ class SpeakerPipeline:
             # blocking read, exactly like the pre-keepalive behaviour.
             return await reader.read(SOURCE_SILENCE_CHUNK_BYTES), False
         # Grace: the encoder tolerates a sub-grace gap on its own (the speaker
-        # buffers seconds); only a sustained zero-byte run synthesizes. This
-        # keeps bursty shairport pipe writes from becoming digital-silence
-        # gaps while still answering a real stall in ~0.5s, well under the
-        # speaker's ~2s abandonment. Late bytes within the grace window are
-        # returned immediately — no silence, no extra beat of delay.
+        # buffers seconds); only a sustained zero-byte run synthesizes. Late
+        # bytes within the grace window are returned immediately — no silence,
+        # no extra beat of delay.
         call_started = asyncio.get_running_loop().time()
-        for _ in range(SOURCE_SILENCE_GRACE_PERIODS):
+        while True:
             try:
                 chunk = await asyncio.wait_for(
                     reader.read(SOURCE_SILENCE_CHUNK_BYTES), chunk_seconds
@@ -602,16 +672,26 @@ class SpeakerPipeline:
                         metrics.note_source_gap(waited_ms, self._stream_id)
                 return chunk, False
             except TimeoutError:
-                continue
+                if asyncio.get_running_loop().time() - call_started < (
+                    chunk_seconds * SOURCE_SILENCE_GRACE_PERIODS
+                ):
+                    continue
+                break
         logger.debug(
             "Source stalled for %s; feeding silence to keep clients alive",
             self._stream_id,
         )
         # Report the silence the source actually produced: the grace window is
         # a constant, so quoting it back hid whether a stall was 0.5s or 30s.
-        metrics.note_source_stall(
-            (asyncio.get_running_loop().time() - call_started) * 1000, self._stream_id
-        )
+        # Only while a sender session is live: the padding that trails a session
+        # (the speaker is still pulling, the phone has stopped) is expected, and
+        # counting it put a wall of "音源停滞 933ms" lines in every report right
+        # where a real stall would be.
+        session_active = getattr(self, "_session_active", None)
+        if session_active is None or session_active():
+            metrics.note_source_stall(
+                (asyncio.get_running_loop().time() - call_started) * 1000, self._stream_id
+            )
         metrics.note_silence_fill()
         return b"\x00" * SOURCE_SILENCE_CHUNK_BYTES, True
 
@@ -636,25 +716,23 @@ class SpeakerPipeline:
                         started_at = loop.time()
                         fed_bytes = 0
                     last_real_at = loop.time()
+                    # Only real source audio counts as lead. Synthesized silence
+                    # is our own filler: crediting it (field data: 25 fills =
+                    # +4.2s) made the pacing see a backlog that did not exist,
+                    # and then slept that "lead" away — starving the encoder for
+                    # seconds, which is what made the speaker abandon the stream.
+                    fed_bytes += len(chunk)
                 gained = self._apply_input_gain(chunk)
                 if spectrum_wanted():
                     self._spectrum.feed(gained)
                 writer.write(gained)
-                fed_bytes += len(chunk)
-                # Never run ahead of real time: a tee backlog (restart window)
-                # must drain at 1x, not burst into the encoder and overflow
-                # client queues.
+                # The lead is reported, not spent: it becomes the speaker's own
+                # buffer (see _pace_source_pump). What paces the pump is the
+                # speaker falling behind in READING — never the wall clock.
                 ahead = fed_bytes / byte_rate - (loop.time() - started_at)
                 self._input_ahead_ms = ahead * 1000
                 self._input_fed_bytes = fed_bytes
-                if self._pace_source and ahead > 0:
-                    sleep_started = loop.time()
-                    await asyncio.sleep(ahead)
-                    slept_ms = (loop.time() - sleep_started) * 1000
-                    self._pace_sleeps += 1
-                    self._pace_sleep_total_ms += slept_ms
-                    self._pace_sleep_max_ms = max(self._pace_sleep_max_ms, slept_ms)
-                    metrics.note_pace_sleep(slept_ms)
+                await self._pace_source_pump(loop)
                 await writer.drain()
             writer.write_eof()
             await writer.drain()
@@ -683,10 +761,13 @@ class SpeakerPipeline:
                 seen += 1
                 # Only a gap while a sender session is live is a stall: the
                 # pipeline legitimately produces nothing between sessions, and
-                # counting that reported an idle afternoon as a 272s stall.
+                # counting that reported an idle afternoon as a 272s stall. A
+                # gap past ENCODER_STALL_CEILING_MS is idle time wearing a
+                # session latch (AirPlay 1 <-> 2 switch on one speaker): rebase
+                # instead of recording minutes of "stall" that never happened.
                 session_active = getattr(self, "_session_active", None)
                 in_session = session_active is None or session_active()
-                if seen > 1 and in_session:
+                if seen > 1 and in_session and gap_ms <= ENCODER_STALL_CEILING_MS:
                     metrics.note_encode(gap_ms, self._stream_id)
                     # The baseline is this pipeline's OWN recent cadence. The
                     # first cut of this metric derived it from the previous
@@ -704,6 +785,8 @@ class SpeakerPipeline:
                         elif gap_ms > max(typical * 2.5, typical + ENCODER_GAP_MS):
                             metrics.note_encoder_gap(gap_ms, typical, self._stream_id)
                     intervals.append(gap_ms)
+                elif gap_ms > ENCODER_STALL_CEILING_MS:
+                    intervals.clear()
                 await self._stream_server.broadcast(self._stream_id, chunk)
         except asyncio.CancelledError:
             pass
@@ -729,21 +812,22 @@ class SpeakerPipeline:
                     break
                 if not synthesized:
                     self._note_source_bytes(chunk)
-                    # See _pump_source_to_encoder: idle time is not starvation.
+                    # See _pump_source_to_encoder: idle time is not starvation,
+                    # and our own silence is not source lead.
                     if loop.time() - last_real_at > INPUT_IDLE_RESET_SECONDS:
                         started_at = loop.time()
                         fed_bytes = 0
                     last_real_at = loop.time()
+                    fed_bytes += len(chunk)
                 gained = self._apply_input_gain(chunk)
                 if spectrum_wanted():
                     self._spectrum.feed(gained)
                 await self._stream_server.broadcast(self._stream_id, gained)
-                fed_bytes += len(chunk)
                 ahead = fed_bytes / byte_rate - (loop.time() - started_at)
                 self._input_ahead_ms = ahead * 1000
                 self._input_fed_bytes = fed_bytes
-                if self._pace_source and ahead > 0:
-                    await asyncio.sleep(ahead)
+                # Same rule as the encoder pump: pace on the consumer, not the clock.
+                await self._pace_source_pump(loop)
         except asyncio.CancelledError:
             pass
         except Exception:
