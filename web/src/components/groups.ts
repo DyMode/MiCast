@@ -3,6 +3,7 @@ import type { SpeakerGroup } from "../api";
 import { brandIcon } from "../icons";
 import {
   delayLimit,
+  delayStateChip,
   escapeHtml,
   groupActionKey,
   groupMemberCount,
@@ -81,19 +82,60 @@ export function speakerAreaInner(group: SpeakerGroup, state: State): string {
   return `<div class="speaker-area">${rows}${picker}</div>`;
 }
 
-export function renderGroupCodecHint(group: SpeakerGroup, state: State): string {
+/**
+ * What the whole group can share, from the capability table alone.
+ *
+ * Only a DISPROVEN format is excluded, and a verdict is never upgraded by
+ * guesswork: with nothing confirmed we suggest the least demanding format
+ * rather than claiming compatibility. PCM (直通, ~1.4 Mbit/s) is a fallback,
+ * never a recommendation. Every speaker reports the same canonical names
+ * (mp3/flac/wav/pcm) as the server, so this hint can never disagree with the
+ * device page.
+ *
+ * Rendered as chips in the group header rather than a sentence under the
+ * members: the same fact, without a full-width paragraph floating between the
+ * sliders and the next section.
+ */
+export function renderGroupCodecChips(group: SpeakerGroup, state: State): string {
   const devices = group.speaker_ids.map((id) => state.devices.find((item) => item.did === id)).filter(Boolean);
   if (devices.length < 2) return "";
-  const formats = ["MP3", "FLAC", "WAV", "PCM/WAV"];
-  const possible = formats.filter((fmt) => devices.every((device) => device!.codec_capabilities?.[fmt] !== false));
-  const confirmed = formats.filter((fmt) => devices.every((device) => device!.codec_capabilities?.[fmt] === true));
-  const unknown = devices.some((device) => !Object.keys(device!.codec_capabilities ?? {}).length);
-  const text = !possible.length
-    ? "当前已知能力没有共同格式，请先逐台检测"
-    : confirmed.length
-      ? `已确认共同格式：${confirmed.join("、")}`
-      : `建议先用 MP3；${unknown ? "部分音箱尚未检测，播放后会自动确认。" : "播放后会自动确认。"}`;
-  return `<p class="codec-compatibility-hint">格式兼容性：${escapeHtml(text)}</p>`;
+  // Raw passthrough is what the app is sending right now when transcoding is
+  // off, so a member known to reject it explains a silent speaker on the spot.
+  if (!(state.audio?.auto_transcode ?? true)) {
+    const rejecting = devices.filter((device) => device!.codec_capabilities?.pcm === false);
+    if (rejecting.length) {
+      return `<span class="meta-chip warn" title="这些型号会拉取 PCM 流但不出声：换成编码格式或打开转码">${escapeHtml(
+        rejecting.map((device) => speakerName(device!.did, state)).join("、")
+      )} 不支持 PCM 直通</span>`;
+    }
+  }
+  const formats = devices.find((device) => device!.codec_formats?.length)?.codec_formats ?? [
+    "mp3",
+    "flac",
+    "wav",
+    "pcm",
+  ];
+  const labels = devices.find((device) => device!.codec_labels)?.codec_labels ?? {};
+  const name = (fmt: string) => labels[fmt] || fmt.toUpperCase();
+  const possible = formats.filter((fmt) =>
+    devices.every((device) => device!.codec_capabilities?.[fmt] !== false),
+  );
+  const confirmed = formats.filter((fmt) =>
+    devices.every((device) => device!.codec_capabilities?.[fmt] === true),
+  );
+  if (!possible.length) {
+    return `<span class="meta-chip warn" title="当前已知能力没有共同格式，请先逐台实测">共同格式待实测</span>`;
+  }
+  const shown = confirmed.length ? confirmed : possible;
+  const chipState = confirmed.length ? "ok" : "";
+  const title = confirmed.length
+    ? "组合内每台音箱都已实测通过"
+    : possible.includes("mp3")
+      ? "尚未实测，建议先用 MP3"
+      : "尚未实测";
+  return `<span class="meta-chip ${chipState}" title="${escapeHtml(title)}">${
+    confirmed.length ? "共同格式" : "可用格式"
+  } ${escapeHtml(shown.map(name).join(" / "))}</span>`;
 }
 
 /** Anchor badge (on the reference speaker) or "设为基准" button (on others). */
@@ -117,11 +159,12 @@ export function renderMirrorRows(group: SpeakerGroup, state: State): string {
       const health = speakerHealth(did, state);
       return `<div class="sync-delay-row ${isAnchor ? "is-time-reference" : ""}">
         <span class="${health ? "speaker-offline" : ""}"><span class="speaker-row-icon">${brandIcon("xiaomi")}</span>${escapeHtml(name)}${health ? ` <span class="caption danger-text">${escapeHtml(health)}</span>` : ""}</span>
-        ${isAnchor ? `<span class="sync-note">其它音箱对齐到这台</span>` : `<label class="sync-control"><span class="sync-control-label">延迟</span><input type="range" min="-${limit}" max="${limit}" step="50" value="${delay}"
+        ${isAnchor ? "" : `<label class="sync-control"><span class="sync-control-label">延迟</span><input type="range" min="-${limit}" max="${limit}" step="50" value="${delay}"
           data-group-delay="${escapeHtml(group.id)}" data-speaker-id="${escapeHtml(did)}"
           aria-label="${escapeHtml(name)} 相对时间基准的偏移">
         <output>${delay} ms</output></label>`}
-        ${anchorControl(group, did)}${speakerRemoveButton(group.id, did, name, canRemove)}
+        <span class="sync-state">${delayStateChip(group, did, state)}</span>
+        <span class="sync-anchor-slot">${anchorControl(group, did)}</span>${speakerRemoveButton(group.id, did, name, canRemove)}
       </div>`;
     }).join("")}
   </div>`;
@@ -151,20 +194,26 @@ export function renderStereoRows(group: SpeakerGroup, state: State): string {
           ${anchorControl(group, did)}${speakerRemoveButton(group.id, did, name, canRemove)}
         </div>
         <div class="stereo-tuning">
-          <label class="sync-control" title="只微调这台音箱；0 dB 表示保持原始响度">
-            <span class="sync-control-label">响度</span>
-            <input type="range" min="-12" max="12" step="0.5" value="${gain}"
-              data-group-gain="${escapeHtml(group.id)}" data-speaker-id="${escapeHtml(did)}"
-              aria-label="${escapeHtml(name)} 响度补偿">
-            <output>${gain > 0 ? "+" : ""}${gain.toFixed(1)} dB</output>
-          </label>
-          ${isAnchor ? "" : `<label class="sync-control">
-            <span class="sync-control-label">延迟</span>
-            <input type="range" min="-${limit}" max="${limit}" step="50" value="${delay}"
-              data-group-delay="${escapeHtml(group.id)}" data-speaker-id="${escapeHtml(did)}"
-              aria-label="${escapeHtml(name)} 相对时间基准的偏移">
-            <output>${delay} ms</output>
-          </label>`}
+          <div class="stereo-row">
+            <label class="sync-control" title="只微调这台音箱；0 dB 表示保持原始响度">
+              <span class="sync-control-label">响度</span>
+              <input type="range" min="-12" max="12" step="0.5" value="${gain}"
+                data-group-gain="${escapeHtml(group.id)}" data-speaker-id="${escapeHtml(did)}"
+                aria-label="${escapeHtml(name)} 响度补偿">
+              <output>${gain > 0 ? "+" : ""}${gain.toFixed(1)} dB</output>
+            </label>
+            ${isAnchor ? delayStateChip(group, did, state) : ""}
+          </div>
+          ${isAnchor ? "" : `<div class="stereo-row">
+            <label class="sync-control">
+              <span class="sync-control-label">延迟</span>
+              <input type="range" min="-${limit}" max="${limit}" step="50" value="${delay}"
+                data-group-delay="${escapeHtml(group.id)}" data-speaker-id="${escapeHtml(did)}"
+                aria-label="${escapeHtml(name)} 相对时间基准的偏移">
+              <output>${delay} ms</output>
+            </label>
+            ${delayStateChip(group, did, state)}
+          </div>`}
         </div>
       </div>`;
     }).join("")}

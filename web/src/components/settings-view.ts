@@ -17,6 +17,7 @@ interface SettingsProps {
   theme: Theme;
   status: string;
   xiaomiLoggedIn: boolean;
+  cloudDegraded?: boolean;
   deviceCount: number;
   access: AccessStatus | null;
   saving?: boolean;
@@ -35,7 +36,7 @@ let lastConfirmedAudio: AudioConfig | null = null;
 export function renderSettingsView(props: SettingsProps): string {
   const {
     audio, config, appName, airplay2Enabled, airplay2Available, dlnaEnabled, dlnaStatus,
-    syncGroupsEnabled, theme, status, xiaomiLoggedIn, deviceCount, access,
+    syncGroupsEnabled, theme, status, xiaomiLoggedIn, cloudDegraded, deviceCount, access,
   } = props;
   if (audio && (!lastConfirmedAudio || !audioBusy)) lastConfirmedAudio = audio;
   const statusLabel = status === "running"
@@ -85,11 +86,12 @@ export function renderSettingsView(props: SettingsProps): string {
     </div>
 
     <div class="group-header">音频编码</div>
+    <p class="group-header-hint">编码、EQ、组合延迟与左右声道只作用于 AirPlay 实时输出；DLNA 直投媒体原样转发。</p>
     <div class="group">
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">转码</span>
-          <span class="cell-subtitle">${transcoding ? "按下方设置编码 AirPlay 实时输出" : "AirPlay 使用 PCM 原始音频直出"}</span>
+          <span class="cell-subtitle">${transcoding ? "按下方设置编码 AirPlay 实时输出" : "AirPlay 使用 PCM 原始音频直出；部分型号不会出声，听不到就改回转码"}</span>
         </div>
         <input type="checkbox" class="switch" id="auto-transcode" ${audio?.auto_transcode ? "checked" : ""} aria-label="开启转码">
       </div>
@@ -126,7 +128,11 @@ export function renderSettingsView(props: SettingsProps): string {
         <div class="cell-icon blue">${icon("link")}</div>
         <div class="cell-content">
           <span class="cell-title">米家</span>
-          <span class="cell-subtitle">${xiaomiLoggedIn ? `已连接${deviceCount ? ` · ${deviceCount} 台音箱` : ""}` : "未连接，连接后自动同步音箱"}</span>
+          <span class="cell-subtitle">${xiaomiLoggedIn
+            ? cloudDegraded
+              ? "云端暂时没有响应，可打开重新连接"
+              : `已连接${deviceCount ? ` · ${deviceCount} 台音箱` : ""}`
+            : "未连接，连接后自动同步音箱"}</span>
         </div>
         <span class="settings-link-arrow" aria-hidden="true">›</span>
       </button>
@@ -174,13 +180,14 @@ export function renderSettingsView(props: SettingsProps): string {
     <div class="group-header">数据与版本</div>
     <div class="group">
       <div class="cell">
-        <div class="cell-icon">${icon("folder")}</div>
+        <div class="cell-icon gray">${icon("folder")}</div>
         <div class="cell-content">
           <span class="cell-title">${storageModeLabel(config?.storage?.mode)}</span>
           <span class="cell-subtitle" title="${escapeHtml(config?.storage?.data_dir ?? "")}">${escapeHtml(config?.storage?.data_dir ?? "正在读取数据目录…")}</span>
         </div>
       </div>
       <div class="cell">
+        <div class="cell-icon gray">${icon("file")}</div>
         <div class="cell-content">
           <span class="cell-title">日志目录</span>
           <span class="cell-subtitle" title="${escapeHtml(config?.storage?.log_dir ?? "")}">${escapeHtml(config?.storage?.log_dir ?? "正在读取日志目录…")}</span>
@@ -199,6 +206,7 @@ export function renderSettingsView(props: SettingsProps): string {
         </div>
       </div>
       <div class="cell">
+        <div class="cell-icon red">${icon("trash")}</div>
         <div class="cell-content">
           <span class="cell-title danger-text">清空数据</span>
           <span class="cell-subtitle">删除全部配置、米家登录与管理账号，回到初始引导页</span>
@@ -309,13 +317,14 @@ export function renderSettingsView(props: SettingsProps): string {
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">网络发现 <span class="feature-badge">实验性</span></span>
-          <span class="cell-subtitle">扫描局域网中的 AirPlay / DLNA 播放设备；关闭后停止一切网络探测，也无法再投放到外部设备</span>
+          <span class="cell-subtitle">扫描局域网中的 AirPlay / DLNA 播放设备</span>
         </div>
         <input type="checkbox" class="switch" id="network-discovery-enabled" ${config?.network_discovery_enabled ? "checked" : ""} aria-label="开启网络发现">
       </div>
     </div>
-
-    <p class="footnote" style="margin: var(--space-md) var(--space-lg);">音频编码、EQ、组合延迟和左右声道处理只作用于 AirPlay 实时输出，不处理 DLNA 直投媒体。</p>
+    ${config && !config.network_discovery_enabled
+      ? `<div class="inline-notice"><strong>网络发现已关闭</strong><span>不会扫描局域网播放设备，也无法把音频投放到外部设备。</span></div>`
+      : ""}
   `;
 }
 
@@ -327,14 +336,29 @@ const portModeLabels: Record<PortStatus["mode"], string> = {
 };
 
 function portActualText(p: PortStatus): string {
-  if (p.actual == null) return p.status === "listening" ? "" : "未监听";
-  return Array.isArray(p.actual) ? p.actual.join("、") : String(p.actual);
+  // Only a bound socket earns a chip. "未监听" is a state word, not a port, and
+  // it already reads in the status column.
+  if (p.actual == null) return "";
+  if (Array.isArray(p.actual)) {
+    if (!p.actual.length) return "";
+    // A scanned range can hold four sockets; listing them all wrapped the
+    // status onto a second line and dwarfed the port it belongs to.
+    return p.actual.length <= 2
+      ? p.actual.join("、")
+      : `${p.actual[0]}–${p.actual[p.actual.length - 1]}`;
+  }
+  return String(p.actual);
+}
+
+function portActualTitle(p: PortStatus): string {
+  if (Array.isArray(p.actual) && p.actual.length) return `已绑定 ${p.actual.join("、")}`;
+  return "";
 }
 
 function renderPortRow(p: PortStatus): string {
   const actual = portActualText(p);
   const stateClass = p.status === "error" ? "error" : p.status === "listening" ? "success" : "";
-  const stateText = p.status === "error" ? "异常" : p.status === "listening" ? `监听中${actual ? ` · ${actual}` : ""}` : p.status === "hosted" ? "已托管" : "未启用";
+  const stateText = p.status === "error" ? "异常" : p.status === "listening" ? "监听中" : p.status === "hosted" ? "已托管" : "未启用";
   // Only render the slots this row actually needs: non-editable rows are a
   // plain right-aligned status (like the toggle rows above); editable rows
   // add a wide-enough input; 恢复 appears only for custom ports.
@@ -354,7 +378,8 @@ function renderPortRow(p: PortStatus): string {
         <span class="cell-subtitle">${escapeHtml(p.detail)}</span>
       </div>
       <div class="port-control">
-        <span class="plain-state ${stateClass}" data-port-status="${p.id}" aria-live="polite">${stateText}</span>
+        <span class="plain-state ${stateClass}" data-port-status="${p.id}" aria-live="polite" title="${escapeHtml(portActualTitle(p))}">${stateText}</span>
+        ${actual ? `<span class="meta-chip port-actual">${escapeHtml(actual)}</span>` : ""}
         ${inputSlot}
         ${actionSlot ? `<span class="port-actions">${actionSlot}</span>` : ""}
       </div>

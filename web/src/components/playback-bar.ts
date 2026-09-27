@@ -82,25 +82,27 @@ export function renderPlaybackBar(playback: PlaybackState | null): string {
           <strong>${escapeHtml(target)}</strong>
           <span>${stateLabel}</span>
         </div>
-        <button class="icon-button compact" data-playback-toggle
-                aria-label="${playback.playing ? "暂停输出" : "继续输出"}">
-          ${icon(playback.playing ? "pause" : "play")}
-        </button>
-        <button class="icon-button compact" data-playback-stop aria-label="结束输出" title="结束输出并断开手机连接">
-          ${icon("close")}
-        </button>
-        <button class="icon-button compact now-playing-minimize" data-playback-minimize aria-label="收起到顶部" title="收起到顶部">
-          ${icon("minimize")}
-        </button>
-        <button type="button" class="icon-button compact" data-mute="${escapeHtml(playback.devices.map(d => d.did).join(","))}" aria-pressed="${playback.muted}" aria-label="${playback.muted ? "取消全部静音" : "全部静音"}" title="${playback.muted ? "取消全部静音" : "全部静音"}">${icon(playback.muted ? "mute" : "speaker")}</button>
         <label class="volume-control now-playing-master" title="${multi ? "将全部音箱设为同一音量" : "调整这台音箱的音量"}">
           ${sliderMarkup(shownVolume, "data-master-slider", multi ? "全部音箱音量" : "音箱音量")}
           <output data-master-output>${volumeOutput}</output>
         </label>
-        ${multi ? `<button class="icon-button compact now-playing-expand" data-playback-expand
-                aria-label="${expanded ? "收起各音箱音量" : "展开各音箱音量"}" aria-expanded="${expanded}">
-          ${icon("chevron")}
-        </button>` : ""}
+        <div class="now-playing-controls">
+          <button class="icon-button compact" data-playback-toggle
+                  aria-label="${playback.playing ? "暂停输出" : "继续输出"}">
+            ${icon(playback.playing ? "pause" : "play")}
+          </button>
+          <button class="icon-button compact" data-playback-stop aria-label="结束输出" title="结束输出并断开手机连接">
+            ${icon("close")}
+          </button>
+          <button class="icon-button compact now-playing-minimize" data-playback-minimize aria-label="收起到顶部" title="收起到顶部">
+            ${icon("minimize")}
+          </button>
+          <button type="button" class="icon-button compact" data-mute="${escapeHtml(playback.devices.map(d => d.did).join(","))}" aria-pressed="${playback.muted}" aria-label="${playback.muted ? "取消全部静音" : "全部静音"}" title="${playback.muted ? "取消全部静音" : "全部静音"}">${icon(playback.muted ? "mute" : "speaker")}</button>
+          ${multi ? `<button class="icon-button compact now-playing-expand" data-playback-expand
+                  aria-label="${expanded ? "收起各音箱音量" : "展开各音箱音量"}" aria-expanded="${expanded}">
+            ${icon("chevron")}
+          </button>` : ""}
+        </div>
       </div>
       ${multi ? `<div class="now-playing-details" ${expanded ? "" : "hidden"}>${detailRows}</div>` : ""}
     </section>`;

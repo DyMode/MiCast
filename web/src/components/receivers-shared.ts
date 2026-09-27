@@ -97,6 +97,72 @@ export function speakerName(did: string, state: State): string {
   return device?.alias || device?.name || state.fullConfig?.speaker_names?.[did] || did;
 }
 
+/** Live delay state of one member of a group, straight from the stream server.
+ *
+ * The stored `delays_ms` is a signed offset, and the server normalizes the
+ * group so the most-ahead member holds 0 and the rest pad after it. The offset
+ * a slider shows is therefore NOT what the speaker does: a member that simply
+ * is the live edge reported "0 ms" forever while the member actually held back
+ * (often the reference speaker) showed nothing at all.
+ *
+ * The delay line also fills from live audio, so a member being held back is fed
+ * silence until its reserve is there.
+ */
+export function memberDelayState(
+  group: SpeakerGroup,
+  did: string,
+  state: State
+): { live: boolean; ready: boolean; holdMs: number; heldMs: number } | null {
+  const receiver = state.fullConfig?.receivers.find(
+    (item) => item.target_type === "group" && item.target_id === group.id && item.enabled
+  );
+  if (!receiver) return null;
+  const metrics = state.status?.diagnostics?.sinks?.[receiver.id]?.[did];
+  if (!metrics) return null;
+  const holdMs = Math.max(0, metrics.manual_ms || 0);
+  const heldMs = Math.max(0, metrics.buffer_ms || 0);
+  return {
+    live: holdMs === 0,
+    ready: heldMs + DELAY_READY_SLACK_MS >= holdMs,
+    holdMs,
+    heldMs,
+  };
+}
+
+/** How close the held buffer must be to the hold before it counts as applied:
+ * the reserve is topped up in whole chunks, so an exact match is never hit. */
+const DELAY_READY_SLACK_MS = 150;
+
+export function delayStateLabel(
+  value: { live: boolean; ready: boolean; holdMs: number; heldMs: number } | null
+): string {
+  if (!value) return "";
+  if (value.live) return "实时";
+  return value.ready ? `延后 ${value.holdMs} ms` : `调整中 ${value.heldMs}/${value.holdMs} ms`;
+}
+
+/** Chip for the label above; empty when nothing is known about this member. */
+export function delayStateChip(
+  group: SpeakerGroup,
+  did: string,
+  state: State,
+  cssClass = "meta-chip"
+): string {
+  const value = memberDelayState(group, did, state);
+  const label = delayStateLabel(value);
+  if (!value || !label) return "";
+  const tone = value.live ? "" : value.ready ? " ok" : " warn";
+  // The tooltip carries the part that is not obvious from the number: which
+  // member ends up held back is decided by the whole group, not by the slider
+  // you just moved.
+  const title = value.live
+    ? "这台是组合的实时边：没有被垫缓冲。改动一台的延迟后，被垫住的会是相对更快的那台"
+    : value.ready
+      ? `已按目标延迟出声：比实时边晚 ${value.holdMs} ms`
+      : `正在为 ${value.holdMs} ms 的延迟填充缓冲（约需 ${value.holdMs} ms）`;
+  return `<span class="${cssClass}${tone}" data-delay-state="${escapeHtml(did)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
 export function targetLabel(receiverId: string, state: State): string {
   const definition = state.fullConfig?.receivers.find((item) => item.id === receiverId);
   if (!definition) return "尚未指定播放目标";

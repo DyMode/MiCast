@@ -40,21 +40,26 @@ interface DevicesProps {
   pcmSource: string;
   streamUrl: string;
   loggedIn: boolean;
+  /** Tokens exist but the cloud is not answering (offers a re-login). */
+  cloudDegraded?: boolean;
   loadError: string | null;
   playback: PlaybackState | null;
 }
 
 export function renderDevicesView(props: DevicesProps): string {
-  const { devices, expandedDid, status, loggedIn, loadError, playback } = props;
+  const { devices, expandedDid, status, loggedIn, loadError, playback, cloudDegraded } = props;
   const onlineCount = devices.filter((item) => item.presence === "online").length;
   const offlineCount = devices.filter((item) => item.presence === "offline").length;
   const unknownCount = devices.length - onlineCount - offlineCount;
   const statusClass = onlineCount > 0
     ? offlineCount > 0 || unknownCount > 0 ? "warning" : "running"
-    : devices.length ? (offlineCount === devices.length ? "error" : "warning") : "";
+    : devices.length ? (offlineCount === devices.length ? "error" : "warning")
+      : loadError ? "error" : "";
+  // A failed load is not "no devices": saying so was how a dead login looked
+  // like an empty account with nothing to click.
   const statusText = devices.length
     ? offlineCount > 0 ? `${offlineCount} 台离线` : unknownCount > 0 ? `${unknownCount} 台待确认` : "全部在线"
-    : status === "error" ? "加载失败" : "尚无设备";
+    : loadError ? "加载失败" : loggedIn ? "尚无设备" : "未登录";
 
   return `
     <div class="page-heading">
@@ -67,8 +72,12 @@ export function renderDevicesView(props: DevicesProps): string {
       <div class="cell">
         <div class="cell-icon blue">${icon("wave")}</div>
         <div class="cell-content">
-          <span class="cell-title">${devices.length ? `已发现 ${devices.length} 台音箱` : "尚未发现音箱"}</span>
-          <span class="cell-subtitle">${devices.length ? `${onlineCount} 台在线${offlineCount ? `，${offlineCount} 台离线` : ""}${unknownCount ? `，${unknownCount} 台待确认` : ""}` : "登录后会自动显示账号下的音箱"}</span>
+          <span class="cell-title">${devices.length
+            ? `已发现 ${devices.length} 台音箱`
+            : loadError ? "音箱列表获取失败" : "尚未发现音箱"}</span>
+          <span class="cell-subtitle">${devices.length
+            ? `${onlineCount} 台在线${offlineCount ? `，${offlineCount} 台离线` : ""}${unknownCount ? `，${unknownCount} 台待确认` : ""}`
+            : loadError ? "账号里的音箱没有取到，可以重试或重新登录" : "登录后会自动显示账号下的音箱"}</span>
         </div>
         <span class="status-pill ${statusClass}" data-status-label>${statusText}</span>
       </div>
@@ -82,8 +91,19 @@ export function renderDevicesView(props: DevicesProps): string {
             <div class="group">
               <div class="empty-state">
                 <div class="empty-state-icon">${icon("speaker")}</div>
-                <span class="body">${loadError ? "设备加载失败" : "暂无设备"}</span>
-                <span class="caption">${loadError || (loggedIn ? "当前账号下未发现支持的音箱" : "米家连接已失效，请重新连接")}</span>
+                <span class="body">${loadError ? "设备加载失败" : loggedIn ? "暂无设备" : "还没有连接米家账号"}</span>
+                <span class="caption">${
+                  loadError ||
+                  (cloudDegraded
+                    ? "米家云端暂时没有响应：先重试；重新登录同样需要这台设备能访问小米账号服务器"
+                    : loggedIn
+                      ? "当前账号下未发现支持的音箱"
+                      : "扫码登录后会自动显示账号下的音箱")
+                }</span>
+                <div class="empty-state-actions">
+                  <button class="button secondary compact" type="button" data-retry-devices>重试</button>
+                  <button class="button primary compact" type="button" data-relogin>重新登录米家</button>
+                </div>
               </div>
             </div>
           `
@@ -128,7 +148,11 @@ function renderMasterVolume(devices: Device[], playback: PlaybackState | null): 
     </div>
     <div class="cell">
       <div class="cell-content"><span class="cell-title">相对调节</span><span class="cell-subtitle">保留音量差，每次 5 格</span></div>
-      <div class="settings-inline-control"><button class="button secondary" data-volume-step="-5" data-volume-targets="${escapeHtml(dids)}" aria-label="全部音箱降低 5 格">−5</button><button class="button secondary" data-volume-step="5" data-volume-targets="${escapeHtml(dids)}" aria-label="全部音箱提高 5 格">+5</button></div>
+      <div class="stepper" role="group" aria-label="全部音箱相对调节">
+        <button type="button" data-volume-step="-5" data-volume-targets="${escapeHtml(dids)}" aria-label="全部音箱降低 5 格">−5</button>
+        <span class="stepper-divider" aria-hidden="true"></span>
+        <button type="button" data-volume-step="5" data-volume-targets="${escapeHtml(dids)}" aria-label="全部音箱提高 5 格">+5</button>
+      </div>
     </div>
   `;
 }
@@ -142,7 +166,8 @@ function renderDeviceCard(device: Device, expanded: boolean, playback: PlaybackS
 
   return `
     <div class="device-card ${expanded ? "expanded" : ""}" data-did="${device.did}">
-      <div class="device-card-header" data-device-header>
+      <div class="device-card-header" data-device-header role="button" tabindex="0"
+           aria-expanded="${expanded}" aria-label="${escapeHtml(displayName)}详情，${expanded ? "已展开" : "已收起"}">
         <div class="cell-icon device-brand ${isOnline ? visual.className : "gray"}">${visual.html}</div>
         <div class="device-info">
           <span class="device-name">${escapeHtml(displayName)}</span>
@@ -199,15 +224,54 @@ function renderDeviceDetails(device: Device, _playback: PlaybackState | null): s
   `;
 }
 
-function renderCodecCapabilities(device: Device): string {
-  const capabilities = device.codec_capabilities ?? {};
-  const entries = Object.entries(capabilities);
-  if (!entries.length) {
-    return `<div class="device-detail-row"><span class="caption">格式兼容性</span><span class="cell-value">播放后自动学习</span></div>`;
-  }
-  const labels = entries.map(([format, supported]) => `${escapeHtml(format)} ${supported ? "✓" : "✕"}`).join(" · ");
-  return `<div class="device-detail-row"><span class="caption">格式兼容性</span><span class="cell-value">${labels}</span></div>`;
+/** "3 分钟前" for a capability verdict, so a stale record is visible as such. */
+function formatRelative(unixSeconds: number): string {
+  const age = Math.max(0, Date.now() / 1000 - unixSeconds);
+  if (age < 90) return "刚刚确认";
+  if (age < 3600) return `${Math.round(age / 60)} 分钟前`;
+  if (age < 86400) return `${Math.round(age / 3600)} 小时前`;
+  return `${Math.round(age / 86400)} 天前`;
 }
+
+function renderCodecCapabilities(device: Device): string {
+  const details = device.codec_capability_details ?? {};
+  const formats = device.codec_formats ?? Object.keys(details);
+  const labels = device.codec_labels ?? {};
+  if (!Object.keys(details).length) {
+    return `<div class="device-detail-row"><span class="caption">格式兼容性</span><span class="cell-value">空闲时自动检测</span></div>`;
+  }
+  // Compact chips instead of a sentence: four verdicts, their timestamps and
+  // the reason used to be strung together with "·" and could not be scanned.
+  // The evidence stays available in the tooltip.
+  const chips = formats.map((fmt) => {
+    const meta = details[fmt];
+    const name = escapeHtml(meta?.label || labels[fmt] || fmt);
+    const verdict = !meta
+      ? { mark: "—", tone: "unknown", text: "未测" }
+      : meta.status === "supported"
+        ? { mark: "✓", tone: "ok", text: "支持" }
+        : meta.status === "unverified"
+          ? { mark: "?", tone: "unknown", text: "需试听" }
+          : { mark: "✕", tone: "bad", text: "不支持" };
+    const when = meta?.verified_at ? ` · ${formatRelative(meta.verified_at)}` : "";
+    const reason = meta?.reason ? CODEC_REASON_TEXT[meta.reason] || meta.reason : "尚未测过";
+    return `<span class="codec-chip ${verdict.tone}" title="${escapeHtml(
+      `${meta?.label || labels[fmt] || fmt}：${verdict.text}${when}\n${reason}`
+    )}">${name} ${verdict.mark}</span>`;
+  });
+  return `<div class="device-detail-row codec-row"><span class="caption">格式兼容性</span><span class="cell-value codec-chips">${chips.join("")}</span></div>`;
+}
+
+/** Why a format carries the verdict it does — shown on hover, not in the row. */
+const CODEC_REASON_TEXT: Record<string, string> = {
+  stream_pull_confirmed: "播放时音箱持续取流，自动确认",
+  stream_verified: "播放时自动确认",
+  auto_probe: "空闲时后台自动检测",
+  active_probe: "诊断页实测",
+  no_stream_pull: "播放时音箱没有取流，判定不支持",
+  pcm_passthrough_unverifiable: "PCM 直通无法远程验证：音箱会照常取流，是否有声只能靠听",
+  model_rejects_pcm_passthrough: "该型号会读取 PCM 流但不出声",
+};
 
 function renderEqSection(device: Device): string {
   const eq: SpeakerEq | undefined = device.eq;
@@ -271,18 +335,27 @@ export function bindDevicesView(
   }
 ) {
   bindEqSection(container, onOpenTuning);
-  container.querySelectorAll("[data-device-header]").forEach((el) => {
-    el.addEventListener("click", (e) => {
-      // Don't toggle expand when interacting with a slider, switch or button.
-      const target = e.target as HTMLElement;
-      if (target.closest("input, button")) return;
-
+  container.querySelectorAll<HTMLElement>("[data-device-header]").forEach((el) => {
+    const toggle = () => {
       const card = el.closest("[data-did]") as HTMLElement | null;
       const did = card?.dataset.did;
       if (!did) return;
 
       const current = store.get().ui.expandedDeviceDid;
       onExpandedChange(current === did ? null : did);
+    };
+    el.addEventListener("click", (e) => {
+      // Don't toggle expand when interacting with a slider, switch or button.
+      const target = e.target as HTMLElement;
+      if (target.closest("input, button")) return;
+      toggle();
+    });
+    // The header is the disclosure control, so it has to answer the keyboard
+    // the same way a button would.
+    el.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      toggle();
     });
   });
 

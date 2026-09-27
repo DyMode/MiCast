@@ -17,7 +17,7 @@ import {
   targetLabel,
 } from "./receivers-shared";
 import { bindNetworkSections, getCreateFormNetworks, renderNetworkTargets } from "./network-targets";
-import { bindGroupToggles, isGroupExpanded, renderGroupCodecHint, speakerAreaInner } from "./groups";
+import { bindGroupToggles, isGroupExpanded, renderGroupCodecChips, speakerAreaInner } from "./groups";
 import { confirmCalibration, liveCalibration } from "./calibration";
 
 // Create-form state lives outside the DOM: a status-poll re-render rebuilds
@@ -158,23 +158,31 @@ function renderManagement(state: State): string {
         const isStereo = group.mode === "stereo";
         const expanded = isGroupExpanded(group, state);
         const netCount = (group.airplay_targets?.length ?? 0) + (group.dlna_targets?.length ?? 0);
-        const summary = `${isStereo ? "立体声" : "同声播放"} · ${group.speaker_ids.length ? `${group.speaker_ids.length} 音箱` : ""}${group.speaker_ids.length && netCount ? " + " : ""}${netCount ? `${netCount} 网络设备` : ""}`;
+        // The mode is already the segmented control's job — repeating it in the
+        // subtitle made the header say "立体声" twice.
+        const summary = [
+          group.speaker_ids.length ? `${group.speaker_ids.length} 台音箱` : "",
+          netCount ? `${netCount} 台网络设备` : "",
+        ].filter(Boolean).join(" + ") || "尚无成员";
         return `<div class="sync-group">
         <div class="cell sync-group-header">
           <button class="group-toggle ${expanded ? "expanded" : ""}" type="button" data-group-toggle="${escapeHtml(group.id)}" aria-label="展开或收起组合 ${escapeHtml(group.name)}">${icon("chevron")}</button>
-          <div class="cell-content"><span class="cell-title">${escapeHtml(group.name)}</span><span class="cell-subtitle">${escapeHtml(summary)}</span></div>
+          <div class="cell-content">
+            <span class="cell-title">${escapeHtml(group.name)}</span>
+            <span class="cell-subtitle group-summary">${escapeHtml(summary)}${renderGroupCodecChips(group, state)}</span>
+          </div>
           <div class="segmented-control ${pendingGroupActions.has(groupActionKey("mode", group.id)) ? "control-pending" : ""}" role="group" aria-label="播放模式" aria-busy="${pendingGroupActions.has(groupActionKey("mode", group.id))}">
             <button class="segment ${!isStereo ? "active" : ""}" data-group-mode="${escapeHtml(group.id)}" data-mode="mirror" ${pendingGroupActions.has(groupActionKey("mode", group.id)) ? "disabled" : ""}>同声播放</button>
             <button class="segment ${isStereo ? "active" : ""}" data-group-mode="${escapeHtml(group.id)}" data-mode="stereo" ${pendingGroupActions.has(groupActionKey("mode", group.id)) ? "disabled" : ""}>立体声</button>
           </div>
-          <button class="button plain" type="button" data-group-calibrate="${escapeHtml(group.id)}">辅助校准</button>
-          <button class="button plain danger-text group-delete" data-delete-group="${escapeHtml(group.id)}">删除组合</button>
+          <div class="group-header-actions">
+            <button class="button plain" type="button" data-group-calibrate="${escapeHtml(group.id)}">辅助校准</button>
+            <button class="button plain danger-text group-delete" data-delete-group="${escapeHtml(group.id)}">删除组合</button>
+          </div>
         </div>
         <div class="sync-group-body" data-group-body="${escapeHtml(group.id)}" ${expanded ? "" : "hidden"}>
           ${speakerAreaInner(group, state)}
-          ${renderGroupCodecHint(group, state)}
           ${renderNetworkTargets(group)}
-          ${isStereo ? `<p class="footnote" style="margin: var(--space-xs) var(--space-lg) var(--space-sm);">分配左右声道，并用响度、延迟微调同步。</p>` : ""}
         </div>
       </div>`;
       }).join("")}
@@ -192,7 +200,10 @@ function renderManagement(state: State): string {
 export function bindReceiversView(container: HTMLElement, rerender: () => void) {  bindNetworkSections(container);
   container.querySelector<HTMLFormElement>("[data-create-receiver]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (store.get().saving) return;
+    if (store.get().saving) {
+      store.showToast("上一个操作还在进行，请稍候再试");
+      return;
+    }
     const form = event.currentTarget as HTMLFormElement;
     const data = new FormData(form);
     const [target_type, target_id] = String(data.get("target") || "").split(":", 2);
@@ -257,7 +268,12 @@ export function bindReceiversView(container: HTMLElement, rerender: () => void) 
 
   container.querySelector<HTMLFormElement>("[data-create-group]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (store.get().saving) return;
+    if (store.get().saving) {
+      // Never a silent no-op: "clicked and nothing happened" reads as a broken
+      // button, which is how this guard was first reported.
+      store.showToast("上一个操作还在进行，请稍候再试");
+      return;
+    }
     const form = event.currentTarget as HTMLFormElement;
     const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (submit) { submit.disabled = true; submit.textContent = "正在创建…"; }

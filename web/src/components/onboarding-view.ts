@@ -7,12 +7,13 @@ function logo(): string {
 }
 
 function qrPanel(state: State): string {
-  const labels = {
+  const labels: Record<State["qr"]["state"], string> = {
     idle: "准备二维码",
     waiting: "等待扫码",
     scanned: "已扫码，请在手机上确认",
     confirmed: "米家已连接",
     expired: "二维码已过期",
+    error: state.qr.error || "二维码获取失败",
   };
   return `<div class="setup-qr" aria-live="polite">
     ${state.qr.qrUrl

@@ -5,7 +5,9 @@ import { store } from "../state";
 import { getTestMedia } from "../test-media";
 import {
   delayLimit,
+  delayStateLabel,
   escapeHtml,
+  memberDelayState,
   message,
   replaceGroup,
   speakerName,
@@ -49,7 +51,9 @@ export function liveCalibration(group: SpeakerGroup, state: State): Promise<bool
             <input type="range" min="-${limit}" max="${limit}" step="10" value="${value}" aria-label="播放时间调整">
             <button class="button plain" type="button" data-nudge="10">+10</button><button class="button plain" type="button" data-nudge="100">+100</button>
             <output>${value} ms</output>
-          </div></fieldset>`;
+          </div>
+          <span class="live-calibration-state" data-delay-state="${escapeHtml(did)}"></span>
+        </fieldset>`;
       }).join("")}</div>
       <p class="caption calibration-hint">先响（快）向 + 调，后响（慢）向 − 调。</p>
       <div class="confirm-dialog-actions"><button class="button plain" type="button" data-live-cancel>取消并还原</button><button class="button primary" type="submit">完成并保存</button></div>
@@ -75,7 +79,25 @@ export function liveCalibration(group: SpeakerGroup, state: State): Promise<bool
     });
     dialog.querySelector("form")?.addEventListener("submit", (event) => { event.preventDefault(); saved = true; dialog.close(); });
     dialog.querySelector("[data-live-cancel]")?.addEventListener("click", () => dialog.close());
+    // The slider shows what was requested; this shows whether the delay line has
+    // actually taken it. A raise only takes effect once the reserve has filled
+    // (the speaker is fed silence until then), so without this the only way to
+    // know was to keep listening.
+    const unsubscribe = store.subscribe((current) => {
+      const rows = dialog.querySelectorAll<HTMLElement>("[data-delay-state]");
+      if (!rows.length) return;
+      const group_now = current.fullConfig?.groups.find((item) => item.id === group.id) ?? group;
+      rows.forEach((node) => {
+        const value = memberDelayState(group_now, node.dataset.delayState!, current);
+        node.textContent = delayStateLabel(value);
+        // "实时" is the live edge: nothing to wait for.
+        const holding = Boolean(value && !value.live);
+        node.classList.toggle("ready", holding && Boolean(value!.ready));
+        node.classList.toggle("pending", holding && !value!.ready);
+      });
+    });
     dialog.addEventListener("close", async () => {
+      unsubscribe();
       if (!saved) {
         try { await api.updateGroup(group.id, { delays_ms: original }); }
         catch (e) { store.showToast(`还原延迟失败: ${message(e)}`); }
