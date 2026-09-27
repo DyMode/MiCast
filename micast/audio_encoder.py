@@ -50,6 +50,10 @@ _FORMATS: dict[str, StreamFormat] = {
 
 _CODECS = {"mp3": "libmp3lame", "flac": "flac", "wav": "pcm_s16le"}
 
+# A remote media server that stops answering must not hold the DLNA proxy's
+# worker thread forever: the speaker on the other end would just stall.
+DLNA_MEDIA_READ_TIMEOUT_SECONDS = 15.0
+
 
 def raw_pcm_format(sample_rate: int = 44100) -> StreamFormat:
     """Stream format when the encoder is bypassed: raw PCM wrapped as streaming WAV."""
@@ -101,6 +105,67 @@ def mp3_silence(sample_rate: int, bitrate: str, seconds: int = 5) -> bytes:
         container.mux(packet)
     container.close()
     return buffer.getvalue()
+
+
+def encoder_silence_chunks(
+    content_type: str,
+    sample_rate: int,
+    bitrate: str,
+    seconds: float = 1.0,
+) -> tuple[bytes, ...]:
+    """Frame-aligned silence in the live stream's own format, one chunk per use.
+
+    The delay line yields one of these whenever it is holding real audio back
+    (the startup fill, or a delay increase). Without it a held-back client
+    simply receives nothing: fine for a moment, but a multi-second increase
+    leaves the socket empty long enough for a speaker to decide the stream died
+    and reconnect. Only mp3 used to have anything to send.
+    """
+    if content_type == "audio/mpeg":
+        # Self-synchronising frames, no container header: one CBR frame is
+        # exactly what the delay line yields per held-back chunk.
+        return (mp3_silence(sample_rate, bitrate, 0),)
+    if content_type == "audio/flac":
+        return _flac_silence_frames(sample_rate, bitrate, seconds)
+    # Raw PCM / streaming WAV: zero samples ARE silence, as long as the slice is
+    # a whole number of sample frames (s16 stereo = 4 bytes) and the size of one
+    # encoder write run.
+    return (bytes(_frame_aligned(sample_rate * 4, 0.02)),)
+
+
+def _flac_silence_frames(sample_rate: int, bitrate: str, seconds: float) -> tuple[bytes, ...]:
+    """Silent FLAC frames — with the stream header left out.
+
+    Raw zeros are not decodable FLAC, so the frames have to be encoded; and the
+    first thing the muxer writes is `fLaC` + STREAMINFO. A client that is
+    already mid-stream must never see a second STREAMINFO, so only the frames
+    come back.
+    """
+    chunks: list[bytes] = []
+    try:
+        container = av.open(_StreamSink(chunks.append), mode="w", format="flac")
+        stream = _open_encoder(container, "flac", bitrate, sample_rate)
+        # 4096 is the encoder's own default blocksize for the live stream, so a
+        # silence frame lasts as long as a real one: the client's cadence does
+        # not change while the delay fills.
+        frame = av.AudioFrame(format="s16", layout="stereo", samples=4096)
+        frame.sample_rate = sample_rate
+        frame.planes[0].update(bytes(4096 * 4))
+        for _ in range(max(1, int(sample_rate * seconds) // 4096)):
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+        container.close()
+    except Exception:
+        logger.exception("Could not synthesize flac silence for the delay line")
+        return ()
+    return tuple(chunks[1:])
+
+
+def _frame_aligned(bytes_per_second: int, seconds: float) -> int:
+    """A slice length that is a whole number of 4-byte sample frames."""
+    return max(4, int(bytes_per_second * seconds) // 4 * 4)
 
 
 class _StreamSink(io.RawIOBase):
@@ -497,9 +562,16 @@ def stream_media_as_mp3(
         # Media from DLNA control points may carry non-UTF8 (e.g. GBK) tags;
         # PyAV decodes container metadata strictly by default and av.open
         # would raise UnicodeDecodeError before we see a single frame.
+        #
+        # rw_timeout bounds the network read: without it an unresponsive media
+        # server holds this worker thread (and the speaker's stream) forever.
         container = av.open(
             url,
-            options={"user_agent": user_agent},
+            options={
+                "user_agent": user_agent,
+                "rw_timeout": str(int(DLNA_MEDIA_READ_TIMEOUT_SECONDS * 1_000_000)),
+                "reconnect": "1",
+            },
             metadata_errors="ignore",
         )
         if seek_seconds > 0:

@@ -10,8 +10,11 @@ import av
 
 from micast.audio_encoder import (
     AudioEncoder,
+    _open_encoder,
     _put_latest_async,
     _put_latest_sync,
+    _StreamSink,
+    encoder_silence_chunks,
     mp3_silence,
     raw_pcm_format,
     transcode_file_to_wav,
@@ -38,6 +41,51 @@ def test_mp3_silence_is_decodable_and_cached():
         frames = list(container.decode(audio=0))
     assert frames
     assert sum(frame.samples for frame in frames) >= 48000
+
+
+def test_every_stream_format_has_silence_to_send():
+    """Delay fill needs something to send in *each* format.
+
+    Only mp3 had a silence frame, so a flac/raw-PCM client whose delay was
+    filling received nothing at all — an empty socket long enough for a speaker
+    to decide the stream had died.
+    """
+    assert encoder_silence_chunks("audio/mpeg", 48000, "320k") == (mp3_silence(48000, "320k", 0),)
+
+    flac = encoder_silence_chunks("audio/flac", 48000, "320k")
+    assert flac and all(not chunk.startswith(b"fLaC") for chunk in flac)
+
+    pcm = encoder_silence_chunks("audio/wav", 48000, "320k")
+    assert pcm == (bytes(3840),)  # 20ms of s16 stereo, frame-aligned
+
+
+def test_flac_silence_decodes_as_a_continuation_of_the_live_stream():
+    """The frames must be usable mid-stream — and carry no second header.
+
+    A decoder given a fresh `fLaC` + STREAMINFO in the middle of a live stream
+    would restart; the frames themselves are what keeps a filling client alive.
+    """
+    chunks: list[bytes] = []
+    container = av.open(_StreamSink(chunks.append), mode="w", format="flac")
+    stream = _open_encoder(container, "flac", "320k", 48000)
+    frame = av.AudioFrame(format="s16", layout="stereo", samples=4096)
+    frame.sample_rate = 48000
+    frame.planes[0].update(bytes(4096 * 4))
+    for packet in stream.encode(frame):
+        container.mux(packet)
+    for packet in stream.encode(None):
+        container.mux(packet)
+    container.close()
+    header, live_frames = chunks[0], chunks[1:]
+    assert header.startswith(b"fLaC")
+
+    silence = encoder_silence_chunks("audio/flac", 48000, "320k")
+    stream_bytes = b"".join([header, *live_frames, *silence, *silence])
+    with av.open(io.BytesIO(stream_bytes)) as decoded:
+        frames = list(decoded.decode(audio=0))
+
+    assert len(frames) >= len(live_frames) + 2 * len(silence)
+    assert max(abs(sample) for frame in frames for sample in frame.to_ndarray().flatten()) == 0
 
 
 def test_realtime_queues_drop_oldest_instead_of_growing():

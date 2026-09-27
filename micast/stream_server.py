@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from uvicorn import Config, Server
 
-from micast.audio_encoder import MediaProxyPump, StreamFormat, mp3_silence, wav_header
+from micast.audio_encoder import (
+    MediaProxyPump,
+    StreamFormat,
+    encoder_silence_chunks,
+    wav_header,
+)
 from micast.audio_metrics import metrics
 from micast.config import settings
 from micast.test_tone import test_tone_wav
@@ -37,17 +42,40 @@ CLIENT_KEEPALIVE_SECONDS = 1.0
 # bursts but always drain pending data within a second or two; ten seconds of
 # zero reads with a full queue means the reader is gone.
 CLIENT_UNDRAINED_SECONDS = 10.0
+# How long the generator waits for the next broadcast before it stops waiting
+# and serves the speaker from the delay line's own buffer instead.
+#
+# Field data (0.3.4-0.3.8, every report): the source leaves 150-400ms holes
+# (a phone's Wi-Fi jitter, a lumpy local receiver) and `source_gap`/
+# `encoder_stall` record them while EVERY drop counter stays at zero — the
+# audio is late, not lost. The listener nevertheless hears each hole, because
+# the delay line only ever released bytes *when a new chunk arrived*: during a
+# hole it held 250ms of perfectly good audio and sent nothing. Serving that
+# buffer during the gap (the alignment delay shrinks for a moment and refills
+# from the next surplus) turns a 300ms silence at the speaker into a few tens
+# of milliseconds.
+CLIENT_BRIDGE_GAP_SECONDS = 0.15
 # First bytes of an encoder run are cached and replayed to late-joining
 # clients: WAV/FLAC decoders need the stream header, MP3 just skips it.
 STREAM_PREFIX_BYTES = 16384
 # Delay-line trust thresholds for formats without a nominal byte rate
-# (flac): the EMA must be based on at least this many broadcast samples
-# (~2-4s of streaming) and exceed an absolute floor — below ~64 kbps the
+# (flac): the observed rate must be based on at least this many broadcast
+# samples (~2-4s of streaming) and exceed an absolute floor — below ~64 kbps the
 # "stream" is silence/underrun, not audio worth throttling. Flac has no
 # nominal expectation to take a percentage of, so the floor is absolute;
 # a wrong rate here would mis-throttle healthy clients, so stay conservative.
 DELAY_LINE_MIN_SAMPLES = 20
 DELAY_LINE_MIN_BYTES_PER_SECOND = 8000
+# Observed-rate window. The rate is bytes over the window's wall-clock span,
+# never one chunk over the gap since the previous chunk: a realtime encoder
+# emits in bursts (two muxer writes land ~3ms apart inside one paced PCM
+# burst), and dividing a chunk by that gap reports megabytes per second for a
+# ~100 kB/s stream. Field measurement: 92 MB/s against a true 104 kB/s, which
+# turned the flac delay line's 250ms reserve into ~250 seconds and made every
+# client sit at "below the reserve" forever.
+RATE_WINDOW_SECONDS = 3.0
+RATE_MIN_WINDOW_SECONDS = 0.6
+RATE_MIN_WINDOW_SAMPLES = 3
 
 _MEDIA_UA = (
     "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -111,19 +139,21 @@ class StreamServer:
         self._calibration_sessions: dict[str, dict] = {}
         self._diagnostic_media: dict[str, tuple[Path, str]] = {}
         self._diagnostic_hits: dict[str, int] = {}
+        self._diagnostic_bytes: dict[str, int] = {}
         # Byte-accurate drop accounting: chunk counts are NOT comparable
         # across formats (a wav chunk carries ~100x the audio of an mp3
         # frame), so drops are also tracked in bytes and converted to an
         # estimated duration via the stream's byte rate.
         self._buffer_overrides: dict[str, float] = {}
         self.dropped_bytes: dict[str, int] = {}
-        # Observed output byte rate per stream (EMA), used to express drops in
-        # milliseconds for formats whose StreamFormat has no nominal byte_rate
-        # (flac). Nominal byte_rate wins when present.
+        # Observed output byte rate per stream (windowed), used to express drops
+        # in milliseconds for formats whose StreamFormat has no nominal
+        # byte_rate (flac). Nominal byte_rate wins when present.
         self._observed_byte_rate: dict[str, float] = {}
-        # Broadcast-sample count feeding the EMA; the flac delay line only
-        # trusts the EMA after DELAY_LINE_MIN_SAMPLES samples.
+        # Broadcast samples feeding the windowed rate; the flac delay line only
+        # trusts the rate after DELAY_LINE_MIN_SAMPLES samples.
         self._rate_samples: dict[str, int] = {}
+        self._rate_history: dict[str, deque[tuple[float, int]]] = {}
         # One-shot rendezvous used when a grouped speaker disconnects while
         # its AirPlay session is still live. New HTTP clients wait here until
         # every group member has arrived, then start on the same future chunk.
@@ -278,9 +308,24 @@ class StreamServer:
             if media is None or not media[0].is_file():
                 raise HTTPException(status_code=404, detail="Diagnostic media expired")
             self._diagnostic_hits[token] = self._diagnostic_hits.get(token, 0) + 1
-            return FileResponse(
-                media[0],
-                media_type=media[1],
+            path, media_type = media
+
+            async def counted():
+                # Chunked so the probe can measure a sustained read, not just a
+                # request: see diagnostic_bytes().
+                with path.open("rb") as handle:
+                    while True:
+                        block = await asyncio.to_thread(handle.read, 16384)
+                        if not block:
+                            break
+                        self._diagnostic_bytes[token] = (
+                            self._diagnostic_bytes.get(token, 0) + len(block)
+                        )
+                        yield block
+
+            return StreamingResponse(
+                counted(),
+                media_type=media_type,
                 headers={"Cache-Control": "no-store"},
             )
 
@@ -293,23 +338,35 @@ class StreamServer:
         self.dropped_chunks.setdefault(device_id, 0)
         self.dropped_bytes.setdefault(device_id, 0)
         # A re-registration (format change) invalidates the previous run's
-        # observed rate; the EMA must rebuild before the flac delay line
+        # observed rate; the rate must rebuild before the flac delay line
         # may use it.
         self._observed_byte_rate.pop(device_id, None)
         self._rate_samples[device_id] = 0
+        self._rate_history.pop(device_id, None)
         logger.info("Registered stream /stream/%s (%s)", device_id, stream_format.content_type)
 
     def register_diagnostic_media(self, token: str, path: Path, media_type: str) -> None:
         """Expose uploaded diagnostic audio on the same port as live streams."""
         self._diagnostic_media[token] = (path, media_type)
         self._diagnostic_hits[token] = 0
+        self._diagnostic_bytes[token] = 0
 
     def diagnostic_hits(self, token: str) -> int:
         return self._diagnostic_hits.get(token, 0)
 
+    def diagnostic_bytes(self, token: str) -> int:
+        """Bytes a device actually read from a diagnostic fixture.
+
+        The honest signal: some firmware requests the URL and then drops the
+        payload, which looked exactly like support when only hits were counted
+        (field data: a speaker recorded as PCM-capable while playing nothing).
+        """
+        return self._diagnostic_bytes.get(token, 0)
+
     def unregister_diagnostic_media(self, token: str) -> None:
         self._diagnostic_media.pop(token, None)
         self._diagnostic_hits.pop(token, None)
+        self._diagnostic_bytes.pop(token, None)
 
     def unregister_stream(self, device_id: str) -> None:
         """Remove a stream endpoint and disconnect clients."""
@@ -322,6 +379,7 @@ class StreamServer:
         self.dropped_bytes.pop(device_id, None)
         self._observed_byte_rate.pop(device_id, None)
         self._rate_samples.pop(device_id, None)
+        self._rate_history.pop(device_id, None)
 
     def stream_ids(self) -> list[str]:
         return list(self._streams.keys())
@@ -347,6 +405,46 @@ class StreamServer:
 
     def client_count(self, device_id: str) -> int:
         return len(self._clients.get(device_id, set()))
+
+    def sink_bytes(self, receiver_id: str, sink: str) -> int:
+        """Bytes handed to one speaker so far (format-verification ground truth)."""
+        return sum(
+            int(state.get("bytes_out") or 0)
+            for state in self._client_delay.values()
+            if state.get("receiver") == receiver_id and state.get("sink") == sink
+        )
+
+    def sink_last_byte_at(self, receiver_id: str, sink: str) -> float:
+        """When this speaker last received audio (0.0 = never)."""
+        return max(
+            (
+                float(state.get("last_byte_at") or 0.0)
+                for state in self._client_delay.values()
+                if state.get("receiver") == receiver_id and state.get("sink") == sink
+            ),
+            default=0.0,
+        )
+
+    def note_sink_bytes(self, queue: asyncio.Queue, count: int) -> None:
+        state = self._client_delay.get(queue)
+        if state is None:
+            return
+        state["bytes_out"] = int(state.get("bytes_out") or 0) + count
+        state["last_byte_at"] = time.monotonic()
+
+    def client_backlog_chunks(self, device_id: str) -> int:
+        """Deepest per-client queue of not-yet-sent chunks for one stream.
+
+        This is the listener's own backpressure: the response generator reads a
+        chunk per HTTP write, so a non-empty queue means the socket or the
+        speaker's player is the limit, not our production. Pipelines use it as
+        the ONLY pacing signal (see speaker_pipeline): a wall-clock lead is not
+        backpressure, and throttling against it throws away the sender's
+        look-ahead instead of banking it in the speaker's buffer.
+        """
+        return max(
+            (queue.qsize() for queue in self._clients.get(device_id, ())), default=0
+        )
 
     def _max_lag_seconds(self) -> float:
         """How far a client may lead before we trim it to live.
@@ -450,6 +548,13 @@ class StreamServer:
             "lag_drops": 0,
             "queue_drops": 0,
             "silence_fills": 0,
+            "bridges": 0,
+            # Bytes actually handed to this speaker, and when the last one went
+            # out. The only honest test of "can this speaker play this format"
+            # is a sustained pull: a device that opens the URL and rejects the
+            # payload is indistinguishable from a healthy one by request count.
+            "bytes_out": 0,
+            "last_byte_at": 0.0,
         }
         recovery = self._group_recoveries.get(receiver_id) if receiver_id else None
         recovery_event: asyncio.Event | None = None
@@ -501,16 +606,32 @@ class StreamServer:
             # how a dropout turns into permanent distortion.
             buffer: deque[bytes] = deque()
             held = 0
-            # One frame of encoded silence (~20ms) for true-underrun keepalive.
-            # seconds=0 still produces one frame plus the encoder flush.
-            silence = (
-                mp3_silence(settings.audio.sample_rate, settings.audio.bitrate, 0)
-                if stream_format and stream_format.content_type == "audio/mpeg"
-                else b""
+            # Silence in this stream's own format, yielded once per held-back
+            # chunk so a client whose delay is filling keeps receiving data.
+            # Every format now has it: without it, a long delay increase (or the
+            # startup fill) left a FLAC/WAV socket empty and a speaker could
+            # decide the stream had died.
+            silence_frames = encoder_silence_chunks(
+                stream_format.content_type if stream_format else "",
+                settings.audio.sample_rate,
+                settings.audio.bitrate,
             )
+            silence_index = 0
+
+            def take_silence() -> bytes:
+                """Next frame of silence, looping: callers yield one per chunk."""
+                nonlocal silence_index
+                if not silence_frames:
+                    return b""
+                frame = silence_frames[silence_index % len(silence_frames)]
+                silence_index += 1
+                return frame
             # Delay-line byte rate: nominal when the format has one (mp3/wav/
-            # pcm); for flac the broadcast-observed EMA once it is trustworthy.
-            # Until then the client stays on the transparent passthrough.
+            # pcm); for flac the broadcast-observed rate once it is trustworthy.
+            # Until then — and while this client is still short of its reserve —
+            # the rate is re-read below, so a client that connected during
+            # warm-up (every session's first speaker) still ends up on a real
+            # delay line instead of passing every encoder hiccup through.
             byte_rate = self._delay_line_byte_rate(device_id)
             buffer_seconds = self._buffer_overrides.get(
                 device_id, settings.stream_buffer_seconds
@@ -521,13 +642,45 @@ class StreamServer:
             # drops the staged excess (pull earlier), a larger one stages more.
             hold_bytes = 0
             hold_ms = 0
+            reserve = 0
             last_yield_at = time.monotonic()
             try:
                 while True:
-                    chunk = await queue.get()
+                    try:
+                        chunk = await asyncio.wait_for(
+                            queue.get(), timeout=CLIENT_BRIDGE_GAP_SECONDS
+                        )
+                    except TimeoutError:
+                        # Arrival gap while this speaker still holds audio: serve
+                        # it, so the source's hole does not become a hole in the
+                        # listener's playback (see CLIENT_BRIDGE_GAP_SECONDS).
+                        bridged = self._bridge_from_delay_line(buffer, held, hold_bytes)
+                        if bridged is None:
+                            continue
+                        held -= len(bridged)
+                        last_yield_at = time.monotonic()
+                        self._note_bridge(queue, device_id)
+                        self.note_sink_bytes(queue, len(bridged))
+                        yield bridged
+                        continue
                     if chunk is None:
                         break
                     self._note_client_read(queue)
+                    # Re-read the rate while this client has not reached its
+                    # reserve yet: the first speaker of a session connects
+                    # before the stream has enough broadcast samples to rate it,
+                    # and a stale estimate needs to be corrected while the client
+                    # is not holding anything back — adopting it later would
+                    # shift an already-paced stream.
+                    if byte_rate is None or held < reserve:
+                        fresh = self._delay_line_byte_rate(device_id)
+                        override = self._buffer_overrides.get(
+                            device_id, settings.stream_buffer_seconds
+                        )
+                        if fresh != byte_rate or override != buffer_seconds:
+                            byte_rate = fresh
+                            buffer_seconds = override
+                            initial_buffer = int(byte_rate * buffer_seconds) if byte_rate else 0
                     if not byte_rate:
                         yield chunk
                         continue
@@ -607,38 +760,47 @@ class StreamServer:
 
                     if held <= reserve:
                         now = time.monotonic()
-                        if state is not None and state.get("ready_at") is None and silence:
+                        if state is not None and state.get("ready_at") is None and silence_frames:
                             # Startup fill: the speaker just connected and the
                             # delay line has never reached its reserve. Feed a
                             # frame of silence per incoming chunk so the player
                             # doesn't abandon the response while it fills.
-                            yield bytes(silence)
+                            yield take_silence()
                             last_yield_at = now
-                        elif state is not None and state.get("needs_fill") and silence:
+                        elif state is not None and state.get("needs_fill") and silence_frames:
                             # Delay increase in progress: hold the real bytes so
                             # the reserve grows, and keep the player alive with
                             # frame-aligned silence — same trick as startup fill.
                             # Draining real audio here would keep the speaker
                             # live and the configured delay would never apply.
-                            yield bytes(silence)
+                            yield take_silence()
                             last_yield_at = now
                         elif buffer and now - last_yield_at >= CLIENT_KEEPALIVE_SECONDS:
-                            # Keepalive with real audio: releasing below the
-                            # reserve beats injecting a dropout. The delay line
-                            # refills by itself once flow normalises.
-                            while buffer:
-                                held -= len(buffer.popleft())
+                            # Below the reserve for a whole keepalive window:
+                            # release the real bytes. Holding them back starves
+                            # the player; discarding them (what this branch used
+                            # to do — pop, count as consumed, never send) silenced
+                            # the speaker outright whenever the reserve estimate
+                            # ran high, because the client then never received
+                            # anything at all. The delay line refills by itself
+                            # once flow normalises.
                             last_yield_at = now
                             if state is not None and state.get("ready_at") is None:
                                 # Real bytes flowed: this connection is out of
                                 # its startup fill phase for good.
                                 state["ready_at"] = now
-                        elif not buffer and silence:
+                            while buffer:
+                                head = buffer.popleft()
+                                held -= len(head)
+                                self.note_sink_bytes(queue, len(head))
+                                yield head
+                                last_yield_at = time.monotonic()
+                        elif not buffer and silence_frames:
                             # True underrun: a single frame-aligned slice of
                             # silence keeps the player from abandoning the
                             # response until real bytes arrive. Never loop
                             # mid-frame — byte-offset slices decode as clicks.
-                            yield bytes(silence)
+                            yield take_silence()
                             last_yield_at = now
                             if state is not None:
                                 state["silence_fills"] = int(state.get("silence_fills") or 0) + 1
@@ -666,13 +828,16 @@ class StreamServer:
                     while buffer and held - len(buffer[0]) >= reserve:
                         head = buffer.popleft()
                         held -= len(head)
+                        self.note_sink_bytes(queue, len(head))
                         yield head
                         last_yield_at = time.monotonic()
                     if state is not None:
                         state["buffer_ms"] = round(held / byte_rate * 1000)
 
                 while buffer:
-                    yield buffer.popleft()
+                    head = buffer.popleft()
+                    self.note_sink_bytes(queue, len(head))
+                    yield head
             finally:
                 self._clients.get(device_id, set()).discard(queue)
                 state = self._client_delay.pop(queue, None) or {}
@@ -757,8 +922,47 @@ class StreamServer:
                 "silence_fills": int(state.get("silence_fills") or 0),
                 "lag_drops": int(state.get("lag_drops") or 0),
                 "queue_drops": int(state.get("queue_drops") or 0),
+                # Times this speaker was served from the delay line during a
+                # source arrival gap instead of waiting for the next chunk.
+                "bridges": int(state.get("bridges") or 0),
             }
         return result
+
+    @staticmethod
+    def _bridge_from_delay_line(buffer: deque[bytes], held: int, floor: int) -> bytes | None:
+        """Oldest held chunk to serve during an arrival gap, or None if dry.
+
+        The floor is the alignment hold: a gap may spend the delay line's
+        jitter margin (that is what CLIENT_BRIDGE_GAP_SECONDS is for), but never
+        the offset that keeps this speaker in time with its siblings — a grouped
+        sink would otherwise drift out of sync for the length of every hole.
+
+        This deliberately eats into the reserve: a brief loss of the margin is
+        invisible, while a gap in the speaker's byte stream is audible, and the
+        reserve refills from the very next surplus.
+        """
+        if not buffer:
+            return None
+        head = buffer[0]
+        if held - len(head) < floor:
+            return None
+        return buffer.popleft()
+
+    def _note_bridge(self, queue: asyncio.Queue, device_id: str) -> None:
+        state = self._client_delay.get(queue)
+        if state is None:
+            return
+        state["bridges"] = int(state.get("bridges") or 0) + 1
+        # Serving the client counts as activity: a bridging connection is
+        # healthy and must not be reaped as a ghost.
+        state["last_get_at"] = time.monotonic()
+        if state["bridges"] in (1, 50, 500):
+            logger.info(
+                "Client %s on /stream/%s bridged from the delay line (%d times)",
+                state.get("sink"),
+                device_id,
+                state["bridges"],
+            )
 
     async def start(self) -> None:
         # Serialise concurrent starters: two interleaved start() calls would
@@ -900,24 +1104,39 @@ class StreamServer:
         """Send a chunk to all connected clients for a stream."""
         if chunk:
             now = time.monotonic()
-            last = self._last_broadcast.get(device_id, 0.0)
             self.total_bytes_sent[device_id] = self.total_bytes_sent.get(device_id, 0) + len(chunk)
             self._last_broadcast[device_id] = now
-            dt = now - last
-            if dt > 0:
-                instantaneous = len(chunk) / dt
-                ema = self._observed_byte_rate.get(device_id)
-                self._observed_byte_rate[device_id] = (
-                    instantaneous if ema is None else ema * 0.9 + instantaneous * 0.1
-                )
-                self._rate_samples[device_id] = self._rate_samples.get(device_id, 0) + 1
+            self._note_rate_sample(device_id, now, len(chunk))
             prefix = self._prefixes.get(device_id)
             if prefix is not None and len(prefix) < STREAM_PREFIX_BYTES:
                 prefix.extend(chunk[: STREAM_PREFIX_BYTES - len(prefix)])
         self._broadcast_to(device_id, chunk)
 
+    def _note_rate_sample(self, device_id: str, now: float, size: int) -> None:
+        """Track how many bytes per second this stream actually produces.
+
+        Bytes over the window's wall-clock span, NOT one chunk over the gap
+        since the last one: the encoder emits in bursts (two muxer writes a few
+        milliseconds apart inside one paced PCM burst), and a short gap as the
+        divisor reports tens of megabytes per second. That inflated rate is not
+        cosmetic — the delay line's reserve is ``rate * stream_buffer_seconds``,
+        so a 900x rate made the reserve ~250 seconds of audio, and every client
+        then sat permanently "below reserve" while the keepalive branch threw
+        its buffered audio away. Averaging over the span cannot be inflated
+        that way: a burst contributes exactly its own bytes and duration.
+        """
+        samples = self._rate_history.setdefault(device_id, deque())
+        samples.append((now, size))
+        while len(samples) > RATE_MIN_WINDOW_SAMPLES and now - samples[0][0] > RATE_WINDOW_SECONDS:
+            samples.popleft()
+        self._rate_samples[device_id] = self._rate_samples.get(device_id, 0) + 1
+        span = now - samples[0][0]
+        if len(samples) < RATE_MIN_WINDOW_SAMPLES or span < RATE_MIN_WINDOW_SECONDS:
+            return
+        self._observed_byte_rate[device_id] = sum(item for _, item in samples) / span
+
     def _stream_byte_rate(self, device_id: str) -> float | None:
-        """Nominal rate when known (mp3/wav/pcm), observed EMA otherwise (flac)."""
+        """Nominal rate when known (mp3/wav/pcm), observed windowed rate otherwise (flac)."""
         stream_format = self._streams.get(device_id)
         if stream_format and stream_format.byte_rate:
             return float(stream_format.byte_rate)
@@ -926,8 +1145,8 @@ class StreamServer:
     def _delay_line_byte_rate(self, device_id: str) -> int | None:
         """Byte rate the per-client delay line may use for this stream.
 
-        Formats with a nominal byte rate always qualify. FLAC has none: only
-        a well-sampled EMA above the absolute floor qualifies, so volatile
+        Formats with a nominal byte rate always qualify. FLAC has none: only a
+        well-sampled observed rate above the absolute floor qualifies, so quiet
         warm-up periods and silence keep the transparent passthrough.
         """
         stream_format = self._streams.get(device_id)
