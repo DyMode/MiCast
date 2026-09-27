@@ -221,10 +221,10 @@ def _stream_url_for_device(device_id: str) -> str | None:
     """Resolve the live stream URL of the receiver that targets a speaker."""
     for receiver in settings.receivers:
         if device_id in settings.receiver_targets(receiver.id):
-            return (
-                f"http://{settings.effective_stream_host}:{settings.stream_port}"
-                f"/stream/{receiver.id}{settings.channel_suffix(receiver.id, device_id)}"
-            )
+            # stream_url_for appends the sink's channel + EQ/loudness variant:
+            # a bare channel suffix names a stream nobody publishes once the
+            # receiver's variants are split per tuning.
+            return settings.stream_url_for(receiver.id, device_id)
     return None
 
 

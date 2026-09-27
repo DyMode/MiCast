@@ -123,8 +123,10 @@ def test_curve_signature_rounding_shares_streams(cfg):
     cfg.groups = [SpeakerGroupConfig(id="g1", name="全屋", speaker_ids=["didA", "didB"])]
     cfg.set_speaker_eq_curve("didA", enabled=True, points=[(100, 3.001)])
     cfg.set_speaker_eq_curve("didB", enabled=True, points=[(100, 3.004)])
+    # Every sink wants the same split, so that is the only stream published:
+    # the plain base has no consumer (see needs_plain_base).
     variants = cfg.receiver_stream_variants("r1")
-    assert [v["suffix"] for v in variants] == ["-q1", ""]
+    assert [v["suffix"] for v in variants] == ["-q1"]
     assert cfg.stream_suffix("r1", "didA") == "-q1"
     assert cfg.stream_suffix("r1", "didB") == "-q1"
 
@@ -145,20 +147,114 @@ def test_mirror_variants_split_by_eq_signature(cfg):
     assert cfg.stream_suffix("r1", "didA") == ""
     assert cfg.stream_suffix("r1", "didB") == "-q1"
 
-    # Same EQ on both: one shared split stream; the base stream still exists
-    # (kept as a cheap raw bypass for DLNA/network targets even when no
-    # speaker uses it).
+    # Same EQ on both: one shared split stream and no base — nothing left
+    # resolves to the mix.
     cfg.set_speaker_eq("didA", enabled=True, bands=[4, 2] + [0] * 8, preset="bass")
     variants = cfg.receiver_stream_variants("r1")
-    assert [v["suffix"] for v in variants] == ["-q1", ""]
+    assert [v["suffix"] for v in variants] == ["-q1"]
     assert cfg.stream_suffix("r1", "didA") == "-q1"
 
     # Different EQs: two split streams in order of first appearance.
     cfg.set_speaker_eq("didA", enabled=True, bands=[0, 0, 3] + [0] * 7, preset="vocal")
     variants = cfg.receiver_stream_variants("r1")
-    assert [v["suffix"] for v in variants] == ["-q1", "-q2", ""]
+    assert [v["suffix"] for v in variants] == ["-q1", "-q2"]
     assert cfg.stream_suffix("r1", "didA") == "-q1"  # didA appears first
     assert cfg.stream_suffix("r1", "didB") == "-q2"
+
+
+def test_single_eq_speaker_publishes_only_its_own_variant(cfg):
+    """A lone EQ'd speaker must not run a second encoder for nobody.
+
+    Field data (0.3.3): such a receiver's plain base stream broadcast 4 MB
+    over 100 s with zero clients — the speaker pulls its -q1 — on a box that
+    was already CPU-starved, and its speakers stuttered for the headroom.
+    """
+    cfg.speakers = [SpeakerConfig(did="didA")]
+    cfg.receivers = [ReceiverConfig(id="r1", name="客厅", target_type="speaker", target_id="didA")]
+    cfg.set_speaker_eq_curve("didA", enabled=True, points=[(100, 3.0)])
+
+    assert cfg.group_for_receiver("r1") is None
+    assert not cfg.needs_plain_base("r1")
+    assert [v["suffix"] for v in cfg.receiver_stream_variants("r1")] == ["-q1"]
+    assert cfg.stream_suffix("r1", "didA") == "-q1"
+
+
+def test_resolved_suffix_always_names_a_published_variant(cfg):
+    """Every sink resolves to a variant the receiver actually publishes.
+
+    This is the invariant that makes a tightened plain base safe: a URL into a
+    stream nobody registered answers 404, and a speaker (plus the codec
+    capability prober behind no_stream_pull) reads 404 as "this format is
+    unsupported" — permanently.
+    """
+
+    def assert_resolved_suffixes_are_published(receiver_id: str) -> set[str]:
+        published = {v["suffix"] for v in cfg.receiver_stream_variants(receiver_id)}
+        for did in cfg.receiver_targets(receiver_id):
+            assert cfg.stream_suffix(receiver_id, did) in published
+        return published
+
+    members = ["didA", "didB", "didC", "didD"]
+    cfg.speakers = [SpeakerConfig(did=did) for did in members]
+    cfg.receivers = [
+        ReceiverConfig(id="r1", name="组播", target_type="group", target_id="g1"),
+        ReceiverConfig(id="r2", name="全屋", target_type="group", target_id="g2"),
+    ]
+    cfg.groups = [
+        SpeakerGroupConfig(
+            id="g1",
+            name="组播",
+            speaker_ids=members,
+            mode="stereo",
+            channels={"didA": "left", "didB": "left", "didC": "right", "didD": "right"},
+        ),
+        SpeakerGroupConfig(id="g2", name="全屋", speaker_ids=members),
+    ]
+    cfg.set_speaker_eq_curve("didA", enabled=True, points=[(100, 3.0)])
+    cfg.set_speaker_loudness("didB", True)
+    cfg.set_speaker_eq_curve("didD", enabled=True, points=[(100, 3.0)])
+
+    assert assert_resolved_suffixes_are_published("r1") == {"-L-q1", "-L-q2", "-R", "-R-q1"}
+    # The mirror receiver has a channel-less plain member (didC), so its mix
+    # stays published.
+    assert "" in assert_resolved_suffixes_are_published("r2")
+
+    # Tune the last plain member: the mix loses its only consumer and goes
+    # away — and every sink still names a published stream.
+    cfg.set_speaker_eq_curve("didC", enabled=True, points=[(50, -2.0)])
+    assert "" not in assert_resolved_suffixes_are_published("r2")
+    assert not cfg.needs_plain_base("r2")
+
+
+def test_stream_suffix_falls_back_to_a_published_variant(cfg):
+    """A sink whose tuning is not in the plan still gets a stream that exists.
+
+    The left channel here has two curves and no plain variant, so a third
+    left-hand curve must land on a published -L stream instead of the bare
+    "-L" nobody registered.
+    """
+    cfg.speakers = [SpeakerConfig(did=did) for did in ("didA", "didB", "didC", "didD")]
+    cfg.receivers = [ReceiverConfig(id="r1", name="组播", target_type="group", target_id="g1")]
+    cfg.groups = [
+        SpeakerGroupConfig(
+            id="g1",
+            name="组播",
+            speaker_ids=["didA", "didB"],
+            mode="stereo",
+            channels={"didA": "left", "didB": "left", "didC": "right", "didD": "left"},
+        )
+    ]
+    cfg.set_speaker_eq_curve("didA", enabled=True, points=[(100, 3.0)])
+    cfg.set_speaker_eq_curve("didB", enabled=True, points=[(100, -3.0)])
+    cfg.set_speaker_eq_curve("didC", enabled=True, points=[(500, 2.0)])
+    cfg.set_speaker_eq_curve("didD", enabled=True, points=[(200, 5.0)])
+
+    assert [v["suffix"] for v in cfg.receiver_stream_variants("r1")] == ["-L-q1", "-L-q2"]
+    assert cfg.stream_suffix("r1", "didD") == "-L-q1"
+    assert cfg.stream_id_for("r1", "didD") == "r1-L-q1"
+    # The right channel publishes nothing at all, so the bare suffix is all
+    # that is left to ask for.
+    assert cfg.stream_suffix("r1", "didC") == "-R"
 
 
 def test_stereo_variants_combine_channel_and_eq(cfg):

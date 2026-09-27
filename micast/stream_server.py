@@ -83,6 +83,20 @@ _MEDIA_UA = (
 )
 
 
+def _receiver_id_of_stream_id(stream_id: str) -> str:
+    """Receiver part of a stream id, with its ``-L``/``-R``/``-qN`` suffix stripped.
+
+    Only used to recover an id nobody registered: a URL that asks for
+    ``<entry>-L`` (or ``<entry>-q1``) after the entry's streams became
+    EQ-split must still resolve back to the entry.
+    """
+    head, sep, tail = stream_id.rpartition("-q")
+    stem = head if sep and tail.isdigit() else stream_id
+    if stem.endswith(("-L", "-R")):
+        stem = stem[:-2]
+    return stem
+
+
 def _drop_whole_chunks(buffer: deque[bytes], requested: int) -> int:
     """Drop the oldest whole chunks covering ``requested`` bytes.
 
@@ -126,6 +140,9 @@ class StreamServer:
 
     def __init__(self):
         self._streams: dict[str, StreamFormat] = {}
+        # Aliases already served once, so the "not registered" warning is a
+        # one-line-per-case breadcrumb instead of a per-request log flood.
+        self._served_aliases: set[tuple[str, str]] = set()
         self._clients: dict[str, set[asyncio.Queue[bytes | None]]] = {}
         self._client_delay: dict[asyncio.Queue, dict[str, int | str | None]] = {}
         self._prefixes: dict[str, bytearray] = {}
@@ -332,6 +349,7 @@ class StreamServer:
     def register_stream(self, device_id: str, stream_format: StreamFormat) -> None:
         """Register a new stream endpoint."""
         self._streams[device_id] = stream_format
+        self._served_aliases.discard((device_id, device_id))
         self._clients.setdefault(device_id, set())
         self._prefixes[device_id] = bytearray()
         self.total_bytes_sent.setdefault(device_id, 0)
@@ -383,6 +401,24 @@ class StreamServer:
 
     def stream_ids(self) -> list[str]:
         return list(self._streams.keys())
+
+    def _resolve_stream_id(self, device_id: str) -> str | None:
+        """Registered stream to serve for an id nobody registered.
+
+        A URL built from the entry id plus only the channel suffix —
+        ``/stream/{entry}-L`` on an entry whose streams are EQ-split — names no
+        variant. Answering it with the receiver's own registered stream beats a
+        404, because a player (and the codec-capability prober behind
+        no_stream_pull) reads a 404 as "this device cannot play this format"
+        and would blacklist the format for good.
+        """
+        receiver_id = _receiver_id_of_stream_id(device_id)
+        if receiver_id in self._streams:
+            return receiver_id
+        prefix = f"{receiver_id}-"
+        return next(
+            (stream_id for stream_id in self._streams if stream_id.startswith(prefix)), None
+        )
 
     def client_delay_states(self, device_id: str) -> list[dict]:
         """Per-client delay-line state for one stream (consumer health)."""
@@ -521,7 +557,21 @@ class StreamServer:
     ) -> StreamingResponse:
         stream_format = self._streams.get(device_id)
         if stream_format is None:
-            raise HTTPException(status_code=404, detail="Stream not found")
+            served_id = self._resolve_stream_id(device_id)
+            if served_id is None:
+                raise HTTPException(status_code=404, detail="Stream not found")
+            if (device_id, served_id) not in self._served_aliases:
+                self._served_aliases.add((device_id, served_id))
+                logger.warning(
+                    "Stream /stream/%s is not registered; serving /stream/%s instead",
+                    device_id,
+                    served_id,
+                )
+            # Serve the resolved id, not the requested one: clients are keyed
+            # by stream id and the broadcaster only feeds registered ids, so an
+            # alias key would leave this client queued forever.
+            device_id = served_id
+            stream_format = self._streams[device_id]
 
         sink = sink or request.query_params.get("sink") or None
         receiver_id = receiver_id or request.query_params.get("receiver") or None

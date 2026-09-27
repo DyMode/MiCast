@@ -285,4 +285,32 @@ def test_plain_base_is_published_only_when_something_consumes_it():
 
     # A mirror group serves everyone from the base mix.
     group.mode = "mirror"
+    group.dlna_targets = []
     assert settings.needs_plain_base("r1")
+
+
+def test_plain_base_is_kept_for_external_targets_and_channelless_members():
+    """Anything that can ask for the mix keeps it published."""
+    settings = _settings_with_stereo_group()
+    group = settings.groups[0]
+    group.mode = "stereo"
+    group.channels = {"didA": "left", "didB": "right"}
+
+    # An external AirPlay target taps the base mix.
+    group.airplay_targets = ["aabbccddeeff"]
+    assert settings.needs_plain_base("r1")
+    assert "" in [v["suffix"] for v in settings.receiver_stream_variants("r1")]
+
+    # A DLNA renderer attached to the group pulls the bare entry.
+    group.airplay_targets = []
+    group.dlna_targets = ["udn-1"]
+    assert settings.needs_plain_base("r1")
+
+    # A member that owns no channel plays the mix.
+    group.dlna_targets = []
+    group.channels = {"didA": "left"}
+    assert settings.needs_plain_base("r1")
+
+    # Every member on a channel and nothing external: no consumer is left.
+    group.channels = {"didA": "left", "didB": "right"}
+    assert not settings.needs_plain_base("r1")

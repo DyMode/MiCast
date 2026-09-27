@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import micast.audio_bridge as bridge_module
+import micast.routes.playback as playback_module
 from micast.audio_bridge import AudioBridge
 from micast.config import AirPlay2InstanceConfig, ReceiverConfig, Settings, SpeakerConfig
 
@@ -48,11 +49,31 @@ def _settings_with_eq_speaker() -> Settings:
 def test_stream_id_for_carries_the_sink_variant_once():
     cfg = _settings_with_eq_speaker()
 
-    # The EQ'd speaker owns one non-flat variant: the base stream plus -q1.
-    assert [v["suffix"] for v in cfg.receiver_stream_variants("airplay2")] == ["-q1", ""]
+    # The EQ'd speaker owns one non-flat variant: it is the only stream
+    # published (nobody can ask for the plain base), and the id carries it once.
+    assert [v["suffix"] for v in cfg.receiver_stream_variants("airplay2")] == ["-q1"]
     assert cfg.stream_id_for("airplay2", "spk") == "airplay2-q1"
     assert cfg.stream_id_for("airplay2") == "airplay2"
     assert cfg.stream_url_for("airplay2", "spk").endswith("/stream/airplay2-q1")
+
+
+def test_manual_play_url_carries_the_sinks_variant(monkeypatch):
+    """The manual-play helper builds through settings, not from a bare suffix.
+
+    Building ``/stream/{id}{channel_suffix}`` drops the EQ/loudness split and
+    names a stream the receiver no longer publishes once its variants are
+    tuned — the sink then gets a 404 for a format it does support.
+    """
+    cfg = _settings_with_eq_speaker()
+    monkeypatch.setattr(playback_module, "settings", cfg)
+
+    url = playback_module._stream_url_for_device("spk")
+
+    # r1 is the receiver targeting the speaker here; the URL must be its own
+    # variant URL (EQ split included), not a hand-built channel-only one.
+    assert url is not None
+    assert url == cfg.stream_url_for("r1", "spk")
+    assert url.endswith("/stream/r1-q1")
 
 
 def test_entry_id_of_stream_maps_variants_back_to_the_entry():

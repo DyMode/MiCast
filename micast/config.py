@@ -1242,26 +1242,29 @@ class Settings(BaseSettings):
     def needs_plain_base(self, receiver_id: str) -> bool:
         """Whether anything can actually consume the un-split, un-EQ'd mix.
 
-        The plain base stream used to be published unconditionally. In a stereo
-        group where every member owns a channel and nothing external is
-        attached, nobody can ever ask for it (each sink resolves to its own
-        channel variant), so it was a whole extra encoder and tee branch for a
-        pair of speakers — CPU the branches that matter were competing for.
+        The plain base stream is a whole extra encoder plus tee branch, so it
+        is published only when a sink that resolves to it exists: an external
+        DLNA renderer or AirPlay target attached to the group (they pull the
+        bare entry / the base mix — a network member without a channel
+        assignment is one of those), or a target whose own channel + EQ +
+        loudness all land on the plain suffix.
+
+        Anything else means nobody can ask for it — field data (0.3.3): a
+        single EQ'd speaker kept publishing a base stream that broadcast 4 MB
+        over 100 s with zero clients (the speaker pulls its ``-q1``), while
+        that box was already CPU-starved and its speakers were stuttering.
         """
-        group = self.group_for_receiver(receiver_id)
-        if group is None or group.mode != "stereo":
-            # Mirror/single receivers serve every member from the base mix.
-            return True
         # External consumers: DLNA renderers pull /stream/{entry} directly and
         # the AirPlay-target tap carries the base mix.
         if self.receiver_dlna_targets(receiver_id) or self.receiver_airplay_targets(receiver_id):
             return True
-        # A network member without a channel assignment pulls the base stream.
-        if any(did not in group.network_channels for did in group.dlna_targets):
-            return True
-        # A speaker member with no channel plays the mix.
+        # A target whose channel, EQ and loudness together resolve to the
+        # plain suffix. Deliberately not stream_suffix()/receiver_stream_variants:
+        # the variants ask this question, so calling them here recurses.
         return any(
-            self.receiver_channel(receiver_id, did) is None
+            self.channel_suffix(receiver_id, did) == ""
+            and self.speaker_eq_curve(did) is None
+            and not self.speaker_loudness(did)
             for did in self.receiver_targets(receiver_id)
         )
 
@@ -1329,16 +1332,30 @@ class Settings(BaseSettings):
         return variants
 
     def stream_suffix(self, receiver_id: str, did: str) -> str:
-        """Full stream URL suffix (channel + EQ + loudness split) for one speaker."""
+        """Full stream URL suffix (channel + EQ + loudness split) for one speaker.
+
+        The wanted split is the published variant matching this sink's channel
+        + EQ + loudness. When no variant matches — a sink whose tuning is not
+        part of this receiver's plan — the suffix falls back to a variant that
+        IS published for the same channel (the plain one, else the first), so
+        the URL never names a stream nobody registered: the speaker's player
+        reads the resulting 404 as "this format is unsupported". The plain
+        channel suffix is the last resort only.
+        """
         base = self.channel_suffix(receiver_id, did)
         curve = self.speaker_eq_curve(did)
         loudness = self.speaker_loudness(did)
         if curve is None and not loudness:
             return base
-        for variant in self.receiver_stream_variants(receiver_id):
+        variants = self.receiver_stream_variants(receiver_id)
+        for variant in variants:
             if (variant["base"], variant["eq"], variant["loudness"]) == (base, curve, loudness):
                 return variant["suffix"]
-        return base
+        matching = [variant for variant in variants if variant["base"] == base]
+        if not matching:
+            return base
+        plain = next((v for v in matching if v["eq"] is None and not v["loudness"]), None)
+        return (plain or matching[0])["suffix"]
 
     def stream_id_for(self, receiver_id: str, did: str | None = None) -> str:
         """Stream endpoint that serves one sink of a receiver.
