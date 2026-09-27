@@ -1,44 +1,47 @@
 # Docker 部署
 
-## 0.1.0 经典版
+三种编排，只有经典版是默认发行方式。全部命令都在仓库根目录执行。
 
-0.1.0 只发布经典版镜像。它使用 `docker/Dockerfile`，提供经典 AirPlay、DLNA、同步播放、立体声组合和 Web 管理界面。
+## 经典版（单容器）
 
-构建镜像：
-
-```bash
-docker build -f docker/Dockerfile -t micast:0.1.0 .
-```
-
-运行时必须使用 host 网络，以便 mDNS、SSDP 和 AirPlay 音频端口参与局域网发现：
+`docker/Dockerfile`，提供经典 AirPlay、DLNA、多音箱同步、立体声组合与 Web 管理界面。
 
 ```bash
+docker build -f docker/Dockerfile -t micast:latest .
 docker run -d --name micast --restart unless-stopped \
   --network host \
   -e MICAST_DATA_DIR=/data \
   -v "$(pwd)/data:/data" \
-  micast:0.1.0
+  micast:latest
 ```
 
-`docker-compose.classic.yml` 只是经典版的本地辅助配置，不代表额外发行版本。
+编排方式：
+
+```bash
+cd docker
+docker compose -f docker-compose.classic.yml up -d --build
+```
+
+必须使用 host 网络：mDNS、SSDP 与 AirPlay 音频端口要直接参与局域网发现与会话。
 
 ## AirPlay 2 单例版（实验性）
 
-`docker-compose.single.yml` 使用一个固定的 AirPlay 2 接收器，不启动编排器，也不挂载 Docker Socket。控制器和接收器通过内部网络传输 PCM，接收器通过 macvlan 参与局域网发现。
-
-启动前复制并填写配置：
+`docker-compose.single.yml`：控制器加一个固定的 AirPlay 2 接收器，不启动编排器，也不挂载 Docker Socket。两者通过内部网络传输 PCM，接收器用 macvlan 参与局域网发现。
 
 ```bash
 cp docker/.env.example docker/.env
+# 按实际网卡与局域网填写 MICAST_LAN_*
 docker compose --env-file docker/.env -f docker/docker-compose.single.yml up -d --build
 ```
 
-首次打开 Web 引导页后启用 AirPlay 2；此版本只保留一个 AirPlay 2 入口，不提供新增实例按钮。`MICAST_LAN_*` 参数必须与实际 NAS 网卡和局域网匹配。
+只提供一个 AirPlay 2 入口，没有新增实例的入口；首次打开 Web 引导页后启用。`MICAST_LAN_*` 必须与实际 NAS 网卡和局域网一致。
 
-## 实验性编排
+## 多实例编排（实验性）
 
-`experimental/docker-compose.multi.yml` 保留多实例 AirPlay 2 编排方案。它需要 macvlan、宿主机 Docker Socket、独立的 LAN 地址段和人工网络配置，目前不属于 0.1.0 发布内容。
+`experimental/docker-compose.multi.yml` 保留多入口 AirPlay 2 编排方案，需要 macvlan、宿主的 Docker Socket、独立的 LAN 地址段与人工网络配置。
 
-所有 macvlan 参数都必须在 `docker/.env` 中填写，不再提供假定的 `192.168.0.0/24` 默认值。地址段必须避开路由器 DHCP 池，并确认宿主机网卡名称正确。
+所有 macvlan 参数都必须在 `docker/.env` 中填写；地址段要避开路由器的 DHCP 池，并确认宿主机网卡名称正确。
 
-单例版当前与 0.1.0 使用同一控制器镜像和接收器构建文件，Compose 负责拓扑差异；它仍是实验性版本，完成实机验证后再发布独立镜像标签。
+## 数据目录
+
+容器内数据目录由 `MICAST_DATA_DIR` 指定，挂载出来即可保留设置与登录态；文件清单与迁移注意事项见[部署说明](../docs/deployment.md)。

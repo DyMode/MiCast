@@ -9,10 +9,11 @@
 
 ## 核心能力
 
-- **AirPlay 接收**：提供经典 AirPlay 播放入口，将 iPhone、iPad 或 Mac 的音频转送到小米音箱。
-- **多音箱同步**：同一音源可镜像播放到多台音箱，并可逐台校准延迟、响度、音量与静音状态。
-- **立体声组合**：两台音箱可分配为左、右声道，实时拆分并同步输出。
-- **AirPlay 2**：飞牛 fnOS 原生包提供一个可选的 AirPlay 2 入口；默认关闭，可在首次引导或设置中启用。
+- **AirPlay 接收**：提供经典 AirPlay 入口，把 iPhone、iPad 或 Mac 的音频送到小米音箱。
+- **多音箱同步**：同一音源可同声播放到多台音箱（支持跨型号），并可逐台校准延迟、响度、音量与静音。
+- **立体声组合**：两台音箱分配为左、右声道，实时拆分并同步输出。
+- **逐台调音**：每台音箱独立的 EQ 曲线、预设、夜间模式与等响度补偿。
+- **AirPlay 2**：飞牛原生包与 Docker 编排版提供一个可选的 AirPlay 2 入口（实验性，默认关闭）。
 
 ## 界面预览
 
@@ -27,16 +28,19 @@
 <p align="center">
   <img src="docs/screenshots/05-stereo.png" alt="组合：组合音箱拓展声场" width="49%">
 </p>
+<p align="center">
+  <img src="docs/screenshots/06-mobile.png" alt="移动端：播放、音箱与诊断" width="100%">
+</p>
 
 ## 更多功能
 
-- DLNA 播放入口与局域网 AirPlay / DLNA 设备发现
-- MP3、FLAC、WAV 实时编码与自动格式适配
-- 单音箱和音箱组合的 EQ、声道与播放目标配置
+- DLNA 播放入口，以及局域网内 AirPlay / DLNA 播放设备的发现与投放
+- MP3、FLAC、WAV 实时编码，可关闭转码走 PCM 直通；逐台学习音箱支持的格式
 - 米家二维码登录、音箱发现、播放状态与音量控制
-- 登录态自动续期：后台静默轮换云端短期凭证，一次登录长期有效
-- 实时链路拓扑、连接检查、测试音频与运行日志
-- 响应式 Web 管理界面、浅色/深色主题及移动端适配
+- 登录态自动续期：后台轮换云端短期凭证，一次登录长期有效
+- 带屏音箱显示封面与滚动歌词
+- 链路拓扑、连接检查、测试音频、运行日志与诊断报告导出
+- 响应式 Web 管理界面、浅色 / 深色主题与移动端适配
 
 ## 工作方式
 
@@ -51,8 +55,10 @@ iPhone / iPad / Mac / DLNA 客户端
                  │
           ┌──────┴──────┐
           ▼             ▼
-       单台音箱    同步组 / 立体声组
+       单台音箱    同声组合 / 立体声组合
 ```
+
+接入方式、编码、延迟与同步的完整说明见[音频怎么走](docs/audio-path.md)。
 
 ## Windows
 
@@ -62,10 +68,7 @@ iPhone / iPad / Mac / DLNA 客户端
 .\scripts\start-local.cmd
 ```
 
-Windows 提供两种发行方式：安装版将设置保存在 `%APPDATA%\MiCast`，日志和运行文件保存在
-`%LOCALAPPDATA%\MiCast`；便携版压缩包包含 `portable.flag`，所有数据保存在程序同目录的
-`data` 文件夹。源码开发版使用 `%APPDATA%\MiCast-Dev`，首次运行会复制旧版仓库
-`config` 目录中的现有设置，但不会删除旧文件。
+安装版把设置保存在 `%APPDATA%\MiCast`，日志和运行文件保存在 `%LOCALAPPDATA%\MiCast`；便携版压缩包内含 `portable.flag`，所有数据保存在程序目录旁的 `data` 文件夹。源码运行使用 `%APPDATA%\MiCast-Dev`。
 
 首次打开后按页面引导设置管理访问方式并连接米家。Windows 版提供经典 AirPlay 与 DLNA 接收。
 
@@ -77,13 +80,17 @@ pwsh -NoProfile -File scripts/build-windows-distributions.ps1
 
 ## 飞牛 fnOS
 
-原生 `.fpk` 使用 fnOS 统一网关 `/app/micast/`，依赖应用中心的 Python 3.12，支持经典 AirPlay、DLNA，以及一个可选的实验性 AirPlay 2 入口。
+原生 `.fpk` 使用 fnOS 统一网关 `/app/micast/`，依赖应用中心的 Python 3.12，提供经典 AirPlay、DLNA，以及一个可选的实验性 AirPlay 2 入口（x86 包内置其运行时，ARM 包不含）。
 
 ```powershell
 pwsh -NoProfile -File scripts/build-fnos.ps1
 ```
 
-安装包输出到 `dist/fnos/`。详细结构见 [fnOS 打包说明](packaging/fnos/README.md)。
+安装包输出到 `dist/fnos/`。详细结构见 [fnOS 原生包说明](packaging/fnos/README.md)。
+
+## Docker
+
+提供经典版单容器镜像；AirPlay 2 单例版与多实例编排为实验性。构建、环境变量与网络要求见 [`docker/README.md`](docker/README.md)。
 
 ## 源码开发
 
@@ -108,14 +115,14 @@ npm --prefix web run build
 
 ## 登录态自动续期
 
-小米云端播放接口使用的是约 30 天有效的短期凭证（serviceToken）。MiCast 会在后台定期用登录时保存的长期凭证（passToken）向小米账号服务静默换取新的 serviceToken，全自动轮转，日常使用无需重新登录。
+小米云端播放接口使用约 30 天有效的短期凭证（serviceToken）。MiCast 会在后台定期用登录时保存的长期凭证（passToken）向小米账号服务静默换取新的 serviceToken，日常使用无需重新登录。
 
-- 续期只与小米账号服务器通信，不会向音箱发送任何指令，不影响正在播放的内容。
-- 凭证在本地加密存储；续期遇到网络异常会保留旧凭证自动重试，仅当小米明确拒绝长期凭证（如账号改密、设备被踢出）时才会提示重新登录。
+- 续期只与小米账号服务器通信，不向音箱发送指令，不影响正在播放的内容。
+- 凭证在本地加密存储；续期遇到网络异常会保留旧凭证并自动重试。只有小米明确拒绝长期凭证（账号改密、设备被移除等）时才会提示重新登录。
 
 ## 网络
 
-MiCast 使用 mDNS 和 SSDP 发现局域网设备。防火墙需要允许应用访问专用网络；音频入口使用的端口由运行时分配和管理。
+MiCast 使用 mDNS 与 SSDP 发现局域网设备，需要允许应用访问专用网络。音频入口的端口由运行时分配，默认端口与网络要求见[部署说明](docs/deployment.md)。
 
 ## 项目结构
 
@@ -128,8 +135,6 @@ packaging/   Windows 与 fnOS 打包配置
 scripts/     启动、构建和运维脚本
 tests/       自动化测试
 ```
-
-当前提供经典版 Docker 镜像；Docker 文件、AirPlay 2 单例版和实验性多实例编排说明见 [`docker/README.md`](docker/README.md)。
 
 完整文档入口：[docs/README.md](docs/README.md)。
 
