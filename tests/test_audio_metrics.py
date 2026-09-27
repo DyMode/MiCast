@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 from micast.audio_bridge import AudioBridge
-from micast.audio_metrics import AudioMetrics
+from micast.audio_metrics import LOOP_LAG_WARN_MS, AudioMetrics
 from micast.config import settings
 
 
@@ -157,3 +157,57 @@ def test_client_max_lag_is_configurable(monkeypatch):
             settings.set_client_max_lag_seconds(99)
     finally:
         settings.client_max_lag_seconds = original
+
+
+def test_runtime_sample_averages_cpu_over_the_window():
+    """CPU is a windowed average, not a one-second sample."""
+    m = AudioMetrics()
+    m.note_runtime_sample(wall=100.0, cpu=10.0, loop_lag_ms=5.0)
+    # A burst of CPU inside the window must be averaged against the span.
+    m.note_runtime_sample(wall=105.0, cpu=12.5, loop_lag_ms=20.0)
+    assert m.cpu_percent == pytest.approx(50.0)
+    # A spike long ago must not keep the reading high: samples older than the
+    # window are dropped, and the next sample re-averages the fresh ones only.
+    m.note_runtime_sample(wall=111.0, cpu=12.6, loop_lag_ms=1.0)
+    m.note_runtime_sample(wall=112.0, cpu=12.7, loop_lag_ms=1.0)
+    assert m.cpu_percent < 20.0
+
+
+def test_loop_lag_is_reported_and_logged_when_it_is_not_jitter():
+    """Long loop lag is the one cause no drop counter can see: every pipeline
+    stalls at the same instant because the loop serves all of them."""
+    m = AudioMetrics()
+    m.note_runtime_sample(wall=1.0, cpu=1.0, loop_lag_ms=12.0)
+    assert m.snapshot()["runtime"] == {
+        "cpu_percent": 0.0,
+        "cores": 0,
+        "loop_lag_ms": 12.0,
+        "loop_lag_max_ms": 12.0,
+    }
+
+    m.note_runtime_sample(wall=2.0, cpu=1.1, loop_lag_ms=LOOP_LAG_WARN_MS + 1)
+    snapshot = m.snapshot()
+    assert snapshot["runtime"]["loop_lag_max_ms"] == LOOP_LAG_WARN_MS + 1
+    assert [event["kind"] for event in snapshot["events"]] == ["loop_lag"]
+    # ... and a small lag never logs (it is normal scheduling jitter).
+    m.note_runtime_sample(wall=3.0, cpu=1.2, loop_lag_ms=1.0)
+    assert len(m.snapshot()["events"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_monitor_samples_the_running_loop():
+    """The monitor owns the low-level sampling so no caller can get it wrong."""
+    m = AudioMetrics()
+    monkeypatch = pytest.MonkeyPatch()
+    import micast.audio_metrics as module
+
+    monkeypatch.setattr(module, "metrics", m)
+    task = asyncio.create_task(module.run_runtime_monitor(interval=0.02))
+    await asyncio.sleep(0.15)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    monkeypatch.undo()
+
+    runtime = m.snapshot()["runtime"]
+    assert runtime["cores"] >= 1
+    assert runtime["loop_lag_max_ms"] >= 0.0

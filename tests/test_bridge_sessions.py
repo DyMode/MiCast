@@ -7,6 +7,7 @@ AirPlay 2 sender was playing.
 
 from micast.audio_bridge import AudioBridge
 from micast.config import AirPlay2InstanceConfig, ReceiverConfig, settings
+from micast.local_airplay import LocalReceiver
 
 
 def _bridge(monkeypatch, receivers: list[str], instances: list[str]) -> AudioBridge:
@@ -59,3 +60,37 @@ def test_status_payload_carries_the_session_split(monkeypatch):
     bridge._active_sessions.add("ap2")
 
     assert bridge.status["diagnostics"]["sessions"]["airplay2"] == ["ap2"]
+
+
+def test_status_is_derived_at_read_time_not_frozen_at_start(monkeypatch):
+    """A receiver created after start() must not leave the bridge reading "idle".
+
+    Field report (0.5.2): the diagnostics page showed "服务未运行" while two
+    speakers were pulling tens of MB. The local engine's receivers are created
+    by the reconciler, i.e. after start() had already derived its status from an
+    empty provider and cached that "idle" forever.
+    """
+    monkeypatch.setattr(settings, "airplay_engine", "local")
+    bridge = _bridge(monkeypatch, [], [])
+    bridge._status = "idle"  # what start() cached while nothing was configured
+
+    assert bridge.status["status"] == "idle"
+
+    bridge._local_provider.receivers["r1"] = LocalReceiver(
+        id="r1", name="r1", status="running"
+    )
+
+    assert bridge.status["status"] == "running"
+    assert bridge.status["orchestration"]["status"] == "running"
+
+
+def test_status_still_reports_a_transient_state_while_intervening(monkeypatch):
+    monkeypatch.setattr(settings, "airplay_engine", "local")
+    bridge = _bridge(monkeypatch, [], [])
+    bridge._local_provider.receivers["r1"] = LocalReceiver(
+        id="r1", name="r1", status="running"
+    )
+
+    bridge._status = "restarting"
+
+    assert bridge.status["status"] == "restarting"

@@ -103,17 +103,20 @@ def test_drop_metrics_are_cross_format_comparable():
     dropped_bytes and estimated_ms must agree across formats."""
     server = StreamServer()
     # mp3: nominal byte_rate 40000 (320k). flac: no nominal rate — the
-    # observed EMA from broadcast() stands in so both produce a ms estimate.
+    # observed rate from broadcast() stands in so both produce a ms estimate.
     server.register_stream("mp3", StreamFormat("audio/mpeg", "mp3", 40000))
     server.register_stream("flac", StreamFormat("audio/flac", "flac", None))
 
     async def run():
-        # Drive the flac EMA with a steady 16000 B/s so its rate is known.
-        for _ in range(20):
-            server._last_broadcast["flac"] = time.monotonic() - 1.0
-            await server.broadcast("flac", b"\x00" * 16000)
-            await asyncio.sleep(0.01)
-        assert 14000 < server._stream_byte_rate("flac") < 18000
+        # Drive the flac observed rate with a steady 16 kB/s so its rate is
+        # known. The rate is bytes over the sample window's span, so the
+        # broadcasts have to be spread over real time rather than written back
+        # to back — a burst describes the burst, not the stream.
+        for _ in range(14):
+            await server.broadcast("flac", b"\x00" * 800)
+            await asyncio.sleep(0.05)
+        flac_rate = server._stream_byte_rate("flac")
+        assert 12000 < flac_rate < 20000
 
         mp3_q: asyncio.Queue = asyncio.Queue(maxsize=1)
         flac_q: asyncio.Queue = asyncio.Queue(maxsize=1)
@@ -131,6 +134,66 @@ def test_drop_metrics_are_cross_format_comparable():
         assert mp3_metrics["chunks"] == flac_metrics["chunks"] == 1
         # Same 100ms of lost audio on both formats → same ms, comparable count.
         assert mp3_metrics["estimated_ms"] == 100
-        assert abs(flac_metrics["estimated_ms"] - 100) <= 20  # EMA tolerance
+        # flac's figure comes from the observed rate, so compare against that
+        # rate rather than a hard-coded number.
+        assert flac_metrics["estimated_ms"] == round(1600 / flac_rate * 1000)
+        assert abs(flac_metrics["estimated_ms"] - 100) <= 35
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_idle_gap_between_sessions_is_not_an_encoder_stall(monkeypatch):
+    """An AirPlay 1 <-> 2 switch leaves the session latch set across the idle
+    minute, so the pump's inter-chunk gap spans the whole idle period.
+
+    Field data (0.3.6): those gaps were recorded as encoder stalls of 4835ms,
+    11.3s, 28.7s and 125.7s right next to real 200ms hiccups — the loudest row
+    on the diagnostics page, and pure fiction. Past the ceiling the interval is
+    rebased instead.
+    """
+    import micast.speaker_pipeline as pipeline_module
+    from micast.audio_metrics import metrics
+    from micast.speaker_pipeline import SpeakerPipeline
+
+    class _SlowReader:
+        def __init__(self, gap: float):
+            self._gap = gap
+            self._calls = 0
+
+        async def read(self, n: int = -1) -> bytes:
+            self._calls += 1
+            if self._calls > 2:
+                await asyncio.sleep(5)  # hold the pump until the test ends
+                return b""
+            if self._calls == 2:
+                await asyncio.sleep(self._gap)
+            return b"\x22" * 1024
+
+    async def run(gap: float, ceiling: float) -> dict:
+        metrics.reset()
+        monkeypatch.setattr(pipeline_module, "ENCODER_STALL_CEILING_MS", ceiling)
+        pipeline = object.__new__(SpeakerPipeline)
+        pipeline._running = True
+        pipeline._stream_id = "airplay2"
+        pipeline._status = "running"
+        pipeline._session_active = lambda: True
+        server = StreamServer()
+        server.register_stream("airplay2", StreamFormat("audio/flac", "flac", None))
+        pipeline._stream_server = server
+
+        task = asyncio.create_task(pipeline._pump_encoder_to_stream(_SlowReader(gap)))
+        await asyncio.sleep(0.4)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return metrics.snapshot()["encode"]
+
+    idle = await run(0.15, 50.0)
+    assert idle["chunks"] == 0  # the 150ms idle gap is rebased, not measured
+    assert idle["stalls"] == 0
+
+    # Control: with the ceiling out of the way the same gap IS measured (and is
+    # still not a stall — it is below ENCODER_STALL_MS).
+    measured = await run(0.15, 1000.0)
+    assert measured["chunks"] == 1
+    assert measured["stalls"] == 0

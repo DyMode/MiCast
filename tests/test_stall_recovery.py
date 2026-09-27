@@ -78,6 +78,90 @@ def _bare_bridge(monkeypatch) -> AudioBridge:
     return bridge
 
 
+def _bridge_with_entries(monkeypatch) -> AudioBridge:
+    """A bridge whose settings know both a classic receiver and an instance."""
+    bridge = object.__new__(AudioBridge)
+    bridge._stall_recovery_requested = False
+    bridge._maintenance_sessions = set()
+    bridge._active_sessions = {"r1", "ap2"}
+    entries = [SimpleNamespace(id="r1"), SimpleNamespace(id="ap2")]
+    monkeypatch.setattr(
+        bridge_module,
+        "settings",
+        SimpleNamespace(
+            airplay2_instances=[SimpleNamespace(id="ap2", enabled=True)],
+            receivers=[entries[0]],
+            audio_entry_ids=lambda: [item.id for item in entries],
+            entry_id_of_stream=lambda stream_id: max(
+                (
+                    item.id
+                    for item in entries
+                    if stream_id == item.id or stream_id.startswith(f"{item.id}-")
+                ),
+                key=len,
+                default=None,
+            ),
+        ),
+    )
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_classic_stall_rebuilds_only_its_own_entry(monkeypatch):
+    """A PCM stall on a classic (AirPlay 1) receiver must rebuild that entry,
+    never restart the whole app.
+
+    Field failure (0.3.4): ``_recover_stalled_source`` fell back to
+    ``self.restart`` for every stream that was not an AirPlay 2 instance, so one
+    AirPlay 1 hiccup tore the engine down — every speaker disconnected, the
+    shairport instance was killed, zeroconf re-registered — and, since a full
+    restart cannot repair a stalled reader either, it repeated every ~10s. That
+    is the "everything keeps getting kicked" the user reported.
+    """
+    bridge = _bridge_with_entries(monkeypatch)
+    bridge.rebuild_entry = AsyncMock()
+    bridge.restart = AsyncMock()
+    monkeypatch.setattr(bridge_module.asyncio, "sleep", AsyncMock())
+
+    await bridge._recover_stalled_source("r1-q1")
+
+    bridge.restart.assert_not_awaited()
+    bridge.rebuild_entry.assert_awaited_once_with("r1")
+    # The sender session is still live: the latch must survive the rebuild.
+    assert "r1" in bridge._active_sessions
+    assert bridge._stall_recovery_requested is False
+
+
+@pytest.mark.asyncio
+async def test_airplay2_stall_never_restarts_the_engine(monkeypatch):
+    bridge = _bridge_with_entries(monkeypatch)
+    rebuild = AsyncMock()
+    bridge._rebuild_airplay2_instances = rebuild
+    bridge.restart = AsyncMock()
+    monkeypatch.setattr(bridge_module.asyncio, "sleep", AsyncMock())
+
+    await bridge._recover_stalled_source("ap2-q1")
+
+    bridge.restart.assert_not_awaited()
+    rebuild.assert_awaited_once_with({"ap2"})
+    assert "ap2" not in bridge._active_sessions
+    assert "ap2" not in bridge._maintenance_sessions
+
+
+@pytest.mark.asyncio
+async def test_unattributable_stall_leaves_running_sessions_alone(monkeypatch):
+    """A stream no configured entry owns (a config change raced the watchdog)
+    is logged, not answered with a full restart."""
+    bridge = _bridge_with_entries(monkeypatch)
+    bridge.rebuild_entry = AsyncMock()
+    bridge.restart = AsyncMock()
+
+    await bridge._recover_stalled_source("gone-q1")
+
+    bridge.restart.assert_not_awaited()
+    bridge.rebuild_entry.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_recover_stalled_source_retries_failed_rebuild(monkeypatch):
     """A rebuild that throws once (the post-RecursionError half-stopped state

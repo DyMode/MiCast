@@ -39,6 +39,13 @@ TICK_SECONDS = 2.0
 SESSION_GRACE_SECONDS = 6.0
 # Source silence shorter than this is normal jitter between chunk deliveries.
 SOURCE_FLOW_GRACE_SECONDS = 4.0
+# A session that HAS delivered audio and then goes quiet is a pause or a track
+# transition, not a fault: acting on it is not free, because restoring the
+# source means restarting the receiver — for AirPlay 2 that is shairport-sync,
+# and restarting it drops the phone's session outright. So a sender that has
+# played may stay quiet this long before we call it broken. A session that
+# never delivered anything is judged on the ordinary grace above.
+SOURCE_PAUSE_GRACE_SECONDS = 20.0
 # Bytes must move within this window for a speaker to count as served.
 SERVE_WINDOW_SECONDS = 6.0
 # After an action, wait this long before judging whether it worked.
@@ -53,6 +60,8 @@ UNHEALTHY_BACKOFF_SECONDS = 120.0
 STATE_IDLE = "idle"
 STATE_STARTING = "starting"
 STATE_HEALTHY = "healthy"
+STATE_QUIET = "quiet"
+STATE_PAUSED = "paused"
 STATE_DEGRADED_OUR_SIDE = "degraded_our_side"
 STATE_DEGRADED_SPEAKER = "degraded_speaker"
 STATE_BURSTY = "bursty"
@@ -69,6 +78,8 @@ STATE_LABELS = {
     STATE_IDLE: "空闲",
     STATE_STARTING: "启动中",
     STATE_HEALTHY: "正常",
+    STATE_QUIET: "音源暂停",
+    STATE_PAUSED: "已暂停",
     STATE_DEGRADED_OUR_SIDE: "MiCast 侧异常",
     STATE_DEGRADED_SPEAKER: "音箱侧异常",
     STATE_BURSTY: "音源成团",
@@ -94,6 +105,9 @@ class EntryHealth:
     last_action_ok: bool | None = None
     play_reissued_at: float = 0.0
     session_started_at: float = 0.0
+    # Last time this session actually delivered source audio. Distinguishes a
+    # sender that paused from one that never started (see STATE_QUIET).
+    delivered_at: float = 0.0
     unhealthy_since: float = 0.0
     bursty_since: float = 0.0
     buffer_override: float | None = None
@@ -169,6 +183,25 @@ class AudioSupervisor:
         return False
 
     # -- signals -----------------------------------------------------------
+    def _targets_paused(self, entry_id: str) -> bool:
+        """True when every speaker of this entry was paused from OUR UI.
+
+        Deliberately paused is not a fault: the supervisor used to see "speaker
+        connected but taking nothing" and re-issued the play command ~8s later,
+        which resumed the speaker behind the user's back and cleared the paused
+        flag — field data (0.4.0): "暂停后自己又播放了，控制就乱了".
+        """
+        manager = self._device_manager
+        if manager is None:
+            return False
+        try:
+            targets = self._bridge.entry_targets(entry_id)
+            if not targets:
+                return False
+            return all(manager.is_paused(did) for did in targets)
+        except Exception:  # pragma: no cover - a stub manager must never break ticks
+            return False
+
     def _signals(self, entry_id: str) -> dict:
         bridge = self._bridge
         stream_ids = bridge.entry_stream_ids(entry_id)
@@ -188,6 +221,7 @@ class AudioSupervisor:
             "clients": clients,
             "pipeline_usable": bridge.entry_pipeline_usable(entry_id),
             "source_bursty": bridge.entry_source_bursty(entry_id),
+            "paused": self._targets_paused(entry_id),
         }
 
     def classify(self, entry_id: str, signals: dict | None = None) -> str:
@@ -196,22 +230,35 @@ class AudioSupervisor:
         entry = self.health(entry_id)
         if not signals["session_active"]:
             entry.session_started_at = 0.0
+            entry.delivered_at = 0.0
             return STATE_IDLE
         now = self._clock()
         if not entry.session_started_at:
             entry.session_started_at = now
+        if signals["source_flowing"]:
+            entry.delivered_at = now
         if signals["stream_served"]:
             return STATE_BURSTY if signals["source_bursty"] else STATE_HEALTHY
         if now - entry.session_started_at < SESSION_GRACE_SECONDS:
             return STATE_STARTING
-        if not signals["pipeline_usable"] or not signals["source_flowing"]:
+        if signals.get("paused"):
+            # Stopped on purpose from our own UI: the speaker is not pulling
+            # because the listener asked it to stop, not because anything broke.
+            return STATE_PAUSED
+        if not signals["pipeline_usable"]:
+            return STATE_DEGRADED_OUR_SIDE
+        if not signals["source_flowing"]:
+            silent_s = (signals["source_idle_ms"] or 0.0) / 1000
+            if entry.delivered_at and silent_s < SOURCE_PAUSE_GRACE_SECONDS:
+                return STATE_QUIET
             return STATE_DEGRADED_OUR_SIDE
         return STATE_DEGRADED_SPEAKER
 
     # -- ladder ------------------------------------------------------------
     async def tick(self) -> None:
         """Advance every entry by one step. Safe to call repeatedly."""
-        for entry_id in self._bridge.entry_ids():
+        live = set(self._bridge.entry_ids())
+        for entry_id in list(live):
             entry = self.health(entry_id)
             now = self._clock()
             if entry.state == STATE_UNHEALTHY and (
@@ -225,13 +272,22 @@ class AudioSupervisor:
                 await self._step(entry_id)
             except Exception:
                 logger.exception("Audio supervisor step failed for %s", entry_id)
+        # Streams the plan no longer publishes must not linger as phantom
+        # entries: a stereo pair showed six rows for three real streams, and the
+        # stale ones read like extra pipelines nobody had explained.
+        for entry_id in [key for key in self._entries if key not in live]:
+            self._entries.pop(entry_id, None)
+            self._last_tick.pop(entry_id, None)
 
     async def _step(self, entry_id: str) -> None:
         entry = self.health(entry_id)
         signals = self._signals(entry_id)
         state = self.classify(entry_id, signals)
         entry.set_state(state, self._reason_for(state, signals))
-        if state in (STATE_IDLE, STATE_STARTING):
+        if state in (STATE_IDLE, STATE_STARTING, STATE_QUIET, STATE_PAUSED):
+            # A paused sender (or a speaker we paused ourselves) is not a fault:
+            # no action, and the ladder starts over if the entry really fails
+            # later.
             entry.escalations = 0
             return
         if state == STATE_HEALTHY:
@@ -249,6 +305,10 @@ class AudioSupervisor:
         await self._escalate(entry, signals)
 
     def _reason_for(self, state: str, signals: dict) -> str:
+        if state == STATE_QUIET:
+            return f"音源已静默 {int((signals['source_idle_ms'] or 0) / 1000)}s（暂停或换曲）"
+        if state == STATE_PAUSED:
+            return "已从 MiCast 暂停"
         if state == STATE_DEGRADED_OUR_SIDE:
             if not signals["pipeline_usable"]:
                 return "管道不可用（已结束或未启动）"
@@ -262,7 +322,7 @@ class AudioSupervisor:
         return ""
 
     def _on_healthy(self, entry: EntryHealth) -> None:
-        if entry.escalations or entry.last_action:
+        if entry.escalations:
             logger.info(
                 "Audio supervisor: %s recovered (was %s)",
                 entry.entry_id,
@@ -276,6 +336,10 @@ class AudioSupervisor:
             )
         entry.escalations = 0
         entry.last_action_ok = True if entry.last_action else entry.last_action_ok
+        # Forget the action: a healthy entry that keeps its last_action logs
+        # "recovered (was healthy)" on every 2s tick forever (field data: 500+
+        # identical lines in 90 seconds, which buried the real events).
+        entry.last_action = ""
         entry.unhealthy_since = 0.0
         self._decay_buffer(entry)
 

@@ -6,19 +6,24 @@ are re-issued then kicked, escalations are rate-limited, and a failure that
 survives every level is surfaced instead of spinning forever.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
-from micast.audio_metrics import AudioMetrics
+from micast.audio_metrics import AudioMetrics, metrics
 from micast.audio_supervisor import (
     LEVEL_KICK,
     LEVEL_REBUILD,
     LEVEL_REISSUE,
     LEVEL_SOURCE,
+    SOURCE_PAUSE_GRACE_SECONDS,
     STATE_BURSTY,
     STATE_DEGRADED_OUR_SIDE,
     STATE_DEGRADED_SPEAKER,
     STATE_HEALTHY,
     STATE_IDLE,
+    STATE_PAUSED,
+    STATE_QUIET,
     STATE_STARTING,
     STATE_UNHEALTHY,
     VERIFY_SECONDS,
@@ -48,8 +53,12 @@ class FakeBridge:
         self.targets = ["did-1"]
 
     # signals
+    # Tests that retire a stream override this; a fresh list each call, so the
+    # default ("one live entry") keeps every other test unchanged.
+    live_entries: list[str] | None = None
+
     def entry_ids(self):
-        return ["entry"]
+        return list(self.live_entries) if self.live_entries is not None else ["entry"]
 
     def entry_stream_ids(self, entry_id):
         return ["entry", "entry-q1"]
@@ -163,6 +172,56 @@ def test_speaker_side_fault_when_we_have_audio_but_nobody_pulls():
     supervisor.classify("entry")
     clock.advance(10)
     assert supervisor.classify("entry") == STATE_DEGRADED_SPEAKER
+
+
+@pytest.mark.asyncio
+async def test_paused_sender_is_quiet_not_a_fault(monkeypatch):
+    """A session that HAS delivered audio and then goes quiet is a pause, not a
+    fault. Acting on it is destructive: restoring the source restarts the
+    receiver, and for AirPlay 2 that is shairport-sync — the phone's session
+    dies with it. Field data: this fired ~8s into such a silence.
+    """
+    clock = FakeClock()
+    bridge = FakeBridge(_signals(session_active=True, served=True))
+    supervisor = AudioSupervisor(bridge, object(), clock=clock)
+    await supervisor.tick()  # healthy run latches "this session delivered audio"
+
+    bridge.signals = _signals(session_active=True, source_idle_ms=9000.0)
+    clock.advance(10)
+    assert supervisor.classify("entry") == STATE_QUIET
+    await supervisor.tick()
+    assert bridge.calls == []
+    assert supervisor.health("entry").state == STATE_QUIET
+
+    # Past the pause grace the silence is a fault again, and the ladder acts.
+    bridge.signals = _signals(
+        session_active=True,
+        source_idle_ms=(SOURCE_PAUSE_GRACE_SECONDS + 5) * 1000,
+    )
+    clock.advance(VERIFY_SECONDS + 1)
+    await supervisor.tick()
+    assert bridge.calls == [f"{LEVEL_SOURCE}:entry"]
+
+
+@pytest.mark.asyncio
+async def test_new_session_after_a_pause_is_judged_from_scratch():
+    """The delivered-audio latch belongs to one session: a fresh session gets
+    the ordinary grace, not the pause grace."""
+    clock = FakeClock()
+    bridge = FakeBridge(_signals(session_active=True, served=True))
+    supervisor = AudioSupervisor(bridge, object(), clock=clock)
+    await supervisor.tick()
+
+    bridge.signals = _signals()  # session ended
+    clock.advance(10)
+    await supervisor.tick()
+    assert supervisor.health("entry").state == STATE_IDLE
+
+    bridge.signals = _signals(session_active=True, source_idle_ms=9000.0)
+    clock.advance(10)
+    await supervisor.tick()  # stamps the fresh session: still inside the grace
+    clock.advance(10)
+    assert supervisor.classify("entry") == STATE_DEGRADED_OUR_SIDE
 
 
 @pytest.mark.asyncio
@@ -312,3 +371,92 @@ async def test_metrics_records_health_transitions(monkeypatch):
     await supervisor.tick()
     kinds = [event["kind"] for event in recorder.snapshot()["events"]]
     assert "health" in kinds
+
+
+def test_speaker_paused_from_the_ui_is_not_a_fault():
+    """Our own pause must never be answered with a play re-issue.
+
+    Field failure (0.4.0): the UI paused the speaker, the supervisor then saw
+    "clients connected but taking nothing" (or none at all) and re-issued the
+    play command ~8 s later, which resumed the speaker behind the user's back
+    and cleared the paused flag — "暂停后自己又播放了，控制就乱了".
+    """
+    clock = FakeClock()
+    bridge = FakeBridge(_signals(session_active=True, served=False, source_idle_ms=10.0))
+    manager = SimpleNamespace(is_paused=lambda did: True)
+    supervisor = AudioSupervisor(bridge, manager, clock=clock)
+
+    supervisor.classify("entry")
+    clock.advance(10)
+    assert supervisor.classify("entry") == STATE_PAUSED
+
+
+@pytest.mark.asyncio
+async def test_paused_entry_takes_no_action():
+    clock = FakeClock()
+    bridge = FakeBridge(_signals(session_active=True, served=False, source_idle_ms=10.0))
+    supervisor = AudioSupervisor(bridge, SimpleNamespace(is_paused=lambda did: True), clock=clock)
+    await _tick_after_grace(supervisor, clock)
+    clock.advance(VERIFY_SECONDS + 1)
+    await supervisor.tick()
+    assert bridge.calls == []
+    entry = supervisor.health("entry")
+    assert entry.state == STATE_PAUSED
+    assert entry.escalations == 0
+
+    # Resuming from the UI puts the entry back in play.
+    supervisor._device_manager = SimpleNamespace(is_paused=lambda did: False)
+    clock.advance(10)
+    await supervisor.tick()
+    assert supervisor.health("entry").state in (STATE_HEALTHY, STATE_DEGRADED_SPEAKER)
+
+
+@pytest.mark.asyncio
+async def test_recovered_entry_stops_announcing_itself_every_tick():
+    """The recovery line must be logged once, not on every 2s tick.
+
+    Field data (0.4.0): one play_reissue left ``last_action`` set, so a healthy
+    entry logged "recovered (was healthy)" every two seconds — 500+ identical
+    lines that buried the real events in the report.
+    """
+    clock = FakeClock()
+    bridge = FakeBridge(_signals(session_active=True, served=False, source_idle_ms=10.0))
+    supervisor = AudioSupervisor(bridge, object(), clock=clock)
+    await _tick_after_grace(supervisor, clock)  # play_reissue escalation
+    assert bridge.calls == [f"{LEVEL_REISSUE}:entry"]
+
+    bridge.signals = _signals(session_active=True, served=True)
+    clock.advance(VERIFY_SECONDS + 1)
+    await supervisor.tick()
+    entry = supervisor.health("entry")
+    assert entry.state == STATE_HEALTHY
+    assert entry.last_action == ""
+
+    # Ticking on must not log or count another recovery.
+    events_before = len(metrics.snapshot()["events"])
+    for _ in range(3):
+        clock.advance(2)
+        await supervisor.tick()
+    assert supervisor.health("entry").escalations == 0
+    assert len(metrics.snapshot()["events"]) == events_before
+
+
+@pytest.mark.asyncio
+async def test_entries_for_retired_streams_are_forgotten():
+    """A stream the plan stopped publishing must leave the health panel.
+
+    Field data (0.5.1, stereo pair): the panel showed six entries for three
+    real streams, so the retired variants read like extra pipelines nobody had
+    explained — and photos of that panel drove a wrong diagnosis.
+    """
+    clock = FakeClock()
+    bridge = FakeBridge(_signals())
+    supervisor = AudioSupervisor(bridge, object(), clock=clock)
+    supervisor.health("entry")  # a stream that exists right now
+    supervisor.health("entry-q1")  # ... and one that was retired since
+
+    bridge.live_entries = ["entry"]
+    clock.advance(10)
+    await supervisor.tick()
+
+    assert set(supervisor.snapshot()) == {"entry"}

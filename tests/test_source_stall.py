@@ -6,12 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import micast.audio_bridge as bridge_module
 from micast.audio_bridge import AudioBridge
 from micast.pcm_source import PCMSource
-from micast.speaker_pipeline import (
-    SOURCE_STALL_CHECK_SECONDS,
-    SpeakerPipeline,
-)
+from micast.speaker_pipeline import SpeakerPipeline
 from micast.stream_server import StreamServer
 
 
@@ -43,16 +41,27 @@ class NeverFeedsSource(StarvingSource):
 
 
 @pytest.mark.asyncio
-async def test_bridge_coalesces_stalled_source_recovery():
+async def test_bridge_coalesces_stalled_source_recovery(monkeypatch):
+    """A second stall on the same entry while its rebuild is still running must
+    not start a second rebuild: the re-entry latch coalesces them.
+
+    Recovery is scoped to the entry that owns the stream, so the fixture maps
+    both stream ids of that entry onto it (a stream NO entry owns is left
+    alone on purpose — see test_unattributable_stall_leaves_running_sessions_alone).
+    """
     bridge = AudioBridge()
+    monkeypatch.setattr(
+        type(bridge_module.settings), "entry_id_of_stream", lambda self, stream_id: "r1"
+    )
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def restart():
+    async def rebuild(entry_id):
+        assert entry_id == "r1"
         entered.set()
         await release.wait()
 
-    bridge.restart = AsyncMock(side_effect=restart)
+    bridge.rebuild_entry = AsyncMock(side_effect=rebuild)
 
     first = asyncio.create_task(bridge._recover_stalled_source("r1"))
     await entered.wait()
@@ -60,7 +69,7 @@ async def test_bridge_coalesces_stalled_source_recovery():
     release.set()
     await first
 
-    assert bridge.restart.await_count == 1
+    assert bridge.rebuild_entry.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -122,6 +131,7 @@ def _pipeline(source: PCMSource, session_active) -> SpeakerPipeline:
 @pytest.mark.asyncio
 async def test_stalled_reader_delegates_upstream_recovery(monkeypatch):
     monkeypatch.setattr("micast.speaker_pipeline.SOURCE_STALL_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("micast.speaker_pipeline.SOURCE_STALL_CHECK_SECONDS", 0.2)
     recovered = []
 
     async def recover(stream_id):
@@ -138,7 +148,7 @@ async def test_stalled_reader_delegates_upstream_recovery(monkeypatch):
     )
     await pipeline.start()
     try:
-        await asyncio.sleep(SOURCE_STALL_CHECK_SECONDS + 0.5)
+        await asyncio.sleep(0.6)  # three shrunk check intervals
         assert recovered == ["classic"]
         assert source.starts == 1
     finally:
@@ -147,15 +157,17 @@ async def test_stalled_reader_delegates_upstream_recovery(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_silence_after_healthy_audio_does_not_restart_source(monkeypatch):
-    # Shrink the stall window; keep the check cadence intact.
+    # Shrink the stall window and the check cadence together: the ratio between
+    # them is what this test is about, not the wall clock.
     monkeypatch.setattr("micast.speaker_pipeline.SOURCE_STALL_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("micast.speaker_pipeline.SOURCE_STALL_CHECK_SECONDS", 0.2)
     source = StarvingSource()
     pipeline = _pipeline(source, lambda: True)
 
     await pipeline.start()
     try:
         assert source.starts == 1
-        await asyncio.sleep(SOURCE_STALL_CHECK_SECONDS * 3 + 0.5)
+        await asyncio.sleep(0.9)  # four check intervals of silence
         assert source.starts == 1
         assert source.stops == 0
         assert pipeline.status == "running"
@@ -166,12 +178,13 @@ async def test_silence_after_healthy_audio_does_not_restart_source(monkeypatch):
 @pytest.mark.asyncio
 async def test_silent_source_without_session_is_left_alone(monkeypatch):
     monkeypatch.setattr("micast.speaker_pipeline.SOURCE_STALL_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("micast.speaker_pipeline.SOURCE_STALL_CHECK_SECONDS", 0.2)
     source = StarvingSource()
     pipeline = _pipeline(source, lambda: False)  # no sender: silence is normal
 
     await pipeline.start()
     try:
-        await asyncio.sleep(SOURCE_STALL_CHECK_SECONDS * 3 + 0.5)
+        await asyncio.sleep(0.9)  # four check intervals of silence
         assert source.starts == 1
         assert source.stops == 0
     finally:
