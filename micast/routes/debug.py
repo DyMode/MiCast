@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import io
 import json
 import logging
 import mimetypes
@@ -11,24 +10,31 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import av
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from micast.audio_bridge import AudioBridge
 from micast.audio_encoder import transcode_file_to_wav
+from micast.codec_probe import build_fixtures, probe_device_formats
 from micast.config import settings
-from micast.diagnostics import build_report, collect_state
+from micast.diagnostics import build_log_text, build_report, collect_state, log_payload
 from micast.playback_lifecycle import stop_output
+from micast.runtime_log import LogQuery, resolve_query, runtime_logs
 from micast.test_tone import test_tone_wav
 from micast.url_safety import validate_http_url
-from micast.xiaomi.device_manager import DeviceManager
-from micast.xiaomi.mina_api import MinaAPI
+from micast.xiaomi.device_manager import CODEC_FORMATS, DeviceManager
 
-router = APIRouter(prefix="/api/debug", tags=["debug"])
 logger = logging.getLogger(__name__)
+
+# Log selection axes, shared by the three endpoints that hand records out. Named
+# types keep a typo in a query string a 422 instead of a silently empty file.
+LogSource = Literal["app", "all"]
+LogLevel = Literal["all", "warn"]
+# Duration presets the export endpoints accept. "session" means the whole buffer.
+LogWindow = Literal["5m", "15m", "30m", "1h", "session"]
 
 # Xiaomi firmwares expose spoken text through different MIoT actions. MiNA's
 # mibrain endpoint may still return success on these models while only flashing
@@ -114,6 +120,12 @@ async def _restore_streams(
 
 
 def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
+    # A router per install, not one module-level router for every app that ever
+    # called this: building a second app (a test, an embedded server) used to
+    # register a second copy of every diagnostics route on the same object, and
+    # the *first* copy — with the first app's bridge and device manager — won
+    # every request.
+    router = APIRouter(prefix="/api/debug", tags=["debug"])
     live_calibrations: dict[str, dict] = {}
     upload_dir = Path(tempfile.gettempdir()) / "micast-test-audio"
     shutil.rmtree(upload_dir, ignore_errors=True)
@@ -122,31 +134,30 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
     active_tests: dict[str, dict] = {}
     codec_fixtures: dict[str, tuple[str, Path, str]] = {}
 
+    async def cloud_devices() -> list[dict]:
+        """Device list for a diagnostics action, with a plain message on failure.
+
+        These actions run *because* something is wrong, so a cloud outage must
+        come back as a sentence the page can show, not as an unhandled
+        exception with a technical detail.
+        """
+        try:
+            return await device_manager.list_devices()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503, detail=f"无法读取音箱列表：{exc}"
+            ) from exc
+
     def ensure_codec_fixtures() -> dict[str, tuple[str, Path, str]]:
         if codec_fixtures:
             return codec_fixtures
-        specs = {
-            "MP3": ("mp3", "libmp3lame", "audio/mpeg"),
-            "FLAC": ("flac", "flac", "audio/flac"),
-            "WAV": ("wav", "pcm_s16le", "audio/wav"),
-        }
-        source_bytes = test_tone_wav()
-        for label, (extension, codec, media_type) in specs.items():
-            token = f"codec-{label.lower()}-{secrets.token_urlsafe(6)}"
-            path = upload_dir / f"{token}.{extension}"
-            with av.open(io.BytesIO(source_bytes), mode="r") as source, av.open(
-                str(path), mode="w", format=extension
-            ) as target:
-                stream = target.add_stream(codec, rate=44100)
-                stream.layout = "stereo"
-                for frame in source.decode(audio=0):
-                    frame.sample_rate = 44100
-                    for packet in stream.encode(frame):
-                        target.mux(packet)
-                for packet in stream.encode(None):
-                    target.mux(packet)
-            bridge._stream_server.register_diagnostic_media(token, path, media_type)
-            codec_fixtures[label] = (token, path, media_type)
+        # The audible arpeggio, one fixture per capability the app can serve, at
+        # the app's own sample rate so the probe matches the real stream. The
+        # user asked for this test, so it is meant to be heard — the background
+        # format detection uses silent fixtures instead (see codec_probe).
+        codec_fixtures.update(
+            build_fixtures(bridge._stream_server, test_tone_wav(), upload_dir)
+        )
         return codec_fixtures
 
 
@@ -263,7 +274,7 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
     @router.post("/test/start")
     async def start_test(payload: dict):
         members = [str(item) for item in payload.get("device_ids", []) if item]
-        known = {str(item.get("deviceID")) for item in await device_manager.list_devices()}
+        known = {str(item.get("deviceID")) for item in await cloud_devices()}
         if not members or any(did not in known for did in members):
             raise HTTPException(status_code=400, detail="请选择可用的测试音箱")
         source = payload.get("source", "builtin")
@@ -327,44 +338,30 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
     @router.post("/codec-test")
     async def codec_test(payload: dict):
         members = [str(item) for item in payload.get("device_ids", []) if item]
-        known = {str(item.get("deviceID")) for item in await device_manager.list_devices()}
+        known = {str(item.get("deviceID")) for item in await cloud_devices()}
         if not members or any(did not in known for did in members):
             raise HTTPException(status_code=400, detail="请选择可用的检测音箱")
-        fixtures = ensure_codec_fixtures()
+        fixtures = await asyncio.to_thread(ensure_codec_fixtures)
         previous = {
             did: (device_manager.stream_url_of(did), device_manager.owner_of(did))
             for did in members
         }
-        results: dict[str, dict[str, bool]] = {did: {} for did in members}
+        results: dict[str, dict[str, bool | None]] = {did: {} for did in members}
         owner = f"codec-test:{secrets.token_urlsafe(8)}"
         try:
             for did in members:
-                for label, (token, _path, _media_type) in fixtures.items():
-                    before = bridge._stream_server.diagnostic_hits(token)
-                    url = f"http://{settings.effective_stream_host}:{settings.stream_port}/diagnostic/media/{token}?probe={time.time_ns()}"
-                    try:
-                        accepted = await device_manager.play_stream(
-                            did, url, owner=owner, force=True, audio_id=str(time.time_ns())
-                        )
-                        await asyncio.sleep(2.0)
-                        supported = (
-                            accepted is not False
-                            and bridge._stream_server.diagnostic_hits(token) > before
-                        )
-                    except Exception:
-                        supported = False
-                    results[did][label] = supported
-                    device_manager.note_codec_capability(did, label, supported, "active_probe")
-                    await device_manager.stop_playback(did, owner=owner)
-                results[did]["PCM/WAV"] = results[did].get("WAV", False)
-                device_manager.note_codec_capability(
-                    did, "PCM/WAV", results[did]["PCM/WAV"], "active_probe"
+                results[did] = await probe_device_formats(
+                    bridge._stream_server,
+                    device_manager,
+                    did,
+                    fixtures,
+                    owner=owner,
                 )
         finally:
             failed_restore = await _restore_streams(device_manager, previous)
         common = [
             fmt
-            for fmt in ("MP3", "FLAC", "WAV", "PCM/WAV")
+            for fmt in CODEC_FORMATS
             if all(item.get(fmt) is True for item in results.values())
         ]
         return {
@@ -468,10 +465,10 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
         service = await device_manager.auth.ensure_service()
         if not service:
             raise HTTPException(status_code=401, detail="小米账号未登录")
-        devices = await device_manager.list_devices()
+        devices = await cloud_devices()
         if not any(str(item.get("deviceID")) == device_id for item in devices):
             raise HTTPException(status_code=404, detail="未找到音箱")
-        status = await MinaAPI(service, device_id).get_status()
+        status = await device_manager.cloud_api(device_id).get_status()
         return {
             "device_id": device_id,
             "name": device_manager.get_alias(device_id),
@@ -485,7 +482,7 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
     async def test_tone():
         """Built-in test audio, served locally so the check needs no internet."""
         return Response(
-            test_tone_wav(),
+            await asyncio.to_thread(test_tone_wav),
             media_type="audio/wav",
             headers={"Cache-Control": "no-store"},
         )
@@ -566,19 +563,75 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
             await _restore_streams(device_manager, previous)
 
     @router.get("/state")
-    async def debug_state():
-        return await collect_state(bridge, device_manager)
+    async def debug_state(
+        log_source: LogSource = "app",
+        log_level: LogLevel = "all",
+        log_since: Annotated[float | None, Query()] = None,
+        log_until: Annotated[float | None, Query()] = None,
+    ):
+        """Live state plus the log tail the panel draws.
+
+        The interval bounds are absolute epoch seconds and optional: without
+        them the panel follows the whole buffer, and the page freezes a window
+        by sending the pair it resolved against `server_time`.
+        """
+        state = await collect_state(bridge, device_manager)
+        state["logs"] = log_payload(LogQuery(log_source, log_level, log_since, log_until))
+        return state
 
     @router.get("/report")
-    async def download_report():
-        """Sanitized diagnostic bundle: settings + state + logs, one file."""
-        report = await build_report(bridge, device_manager)
+    async def download_report(
+        log_source: LogSource = "app",
+        log_level: LogLevel = "all",
+        log_window: LogWindow = "15m",
+        log_since: Annotated[float | None, Query()] = None,
+        log_until: Annotated[float | None, Query()] = None,
+    ):
+        """Sanitized diagnostic bundle: settings + state + the selected logs.
+
+        The log section is exactly the interval asked for — a duration preset
+        resolved now, or an absolute pair — bounded by what the buffer still
+        holds, which `log_scope.truncated` reports.
+        """
+        query = resolve_query(
+            source=log_source, level=log_level, window=log_window, since=log_since, until=log_until
+        )
+        report = await build_report(bridge, device_manager, query=query)
         filename = f"micast-diagnostic-{time.strftime('%Y%m%d-%H%M%S')}.json"
         return Response(
             json.dumps(report, ensure_ascii=False, indent=2),
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                # So the toast can say how many records it just handed over
+                # without parsing the file back out of the blob.
+                "X-MiCast-Log-Count": str(report["log_scope"]["count"]),
+            },
         )
+
+    @router.get("/logs.txt")
+    async def copy_logs(
+        log_source: LogSource = "app",
+        log_level: LogLevel = "all",
+        log_window: LogWindow = "15m",
+        log_since: Annotated[float | None, Query()] = None,
+        log_until: Annotated[float | None, Query()] = None,
+    ):
+        """The same selection as the report, as plain text for the clipboard."""
+        query = resolve_query(
+            source=log_source, level=log_level, window=log_window, since=log_since, until=log_until
+        )
+        selection = runtime_logs.select(query)
+        return Response(
+            build_log_text(query, selection),
+            media_type="text/plain; charset=utf-8",
+            headers={"X-MiCast-Log-Count": str(selection.total)},
+        )
+
+    @router.post("/logs/clear")
+    async def clear_logs():
+        """Drop the in-memory log buffer so the next run records a clean window."""
+        return {"cleared": runtime_logs.clear()}
 
     @router.post("/tts")
     async def debug_tts(payload: dict):
@@ -588,7 +641,7 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
         if not service or not device_id:
             raise HTTPException(status_code=400, detail="No device selected or not logged in")
 
-        devices = await device_manager.list_devices()
+        devices = await cloud_devices()
         device = next((item for item in devices if item.get("deviceID") == device_id), None)
         if not device:
             raise HTTPException(status_code=404, detail="没有找到所选音箱")

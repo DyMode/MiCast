@@ -9,7 +9,7 @@ from micast.config import EQ_PRESET_POINTS, settings
 from micast.config_apply import apply_config_transaction
 from micast.curve_fit import CURVE_FREQ_RANGE, CURVE_GAIN_RANGE, TARGET_CURVES
 from micast.xiaomi.auth import XiaomiAuthError
-from micast.xiaomi.device_manager import DeviceManager
+from micast.xiaomi.device_manager import CODEC_FORMATS, CODEC_LABELS, DeviceManager
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 
@@ -77,6 +77,11 @@ def install(device_manager: DeviceManager, bridge: AudioBridge | None = None) ->
                         "codec_capability_details": (
                             device_manager.codec_capability_details(did) if did else {}
                         ),
+                        # The formats the app can be asked to serve, in its own
+                        # words: the UI lists "未测" for the ones with no record
+                        # instead of inventing names of its own.
+                        "codec_formats": list(CODEC_FORMATS),
+                        "codec_labels": dict(CODEC_LABELS),
                         "playing": device_manager.is_playing(did),
                         "muted": device_manager.is_muted(did),
                         "enabled": speaker.enabled if speaker else False,
