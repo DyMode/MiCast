@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -154,3 +155,130 @@ async def test_verify_still_stops_genuinely_dead_pull(monkeypatch):
         if call.args[2] is False
     ]
     assert len(capability_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_format_change_relearns_the_capability(monkeypatch):
+    """Switching to a format that works must be RECORDED as supported.
+
+    Field report (0.4.2): the first play recorded MP3, then the user switched
+    to FLAC, it played fine — and the capability table still showed only MP3.
+    Success was only ever learned at session start, and a format change
+    restarts the encoders underneath a live session: no session start fires.
+    """
+    import micast.playback_orchestrator as orchestrator_module
+    from micast.playback_orchestrator import PlaybackOrchestrator
+
+    class _Settings:
+        audio = SimpleNamespace(auto_transcode=True, format="flac", sample_rate=48000)
+        effective_stream_host = "192.168.0.12"
+        stream_port = 8080
+
+        def receiver_targets(self, receiver_id):
+            return ["did"]
+
+        def stream_url_for(self, receiver_id, did=None):
+            return f"http://{self.effective_stream_host}:{self.stream_port}/stream/{receiver_id}"
+
+    monkeypatch.setattr(orchestrator_module, "settings", _Settings())
+    recorded: list[tuple] = []
+
+    class _DM:
+        def owner_of(self, did):
+            return "r1"
+
+        def playing_ids(self):
+            return ["did"]
+
+        def stream_url_of(self, did):
+            return "http://host:8080/stream/r1/for/r1/did"
+
+        async def play_stream(self, did, url, **kwargs):
+            return True
+
+        def note_codec_capability(self, did, fmt, supported, reason):
+            recorded.append((did, fmt, supported, reason))
+
+    class _Server:
+        @staticmethod
+        def sink_bytes(receiver_id, sink):
+            return 40_000
+
+        @staticmethod
+        def sink_last_byte_at(receiver_id, sink):
+            return time.monotonic()
+
+    bridge = SimpleNamespace(stream_server=_Server(), is_session_active=lambda rid: True)
+    orch = PlaybackOrchestrator(bridge, _DM(), lambda coro, name: asyncio.ensure_future(coro))
+    tasks: list = []
+    monkeypatch.setattr(
+        orch, "_start_background", lambda coro, name: tasks.append(asyncio.ensure_future(coro))
+    )
+
+    await orch.on_audio_restarted()
+    for task in tasks:
+        await asyncio.wait_for(task, timeout=15)
+
+    assert ("did", "flac", True, "stream_pull_confirmed") in recorded
+
+
+@pytest.mark.asyncio
+async def test_a_speaker_that_fetches_but_never_takes_bytes_is_not_capable(monkeypatch):
+    """The probe must not confuse "opened the URL" with "played it".
+
+    Field report (0.4.2): 厨房小爱 was recorded as PCM-capable while it played
+    nothing — the old criterion was a request count.
+    """
+    import micast.playback_orchestrator as orchestrator_module
+    from micast.playback_orchestrator import PlaybackOrchestrator
+
+    class _Settings:
+        audio = SimpleNamespace(auto_transcode=False, format="flac", sample_rate=48000)
+        effective_stream_host = "192.168.0.12"
+        stream_port = 8080
+
+        def receiver_targets(self, receiver_id):
+            return ["did"]
+
+        def stream_url_for(self, receiver_id, did=None):
+            return f"http://{self.effective_stream_host}:{self.stream_port}/stream/{receiver_id}"
+
+    monkeypatch.setattr(orchestrator_module, "settings", _Settings())
+    monkeypatch.setattr(orchestrator_module.asyncio, "sleep", AsyncMock())
+    recorded: list[tuple] = []
+
+    class _DM:
+        def owner_of(self, did):
+            return "r1"
+
+        def stream_url_of(self, did):
+            return "http://host:8080/stream/r1/for/r1/did"
+
+        async def stop_playback(self, did, owner=None, keep_error=False):
+            return None
+
+        def note_codec_capability(self, did, fmt, supported, reason):
+            recorded.append((did, fmt, supported, reason))
+
+        def note_play_error(self, *args, **kwargs):
+            return None
+
+    class _Server:
+        """The speaker fetched 2 kB and stopped: not a capable pull."""
+
+        @staticmethod
+        def sink_bytes(receiver_id, sink):
+            return 2_000
+
+        @staticmethod
+        def sink_last_byte_at(receiver_id, sink):
+            return time.monotonic() - 30
+
+    bridge = SimpleNamespace(stream_server=_Server(), is_session_active=lambda rid: True)
+    orch = PlaybackOrchestrator(bridge, _DM(), lambda coro, name: asyncio.ensure_future(coro))
+
+    await orch.verify_receiver_streams("r1", ["did"])
+
+    # Untranscoded means the app is serving raw PCM.
+    assert ("did", "pcm", False, "no_stream_pull") in recorded
+    assert not [entry for entry in recorded if entry[2] is True]

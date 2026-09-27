@@ -15,11 +15,13 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from micast.audio_bridge import AudioBridge
 from micast.config import settings
 from micast.lyrics import LyricsSession
-from micast.xiaomi.device_manager import DeviceManager
+from micast.test_tone import silent_probe_wav
+from micast.xiaomi.device_manager import CODEC_PULL_MIN_BYTES, DeviceManager
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +34,22 @@ SESSION_STOP_GRACE_SECONDS = 3.0
 # config apply behind the lock.
 HOOK_TIMEOUT_SECONDS = 5.0
 
+# Background format detection. Speakers are probed one at a time, only while
+# nothing is playing, shortly after a session ends (the moment the speakers are
+# free) and at a slow cadence otherwise. A device is re-probed only when a
+# format has no verdict yet, or its record is older than this, so a settled
+# installation stops doing any of it.
+AUTO_PROBE_SETTLE_SECONDS = 20.0
+AUTO_PROBE_RETRY_SECONDS = 6 * 3600.0
+AUTO_PROBE_TICK_SECONDS = 600.0
+# Raw pcm is deliberately absent: its support cannot be established from the
+# server side (see codec_probe), so nothing may claim it automatically.
+AUTO_PROBE_FORMATS = ("mp3", "flac", "wav")
+
 
 def stream_url_for_receiver(receiver_id: str, device_id: str) -> str:
     """Stream URL of one receiver for one speaker, channel/EQ suffix included."""
-    return (
-        f"http://{settings.effective_stream_host}:{settings.stream_port}"
-        f"/stream/{receiver_id}{settings.stream_suffix(receiver_id, device_id)}"
-    )
+    return settings.stream_url_for(receiver_id, device_id)
 
 
 class PlaybackOrchestrator:
@@ -55,6 +66,9 @@ class PlaybackOrchestrator:
         self._start_background = start_background
         self._pending_stops: dict[str, asyncio.Task] = {}
         self._pending_group_recoveries: dict[str, asyncio.Task] = {}
+        self._auto_probe_task: asyncio.Task | None = None
+        self._auto_probe_at: dict[str, float] = {}
+        self._probe_fixtures: dict[str, tuple[str, Path, str]] = {}
         self._lyrics_sessions: dict[str, LyricsSession] = {}
         # Receivers whose session start this orchestrator already served. The
         # AirPlay 2 receiver (shairport-sync) fires play-begins again on track
@@ -79,6 +93,9 @@ class PlaybackOrchestrator:
 
     async def stop_all(self) -> None:
         """Tear down lyrics sessions (lifespan shutdown)."""
+        probe = self._auto_probe_task
+        if probe is not None and not probe.done():
+            probe.cancel()
         await asyncio.gather(
             *(session.stop() for session in list(self._lyrics_sessions.values())),
             return_exceptions=True,
@@ -200,13 +217,18 @@ class PlaybackOrchestrator:
         targets: list[str],
         attempted: dict[str, str] | None = None,
     ) -> None:
-        fmt = "PCM/WAV" if not settings.audio.auto_transcode else settings.audio.format.upper()
+        fmt = self._active_stream_format()
         pending = {
             did for did in targets if self.device_manager.owner_of(did) == receiver_id
         }
         # Slow speakers and a cold stream server can need a few seconds before
         # the first bytes arrive. Do not turn startup latency into a false
         # codec incompatibility.
+        #
+        # "Supported" means the speaker took real bytes and kept taking them: a
+        # decoder that rejects a framed payload reads a burst and gives up. For
+        # raw pcm even that is not proof (a silent speaker keeps reading), so
+        # the verdict itself is withheld there — see note_codec_capability.
         for _attempt in range(3):
             await asyncio.sleep(2.0)
             if not self.bridge.is_session_active(receiver_id):
@@ -214,10 +236,19 @@ class PlaybackOrchestrator:
                 # live session a missing pull proves nothing about the
                 # speaker's codec support — abort without recording it.
                 return
-            healthy_now = {did for did in pending if self._stream_active_for(did)}
-            for did in healthy_now:
-                self.device_manager.note_codec_capability(did, fmt, True, "stream_pull_confirmed")
-            pending -= healthy_now
+            healthy_now = {
+                did
+                for did in pending
+                if self._stream_pull_confirmed(receiver_id, did)
+            }
+            if healthy_now:
+                # A pull that is still growing is proof; a stalled one merely
+                # keeps the device in "pending" for the next attempt.
+                for did in healthy_now:
+                    self.device_manager.note_codec_capability(
+                        did, fmt, True, "stream_pull_confirmed"
+                    )
+                pending -= healthy_now
             if not pending:
                 return
         if not self.bridge.is_session_active(receiver_id):
@@ -247,6 +278,34 @@ class PlaybackOrchestrator:
             self.device_manager.note_play_error(did, receiver_id, message, url, retry=False)
             logger.warning("Speaker %s did not pull %s for receiver %s", did, fmt, receiver_id)
 
+    def _active_stream_format(self) -> str:
+        """The capability this app is currently serving: its own format names."""
+        if not settings.audio.auto_transcode:
+            return "pcm"
+        return str(settings.audio.format).lower()
+
+    def _stream_pull_confirmed(self, receiver_id: str, device_id: str, window: float = 2.0) -> bool:
+        """True when the speaker pulled a meaningful, STILL-GROWING byte count.
+
+        Request counting says nothing (see verify_receiver_streams); bytes over
+        a window is the same evidence the delay line uses for "the speaker is
+        really reading".
+        """
+        server = getattr(self.bridge, "stream_server", None)
+        sink_bytes = getattr(server, "sink_bytes", None)
+        last_byte_at = getattr(server, "sink_last_byte_at", None)
+        if sink_bytes is None or last_byte_at is None:
+            # A stream server without byte accounting (older stub/bridge):
+            # fall back to "is it pulling at all" rather than claiming proof.
+            return self._stream_active_for(device_id)
+        before = sink_bytes(receiver_id, device_id)
+        last_at = last_byte_at(receiver_id, device_id)
+        if before < CODEC_PULL_MIN_BYTES:
+            return False
+        # A pull that stopped in the last few seconds is not proof either: a
+        # decoder that rejects the payload reads a burst and gives up.
+        return (time.monotonic() - last_at) < max(5.0, window)
+
     def _stream_active_for(self, device_id: str) -> bool:
         """Watchdog ground truth: is the speaker really pulling its stream right
         now? The cloud reports "playing" even when the speaker fetches nothing."""
@@ -254,6 +313,123 @@ class PlaybackOrchestrator:
         from micast.main import _stream_active_for
 
         return _stream_active_for(device_id)
+
+    # ---- background format detection -------------------------------------
+
+    def schedule_codec_probe(self, delay: float = AUTO_PROBE_SETTLE_SECONDS) -> None:
+        """Probe speakers for formats still unverified, once they are idle.
+
+        Called when a session ends: that is when the speakers are free and the
+        user is least likely to be listening. Idempotent — a session that keeps
+        starting and stopping must not stack probes.
+        """
+        if self._auto_probe_task is not None and not self._auto_probe_task.done():
+            return
+        self._auto_probe_task = self._start_background(
+            self._auto_probe_loop(delay), "auto-codec-probe"
+        )
+
+    async def _auto_probe_loop(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            while True:
+                if not await self._probe_missing_formats():
+                    return
+                await asyncio.sleep(AUTO_PROBE_TICK_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Background format detection failed")
+
+    def _probe_targets(self) -> list[str]:
+        """Speakers of every enabled receiver: the devices this app can play to."""
+        targets: list[str] = []
+        for receiver in settings.receivers:
+            if not receiver.enabled:
+                continue
+            for did in settings.receiver_targets(receiver.id):
+                if did not in targets:
+                    targets.append(did)
+        return targets
+
+    def _missing_probe_formats(self, did: str) -> list[str]:
+        details = self.device_manager.codec_capability_details(did)
+        now = time.time()
+        missing = []
+        for fmt in AUTO_PROBE_FORMATS:
+            meta = details.get(fmt)
+            age = now - float(meta.get("verified_at") or 0) if meta else None
+            if meta is None or age is None or age > AUTO_PROBE_RETRY_SECONDS * 4:
+                missing.append(fmt)
+        return missing
+
+    def _probe_idle(self, did: str) -> bool:
+        """Only ever touch a speaker nobody is using."""
+        if self.bridge.has_active_sessions():
+            return False
+        return self.device_manager.owner_of(did) is None
+
+    async def _probe_missing_formats(self) -> bool:
+        """Probe every speaker that still has an unverified format.
+
+        Returns whether anything remains to do (so the caller can back off to
+        its slow cadence instead of spinning).
+        """
+        if self.device_manager.cloud_degraded():
+            # Nothing to learn without the cloud, and the probe's own calls
+            # would queue behind the lookups already stuck in the resolver.
+            return True
+        remaining = False
+        for did in self._probe_targets():
+            missing = self._missing_probe_formats(did)
+            if not missing:
+                continue
+            last = self._auto_probe_at.get(did, 0.0)
+            if last and time.monotonic() - last < AUTO_PROBE_RETRY_SECONDS:
+                remaining = True
+                continue
+            if not self._probe_idle(did):
+                remaining = True
+                continue
+            await self._probe_device(did, missing)
+        return remaining
+
+    async def _probe_device(self, did: str, formats: list[str]) -> None:
+        from micast.codec_probe import build_fixtures, probe_device_formats, probe_directory
+
+        stream_server = getattr(self.bridge, "stream_server", None)
+        if stream_server is None:
+            return
+        self._auto_probe_at[did] = time.monotonic()
+        owner = f"auto-probe:{did}"
+        # Silence, not the diagnostic tone: the point is to learn what the
+        # decoder accepts without making the room listen to a test signal. Built
+        # once for the whole run — encoding an 8-second fixture per speaker would
+        # cost seconds of CPU for the same bytes — and off the event loop, whose
+        # timers (every resolver deadline included) must not wait for it.
+        if not self._probe_fixtures:
+            self._probe_fixtures = await asyncio.to_thread(
+                build_fixtures, stream_server, silent_probe_wav(), probe_directory(), "silence"
+            )
+        results = await probe_device_formats(
+            stream_server,
+            self.device_manager,
+            did,
+            self._probe_fixtures,
+            owner=owner,
+            formats=formats,
+            should_continue=lambda: not self.bridge.has_active_sessions(),
+            reason="auto_probe",
+        )
+        if results:
+            logger.info(
+                "Background format check for %s: %s",
+                self.device_manager.get_alias(did) or did,
+                ", ".join(
+                    f"{fmt}={'yes' if ok else 'no' if ok is False else 'inconclusive'}"
+                    for fmt, ok in results.items()
+                ),
+            )
 
     def _session_lock(self, receiver_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(receiver_id)
@@ -263,6 +439,11 @@ class PlaybackOrchestrator:
         return lock
 
     async def on_session_start(self, receiver_id: str):
+        # A probe may be mid-flight: it only ever runs while nothing plays, but
+        # a session can begin inside its sampling window.
+        probe = self._auto_probe_task
+        if probe is not None and not probe.done():
+            probe.cancel()
         # Serialize start/stop pairs per receiver: a RECORD and a shairport
         # play-begins callback can interleave and each would otherwise issue
         # its own full round of cloud plays.
@@ -333,6 +514,9 @@ class PlaybackOrchestrator:
         self._pending_stops[receiver_id] = self._start_background(
             delayed_stop(), f"delayed-stop:{receiver_id}"
         )
+        # The speakers are about to be free: a good moment to learn what formats
+        # they accept, without a single sound leaving them (silent fixtures).
+        self.schedule_codec_probe()
 
     async def reconcile_group(self, group_id: str, removed_dids: list[str]):
         """Live membership edit on a group: stop the removed speakers and
@@ -484,6 +668,7 @@ class PlaybackOrchestrator:
         # URL from the speaker's current OWNER — when several receivers target
         # the same speaker (single + group), a settings-order lookup would pick
         # the wrong stream and hand the speaker silence.
+        pending_verify: dict[str, list[str]] = {}
         for did in self.device_manager.playing_ids():
             owner = self.device_manager.owner_of(did)
             url = stream_url_for_receiver(owner, did) if owner else None
@@ -492,3 +677,14 @@ class PlaybackOrchestrator:
             if url:
                 play_url = f"{url}/for/{owner}/{did}?s={time.time_ns()}"
                 await self.device_manager.play_stream(did, play_url, force=True)
+                if owner:
+                    pending_verify.setdefault(owner, []).append(did)
+        # Switching format/transcoding mid-session re-points every playing
+        # speaker at a re-encoded stream, so THIS is where the new format gets
+        # learned. Without it the capability table kept the format of the first
+        # play only ("切到 FLAC 能正常播放，但没有把 FLAC 记上去").
+        for owner, targets in pending_verify.items():
+            self._start_background(
+                self.verify_receiver_streams(owner, targets),
+                f"verify-codec:{owner}",
+            )

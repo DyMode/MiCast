@@ -11,6 +11,10 @@ from contextlib import suppress
 
 logger = logging.getLogger(__name__)
 
+# The orchestrator feeds PCM over TCP; a connect that never answers must not
+# hold up the entry behind it.
+PCM_CONNECT_TIMEOUT_SECONDS = 5.0
+
 # Windowed (console=False) packaged builds must not let child processes
 # allocate their own console — otherwise every capture command pops a
 # terminal window.
@@ -119,6 +123,15 @@ class LocalPCMSource(PCMSource):
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
 
+    @property
+    def alive(self) -> bool:
+        """The child process is still running (so its reader is still fed).
+
+        Plan-only rebuilds reuse a live receiver instead of restarting it; a
+        dead process must always be respawned.
+        """
+        return self._process is not None and self._process.returncode is None
+
     async def start(self) -> asyncio.StreamReader:
         args = self.command.split()
         env = None
@@ -191,12 +204,17 @@ class TCPPCMSource(PCMSource):
         last_error: OSError | None = None
         for attempt in range(20):
             try:
-                self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+                # Bounded connect: an orchestrator that is gone must not leave
+                # this source (and the entry behind it) waiting on a socket that
+                # will never answer.
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port), PCM_CONNECT_TIMEOUT_SECONDS
+                )
                 break
-            except OSError as exc:
-                last_error = exc
+            except (OSError, TimeoutError) as exc:
+                last_error = exc if isinstance(exc, OSError) else OSError(str(exc))
                 if attempt == 19:
-                    raise
+                    raise last_error from None
                 await asyncio.sleep(0.5)
         if self._reader is None or self._writer is None:
             raise RuntimeError(f"Could not connect to PCM source: {last_error}")

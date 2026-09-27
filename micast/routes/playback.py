@@ -71,8 +71,8 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
 
     @router.post("/play")
     async def play():
-        # Resume speakers paused from the UI first; nothing paused means starting
-        # the selected device with the stream URL of the receiver targeting it.
+        # Resume speakers paused from the UI first; nothing paused means
+        # re-attaching the receivers that still have a live sender session.
         paused = [
             str(device.get("deviceID"))
             for device in device_manager.get_control_targets()
@@ -81,9 +81,23 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
         if paused:
             await asyncio.gather(*(device_manager.resume(did) for did in paused))
             return {"ok": True, "resumed": paused}
+        # Receiver setups have no single "selected device": play back every entry
+        # whose sender session is live (that is what the speaker was listening
+        # to). Without this the button answered 400 "No device selected or not
+        # logged in" while a receiver was casting — field report (0.4.0):
+        # "控制就乱了".
+        reissued = [
+            entry_id
+            for entry_id in settings.audio_entry_ids()
+            if bridge.is_session_active(entry_id)
+        ]
+        for entry_id in reissued:
+            await bridge.reissue_entry_play(entry_id)
+        if reissued:
+            return {"ok": True, "reissued": reissued}
         selected = settings.selected_device_id
         if not selected:
-            raise HTTPException(status_code=400, detail="No device selected or not logged in")
+            raise HTTPException(status_code=400, detail="没有正在投放的会话")
         url = device_manager.stream_url_of(selected) or _stream_url_for_device(selected)
         if not url:
             raise HTTPException(status_code=400, detail="No receiver targets the selected device")
@@ -99,7 +113,17 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
             for device in device_manager.get_control_targets()
             if device.get("deviceID") and device_manager.is_playing(str(device.get("deviceID")))
         ]
+        owners = {did: device_manager.owner_of(did) for did in targets}
         await asyncio.gather(*(device_manager.stop(did) for did in targets))
+        # A paused speaker keeps its URL and stops reading, which fills its
+        # stream queue with chunks nobody takes: the diagnostics then showed
+        # "丢弃 N 次" for audio that was never lost, and the ghost reaper kicked
+        # the connection mid-pause anyway. Drop those connections now instead.
+        for did, owner in owners.items():
+            if not owner or bridge is None:
+                continue
+            for stream_id in bridge.entry_stream_ids(owner):
+                bridge.stream_server.kick_clients(stream_id, sink=did)
         return {"ok": True, "paused": targets}
 
     @router.post("/stop")
