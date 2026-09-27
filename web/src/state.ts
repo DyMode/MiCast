@@ -27,7 +27,9 @@ export interface State {
     open: boolean;
     qrUrl: string | null;
     scanToken: string | null;
-    state: "idle" | "waiting" | "scanned" | "confirmed" | "expired";
+    state: "idle" | "waiting" | "scanned" | "confirmed" | "expired" | "error";
+    /** Why the QR could not be produced; set with state "error". */
+    error?: string | null;
   };
   xiaomi: XiaomiStatus;
   debug: DebugState | null;
@@ -72,7 +74,9 @@ function loadUiState(): State["ui"] {
         )
           ? parsed.activeSection
           : "topology",
-        expandedDeviceDid: parsed.expandedDeviceDid ?? null,
+        // Expansion is a transient reading state, not a preference: restoring
+        // the last-open card on load made one speaker appear to open itself.
+        expandedDeviceDid: null,
         tuningDid: null,
         tuningAdvanced: Boolean(parsed.tuningAdvanced),
         confirmingReceiverId: null,

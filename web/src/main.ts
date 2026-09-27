@@ -8,7 +8,7 @@ import {
   renderAppShell,
   updateThemeToggle,
 } from "./components/app-shell";
-import { bindDebugPanel, bindStreamKicks, renderStatusOverview, renderDebugPanel, renderStreamRows, updateRuntimeLog, type DebugState } from "./components/debug-panel";
+import { bindDebugPanel, bindStreamKicks, currentLogQuery, renderAudioPath, renderStatusOverview, renderDebugPanel, renderStreamRows, renderStreamSummary, renderTechnicalMetrics, updateLogChrome, updateRuntimeLog, type DebugState } from "./components/debug-panel";
 import { bindDevicesView, renderDevicesView } from "./components/devices-view";
 import { bindTuningView, disposeTuningView, renderTuningView } from "./components/tuning-view";
 import { renderQRSheet, bindQRSheet } from "./components/qr-sheet";
@@ -173,6 +173,8 @@ function render(state: State) {
         pcmSource: state.status?.pcm_source || "",
         streamUrl: state.status?.stream_url || "",
         loggedIn: state.xiaomi.logged_in,
+        // "unstable": the cloud is not answering even though tokens exist.
+        cloudDegraded: state.xiaomi.status === "unstable",
         loadError: state.deviceLoadError,
         playback: state.playback,
       });
@@ -191,6 +193,7 @@ function render(state: State) {
         theme: state.ui.theme,
         status: state.status?.status || "",
         xiaomiLoggedIn: state.xiaomi.logged_in,
+        cloudDegraded: state.xiaomi.status === "unstable",
         deviceCount: state.devices.length,
         access: state.access,
         saving: state.saving,
@@ -264,8 +267,8 @@ function render(state: State) {
   updateThemeToggle(app, state.ui.theme);
   const qrSlot = app.querySelector<HTMLElement>("#qr-slot");
   if (qrSlot) {
-    qrSlot.innerHTML = renderQRSheet(state.qr);
-    bindQRSheet(qrSlot, closeQRSheet);
+    qrSlot.innerHTML = renderQRSheet(state);
+    bindQRSheet(qrSlot, closeQRSheet, () => void startQRLogin());
   }
   const recoverySlot = app.querySelector<HTMLElement>("#recovery-slot");
   if (recoverySlot) {
@@ -295,26 +298,80 @@ document.addEventListener("micast:render-playback", updatePlaybackBar);
 // The playback-bar volume slider also edits per-speaker volumes; refresh the
 // speakers page when it's the one on screen.
 document.addEventListener("micast:render-devices", () => {
-  if (store.get().ui.activeSection === "devices") render(store.get());
+  // Through requestRender, not straight to render: the same "a rebuild must not
+  // land inside a click" rule applies to the handlers that ask for a repaint.
+  if (store.get().ui.activeSection === "devices") requestRender();
 });
 
-// True while the user is interacting with ANY form control in the main
-// content — a re-render mid-interaction would destroy the element, wipe
-// half-typed values, and drop focus. Covers range sliders, number inputs,
-// text fields, and selects alike.
+// True while a re-render would destroy something the user has not committed
+// yet: half-typed text, a partly chosen select. A focused range slider is NOT
+// one of those — its value is committed on release, and counting it as
+// "interacting" froze every live update for as long as it kept focus, which is
+// exactly what the field reported: "听感上已经变化了" while the page still
+// showed the pre-drag numbers, until the user clicked somewhere else.
+// A drag in progress is covered by the pointer guard below, not by focus.
 function isInteracting(): boolean {
   const el = document.activeElement;
   if (!(el instanceof HTMLElement)) return false;
   const main = document.querySelector(".main-content");
   if (!main || !main.contains(el)) return false;
-  return el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement;
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return true;
+  if (!(el instanceof HTMLInputElement)) return false;
+  return !["range", "checkbox", "radio", "button", "submit", "file", "color"].includes(el.type);
 }
 
 // A poll/push that arrived during an interaction is stored but not rendered;
 // when the interaction ends (focus leaves the form control), flush it once.
 let renderPending = false;
+
+// Rendering while the pointer is down is what eats clicks: the button under the
+// pointer is replaced between mousedown and mouseup, and the browser then
+// dispatches no click at all. Field report (0.5.6): "创建组合 点第一下没反应，
+// 点第二下才有反应" — the first click flushed the render that had been deferred
+// while the name field was focused (focusout → rAF), and went missing; the
+// second landed on fresh markup with nothing pending.
+let pointerDown = false;
+// Never let a missed pointerup freeze the page: live updates matter more than a
+// perfectly ordered render.
+const POINTER_FLAG_FALLBACK_MS = 5000;
+let pointerFlagTimer: number | null = null;
+
+function flushPendingRender() {
+  if (!renderPending) return;
+  if (pointerDown || isInteracting()) return;
+  renderPending = false;
+  render(store.get());
+}
+
+function setPointerDown(down: boolean) {
+  pointerDown = down;
+  if (pointerFlagTimer !== null) {
+    window.clearTimeout(pointerFlagTimer);
+    pointerFlagTimer = null;
+  }
+  if (!down) return;
+  pointerFlagTimer = window.setTimeout(() => {
+    pointerFlagTimer = null;
+    pointerDown = false;
+    flushPendingRender();
+  }, POINTER_FLAG_FALLBACK_MS);
+}
+
+for (const event of ["pointerdown", "mousedown"] as const) {
+  document.addEventListener(event, () => setPointerDown(true), true);
+}
+for (const event of ["pointerup", "pointercancel", "mouseup", "dragend"] as const) {
+  document.addEventListener(event, () => {
+    setPointerDown(false);
+    // The click (and the submit it triggers) is dispatched in the same task as
+    // pointerup, so a timeout is the first moment it is safe to rebuild.
+    if (renderPending) window.setTimeout(flushPendingRender, 0);
+  }, true);
+}
+window.addEventListener("blur", () => setPointerDown(false));
+
 function requestRender() {
-  if (isInteracting()) {
+  if (pointerDown || isInteracting()) {
     renderPending = true;
     return;
   }
@@ -326,13 +383,9 @@ function requestRender() {
 document.addEventListener("focusout", () => {
   if (!renderPending) return;
   // Wait for the browser to settle the new activeElement (may be another
-  // control in the same form — still interacting).
-  requestAnimationFrame(() => {
-    if (renderPending && !isInteracting()) {
-      renderPending = false;
-      render(store.get());
-    }
-  });
+  // control in the same form — still interacting), and for a click in progress
+  // to finish delivering.
+  requestAnimationFrame(flushPendingRender);
 });
 
 // Views that mutate state as a direct consequence of a finished user action
@@ -417,6 +470,14 @@ function bindSectionUI(container: HTMLElement) {
         render(store.get());
       }
     );
+    // The speaker page is where an unusable account is felt first, so it must
+    // offer the way back: retry the cloud, or start a fresh QR login.
+    container.querySelector("[data-retry-devices]")?.addEventListener("click", () => {
+      void loadDevices(true);
+    });
+    container.querySelector("[data-relogin]")?.addEventListener("click", () => {
+      void startQRLogin();
+    });
   } else if (activeSection === "account") {
     bindAccountView(container, {
       onBack: () => {
@@ -609,22 +670,57 @@ function maybeAutoRecovery(xiaomi: { status?: string }) {
 
 async function startQRLogin() {
   store.set({
-    qr: { open: true, qrUrl: null, scanToken: null, state: "idle" },
+    qr: { open: true, qrUrl: null, scanToken: null, state: "idle", error: null },
   });
   render(store.get());
 
   try {
-    const { qr_url, scan_token } = await api.startQRLogin();
+    // A QR request reaches Xiaomi's account servers, which can be slow or out
+    // of reach: without a bound here the sheet sat on "正在连接…" for as long as
+    // the browser kept the request open, and the user had no way to tell that
+    // nothing was coming.
+    const { qr_url, scan_token } = await withTimeout(api.startQRLogin(), QR_START_TIMEOUT_MS);
     store.set({
-      qr: { open: true, qrUrl: qr_url, scanToken: scan_token, state: "waiting" },
+      qr: { open: true, qrUrl: qr_url, scanToken: scan_token, state: "waiting", error: null },
     });
     render(store.get());
     pollQR(scan_token);
   } catch (e) {
-    store.showToast(`QR 登录失败: ${e instanceof Error ? e.message : "未知错误"}`);
-    store.set({ qr: { open: false, qrUrl: null, scanToken: null, state: "idle" } });
+    // Keep the sheet open with the reason and a retry: closing it left the user
+    // with a toast they could miss and no way back in.
+    store.set({
+      qr: {
+        open: true,
+        qrUrl: null,
+        scanToken: null,
+        state: "error",
+        error: e instanceof Error ? e.message : "未知错误",
+      },
+    });
     render(store.get());
   }
+}
+
+/** Slightly longer than the backend's own bound, so its message wins. */
+const QR_START_TIMEOUT_MS = 20_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error("等待小米账号服务器响应超时，请检查这台设备的外网连接后重试")),
+      ms
+    );
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 async function pollQR(scanToken: string) {
@@ -964,16 +1060,20 @@ async function init() {
     if (store.get().ui.activeSection !== "debug") return;
     if (debugRefreshInFlight) return;
     const log = document.querySelector<HTMLElement>("[data-runtime-log]");
-    if (!log || log.dataset.paused === "true") return;
+    if (!log) return;
     debugRefreshInFlight = true;
     try {
-      const debug = await api.getDebugState();
+      // The panel's own scope (filters plus a frozen window) travels with every
+      // poll: freezing locks the interval shown, it does not stop the page —
+      // the frozen bar still needs its new-record count.
+      const debug = await api.getDebugState(currentLogQuery());
       const needsInitialRender = store.get().debug === null;
       store.set({ debug });
       if (needsInitialRender) {
         render(store.get());
       } else {
-        updateRuntimeLog(log, debug, log.dataset.filter || "micast");
+        updateRuntimeLog(log, debug);
+        updateLogChrome(debug);
         const checks = document.querySelector<HTMLElement>("[data-connection-checks]");
         if (checks) checks.innerHTML = renderStatusOverview(debug, store.get());
         const streamList = document.querySelector<HTMLElement>("[data-stream-list]");
@@ -981,6 +1081,15 @@ async function init() {
           streamList.innerHTML = renderStreamRows(debug, store.get());
           bindStreamKicks(streamList, (msg) => store.showToast(msg));
         }
+        // The collapsed 连接明细 sections were only rebuilt by a full page
+        // render, so their counters and rows froze until the user switched away
+        // and back. Refresh them with the same cadence as the rings.
+        const streamSummary = document.querySelector<HTMLElement>("[data-stream-summary]");
+        if (streamSummary) streamSummary.textContent = renderStreamSummary(debug);
+        const audioPath = document.querySelector<HTMLElement>("[data-audio-path]");
+        if (audioPath) audioPath.innerHTML = renderAudioPath(debug);
+        const technical = document.querySelector<HTMLElement>("[data-technical-metrics]");
+        if (technical) technical.innerHTML = renderTechnicalMetrics(debug);
       }
     } catch {
       // Keep the latest diagnostics visible during a temporary API failure.

@@ -5,23 +5,33 @@
 import { appUrl } from "./paths";
 import { safeUserMessage } from "./errors";
 
+/** The failure path shared by every request, JSON or not: the log endpoints
+ *  answer with a file body, so they cannot go through apiFetch's `res.json()`. */
+async function apiError(res: Response): Promise<Error> {
+  const text = await res.text().catch(() => "");
+  if (res.status === 401 && text.includes("需要登录 MiCast")) {
+    window.dispatchEvent(new Event("micast:access-required"));
+  }
+  let detail = "";
+  try {
+    const payload = JSON.parse(text) as { detail?: unknown };
+    if (typeof payload.detail === "string") detail = payload.detail;
+  } catch {
+    detail = text;
+  }
+  return new Error(safeUserMessage(detail));
+}
+
 async function apiFetch(path: string, init?: RequestInit) {
   const res = await fetch(appUrl(path), init);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 401 && text.includes("需要登录 MiCast")) {
-      window.dispatchEvent(new Event("micast:access-required"));
-    }
-    let detail = "";
-    try {
-      const payload = JSON.parse(text) as { detail?: unknown };
-      if (typeof payload.detail === "string") detail = payload.detail;
-    } catch {
-      detail = text;
-    }
-    throw new Error(safeUserMessage(detail));
-  }
+  if (!res.ok) throw await apiError(res);
   return res.json();
+}
+
+/** Count of records the server put in the body, for a toast that does not have
+ *  to parse the file back out of the blob. */
+function logCountHeader(res: Response): number {
+  return Number(res.headers.get("X-MiCast-Log-Count")) || 0;
 }
 
 export interface AccessStatus {
@@ -171,11 +181,15 @@ export interface SpeakerGroup {
 
 export interface CodecCompatibility {
   members: Record<string, Record<string, boolean>>;
+  labels?: Record<string, string>;
+  formats?: string[];
   possible_common_formats: string[];
   confirmed_common_formats: string[];
   recommended_format: string | null;
   status: "confirmed" | "needs_check" | "incompatible";
   unknown_members: string[];
+  /** Formats whose only verdict is older than the trust window. */
+  stale_formats?: Record<string, string[]>;
 }
 
 export type NetworkDeviceKind = "speaker" | "tv" | "projector";
@@ -221,7 +235,11 @@ export interface Status {
 export interface XiaomiStatus {
   logged_in: boolean;
   user_id: string | null;
-  status?: "connected" | "expired" | "disconnected" | "never_connected";
+  /** "unstable": tokens are stored but the cloud is not answering (see
+   * XiaomiAuth.cloud_degraded) — the account may be fine, so offer a re-login
+   * instead of silently showing an empty speaker list. */
+  status?: "connected" | "unstable" | "expired" | "disconnected" | "never_connected";
+  cloud?: { failures: number; last_ok_at: number; last_failure_at: number };
   ever_logged_in?: boolean;
 }
 
@@ -257,7 +275,21 @@ export interface Device {
   presence?: string;
   play_error?: string | null;
   codec_capabilities?: Record<string, boolean>;
-  codec_capability_details?: Record<string, { status: "supported" | "unsupported"; verified_at: number }>;
+  /** Verdict per format, keyed by the app's own names (mp3/flac/wav/pcm).
+   * "unverified": the speaker pulled the stream but raw passthrough cannot be
+   * proven from the server side, so no verdict is claimed. */
+  codec_capability_details?: Record<
+    string,
+    {
+      status: "supported" | "unsupported" | "unverified";
+      verified_at: number;
+      reason?: string;
+      label?: string;
+    }
+  >;
+  /** The formats the app can serve, in canonical order, with display labels. */
+  codec_formats?: string[];
+  codec_labels?: Record<string, string>;
   playing?: boolean;
   muted?: boolean;
   enabled: boolean;
@@ -322,6 +354,13 @@ export interface AudioPathMetrics {
     encoder_out: number;
   };
   pace?: { sleeps: number; total_ms: number; max_ms: number };
+  /** Process CPU and event-loop lag: whether OUR side is the bottleneck. */
+  runtime?: {
+    cpu_percent: number;
+    cores: number;
+    loop_lag_ms: number;
+    loop_lag_max_ms: number;
+  };
   events: Array<{
     at: number;
     kind: string;
@@ -335,7 +374,7 @@ export interface AudioPathMetrics {
 
 /** One entry's health as the audio supervisor sees it. */
 export interface EntryHealthSnapshot {
-  state: "idle" | "starting" | "healthy" | "degraded_our_side" | "degraded_speaker" | "bursty" | "unhealthy";
+  state: "idle" | "starting" | "healthy" | "quiet" | "paused" | "degraded_our_side" | "degraded_speaker" | "bursty" | "unhealthy";
   for_s: number;
   reason: string;
   escalations: number;
@@ -348,6 +387,11 @@ export interface DebugState {
   logged_in: boolean;
   selected_device_id: string | null;
   devices: Array<{ did: string; name: string; hardware: string; presence: string; miotDID: string }>;
+  /** Devices come from the last successful cloud list, not a fresh fetch: the
+   * diagnostics page and the report must work while the cloud is unreachable. */
+  devices_cached?: boolean;
+  /** Consecutive failed cloud calls and when the last one worked. */
+  cloud?: { failures: number; last_ok_at: number; last_failure_at: number };
   pcm_source: string;
   stream_url: string;
   audio_config: AudioConfig;
@@ -380,8 +424,66 @@ export interface DebugState {
     audio?: AudioPathMetrics;
     /** Per-entry health from the audio supervisor; absent on older backends. */
     entries?: Record<string, EntryHealthSnapshot>;
+    /** Per-speaker delay-line state; absent on older backends. */
+    sinks?: Record<string, Record<string, SinkLatencyMetrics>>;
   };
-  logs: Array<{ time: string; level: string; logger: string; message: string }>;
+  logs: LogSlice;
+}
+
+export interface LogRecord {
+  at: number;
+  time: string;
+  level: string;
+  logger: string;
+  message: string;
+}
+
+/** One server-side selection of the log buffer, plus what it left out. */
+export interface LogSlice {
+  /** Oldest first. */
+  items: LogRecord[];
+  total: number;
+  shown: number;
+  truncated: boolean;
+  /** First/last matching record; null when nothing matched. */
+  covered: { from: number | null; to: number | null };
+  buffer_total: number;
+  buffer_capacity: number;
+  /** The server's clock: the only one a relative window may be resolved on. */
+  server_time: number;
+  /** Matching records newer than `until`; always 0 outside a frozen window. */
+  new_count: number;
+  buckets: Record<string, number>;
+}
+
+/**
+ * Which slice of the log buffer the diagnostics page is asking for. Two
+ * orthogonal axes on purpose: one dropdown mixing "whose records" with "which
+ * severities" made the options overlap and the labels lie. Mirrors
+ * micast/runtime_log.py:in_scope — the report and the clipboard are filtered
+ * server-side with the same predicate, so they carry the lines the user read.
+ */
+export interface LogQuery {
+  /** "app" = MiCast/AirPlay's own logger tree, "all" = every library. */
+  source: "app" | "all";
+  /** "all" levels, or "warn" for WARNING/ERROR/CRITICAL only. */
+  level: "all" | "warn";
+  /** Duration preset the server resolves at request time; wins over nothing,
+   *  loses to an absolute pair. */
+  window?: "5m" | "15m" | "30m" | "1h" | "session";
+  /** Absolute epoch seconds for a frozen window. */
+  since?: number;
+  until?: number;
+}
+
+export function logQueryString(query: LogQuery): string {
+  const params = new URLSearchParams();
+  params.set("log_source", query.source);
+  params.set("log_level", query.level);
+  if (query.window !== undefined) params.set("log_window", query.window);
+  if (query.since !== undefined) params.set("log_since", String(query.since));
+  if (query.until !== undefined) params.set("log_until", String(query.until));
+  return params.toString();
 }
 
 export interface TestMedia {
@@ -398,6 +500,9 @@ export interface LatencyMetrics {
   encoding_ms: number;
   stream_buffer_ms: number;
   send_queue_ms: number;
+  /** Per-client delay-line figures; absent on older backends. */
+  target_delay_ms?: number;
+  retained_buffer_ms?: number;
   estimated_ms: number;
 }
 
@@ -406,6 +511,8 @@ export interface SinkLatencyMetrics {
   startup_ms: number;
   effective_ms: number;
   buffer_ms: number;
+  /** Times the speaker was served from the delay line during a source gap. */
+  bridges?: number;
 }
 
 export interface TopologyNode {
@@ -985,16 +1092,18 @@ export const api = {
     return item.volume;
   },
 
-  getDebugState(): Promise<DebugState> {
-    return apiFetch("/api/debug/state");
+  getDebugState(query?: LogQuery): Promise<DebugState> {
+    const params = query ? logQueryString(query) : "";
+    return apiFetch(`/api/debug/state${params ? `?${params}` : ""}`);
   },
 
-  async downloadDebugReport(): Promise<void> {
-    const res = await fetch(appUrl("/api/debug/report"));
+  async downloadDebugReport(query: LogQuery): Promise<{ filename: string; size: number; count: number }> {
+    const res = await fetch(appUrl(`/api/debug/report?${logQueryString(query)}`));
     if (!res.ok) {
       const text = await res.text().catch(() => "Unknown error");
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
+    const count = logCountHeader(res);
     const blob = await res.blob();
     const disposition = res.headers.get("Content-Disposition") || "";
     const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] || "micast-diagnostic.json";
@@ -1003,6 +1112,18 @@ export const api = {
     link.download = filename;
     link.click();
     URL.revokeObjectURL(link.href);
+    return { filename, size: blob.size, count };
+  },
+
+  /** The same selection as the report, as text for the clipboard. */
+  async copyRuntimeLog(query: LogQuery): Promise<{ text: string; count: number }> {
+    const res = await fetch(appUrl(`/api/debug/logs.txt?${logQueryString(query)}`));
+    if (!res.ok) throw await apiError(res);
+    return { text: await res.text(), count: logCountHeader(res) };
+  },
+
+  clearRuntimeLog(): Promise<{ cleared: number }> {
+    return apiFetch("/api/debug/logs/clear", { method: "POST" });
   },
 
   getTopology(): Promise<Topology> {
@@ -1047,7 +1168,7 @@ export const api = {
     });
   },
 
-  runCodecTest(deviceIds: string[]): Promise<{ ok: boolean; results: Record<string, Record<string, boolean>>; common_formats: string[]; restore_failed: string[] }> {
+  runCodecTest(deviceIds: string[]): Promise<{ ok: boolean; results: Record<string, Record<string, boolean | null>>; common_formats: string[]; restore_failed: string[] }> {
     return apiFetch("/api/debug/codec-test", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_ids: deviceIds }),
     });

@@ -40,7 +40,7 @@
   --surface-solid: rgb(255, 255, 255);
   --surface-hover: rgba(120, 120, 128, 0.08);
   --surface-active: rgba(120, 120, 128, 0.16);
-  --player-surface: rgba(255, 255, 255, 0.3);
+  --player-surface: rgba(255, 255, 255, 0.72);
   --overlay: rgba(0, 0, 0, 0.4);
 
   --text: rgb(0, 0, 0);
@@ -48,6 +48,10 @@
   --text-tertiary: rgba(60, 60, 67, 0.32);
   --separator: rgba(60, 60, 67, 0.1);
   --separator-strong: rgba(60, 60, 67, 0.22);
+  /* Filled but borderless surfaces (segmented tracks, chips, quiet buttons). */
+  --fill-secondary: rgba(120, 120, 128, 0.12);
+  --fill-tertiary: rgba(120, 120, 128, 0.08);
+  --secondary-label: rgba(60, 60, 67, 0.6);
 
   --accent: rgb(0, 122, 255);
   --accent-hover: rgb(0, 105, 220);
@@ -67,6 +71,19 @@
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
   --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.1);
 
+  /* One card recipe for every grouped surface (settings groups, device cards,
+     receiver cards, diagnostics). They used to disagree on radius and shadow,
+     which read as three different products on one screen. */
+  --card-radius: 1rem;
+  --card-border: 0.5px solid color-mix(in srgb, var(--text) 12%, transparent);
+  --card-shadow: var(--shadow-sm);
+  --card-shadow-raised: var(--shadow-md);
+
+  /* Row rhythm: one dense step for desktop, one finger-sized step for touch. */
+  --row-padding-block: 0.6875rem;
+  --row-padding-inline: 1rem;
+  --control-height: 2.25rem;
+
   /* Liquid-glass material shared by the floating player surfaces — the expanded
      panel and the collapsed pill are the same surface at two sizes, so both use
      one background/blur/border/shadow recipe instead of two ad-hoc ones. */
@@ -80,11 +97,14 @@
   --sidebar-width: 13.5rem;
 }
 
-/* Manual dark theme wins over system */
-[data-theme="light"] {
+/* Manual theme wins over system. Scoped to :root on purpose: an unscoped
+   [data-theme="dark"] also matched the 外观 segmented buttons, which carry
+   data-theme themselves — the unselected 深色 button inherited the dark
+   palette's white text while sitting on a light track, and vanished. */
+:root[data-theme="light"] {
   color-scheme: light;
 }
-[data-theme="dark"] {
+:root[data-theme="dark"] {
   color-scheme: dark;
   --bg: rgb(14, 14, 16);
   --bg-secondary: rgb(48, 48, 52);
@@ -94,7 +114,7 @@
   --surface-solid: rgb(31, 31, 34);
   --surface-hover: rgba(255, 255, 255, 0.1);
   --surface-active: rgba(255, 255, 255, 0.16);
-  --player-surface: rgba(38, 38, 44, 0.38);
+  --player-surface: rgba(38, 38, 44, 0.72);
   --overlay: rgba(0, 0, 0, 0.6);
 
   --text: rgb(255, 255, 255);
@@ -102,6 +122,9 @@
   --text-tertiary: rgba(245, 245, 247, 0.58);
   --separator: rgba(255, 255, 255, 0.12);
   --separator-strong: rgba(255, 255, 255, 0.28);
+  --fill-secondary: rgba(120, 120, 128, 0.32);
+  --fill-tertiary: rgba(120, 120, 128, 0.2);
+  --secondary-label: rgba(245, 245, 247, 0.6);
 
   --accent: rgb(10, 132, 255);
   --accent-hover: rgb(25, 145, 255);
@@ -130,7 +153,7 @@
     --surface-solid: rgb(31, 31, 34);
     --surface-hover: rgba(255, 255, 255, 0.1);
     --surface-active: rgba(255, 255, 255, 0.16);
-    --player-surface: rgba(38, 38, 44, 0.38);
+    --player-surface: rgba(38, 38, 44, 0.72);
     --overlay: rgba(0, 0, 0, 0.6);
 
     --text: rgb(255, 255, 255);
@@ -138,6 +161,9 @@
     --text-tertiary: rgba(245, 245, 247, 0.58);
     --separator: rgba(255, 255, 255, 0.12);
     --separator-strong: rgba(255, 255, 255, 0.28);
+    --fill-secondary: rgba(120, 120, 128, 0.32);
+    --fill-tertiary: rgba(120, 120, 128, 0.2);
+    --secondary-label: rgba(245, 245, 247, 0.6);
 
     --accent: rgb(10, 132, 255);
     --accent-hover: rgb(25, 145, 255);
@@ -187,8 +213,20 @@ body {
   background-attachment: fixed;
 }
 
-button {
+/* Form controls do not inherit type from their context by default — the UA
+   gives them its own small control font. Only font-family was reset, so any
+   control without an explicit size silently fell back to it: on iOS that made
+   the 单项检查 title (inherited by <strong>) render ~28% smaller than the
+   description beside it. */
+button,
+input,
+select,
+textarea {
   font-family: inherit;
+  font-size: inherit;
+}
+
+button {
   touch-action: manipulation;
 }
 
@@ -228,6 +266,64 @@ button {
   gap: var(--space-sm);
   margin-top: var(--space-xl);
 }
+
+/* Log scope picker: one row per window, the count on the right. Rows are radio
+   labels rather than a list box so the selected window and its size read as one
+   line, and a 375px dialog can wrap the count instead of clipping a select. */
+.log-scope-options {
+  display: grid;
+  gap: 0.5px;
+  margin-top: var(--space-lg);
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--separator);
+}
+.log-scope-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--control-height);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--elevated);
+  cursor: pointer;
+}
+.log-scope-option:hover { background: var(--surface-hover); }
+.log-scope-option input { flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
+.log-scope-option span { flex: 1 1 auto; min-width: 0; }
+.log-scope-option em {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+.log-scope-custom {
+  display: grid;
+  gap: var(--space-xs);
+  margin-top: var(--space-md);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+.log-scope-custom label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.log-scope-custom label span { flex: 0 0 2.5rem; color: var(--text-secondary); font-size: 0.8125rem; }
+.log-scope-custom input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 2rem;
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-xs);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+.log-scope-hint { margin: 0; color: var(--text-secondary); font-size: 0.75rem; }
 
 .symbol,
 .brand-symbol {
@@ -426,9 +522,16 @@ html.is-embedded {
   padding-top: var(--header-height);
   /* The page content owns the mobile navigation clearance. Keeping a second
      reserve here created an extra tab-bar-sized blank strip on every page. */
-  padding-bottom: 0;
-}
+  padding-bottom: 0;}
 .app-body::-webkit-scrollbar { display: none; }
+
+/* The player is chrome, not a viewport: it only scrolls when its drawer is
+   open in a short window, and a scrollbar drifting through a 13.5rem card is
+   noise. Hidden like the page scroller, on the same reasoning. */
+.is-embedded .now-playing {
+  scrollbar-width: none;
+}
+.is-embedded .now-playing::-webkit-scrollbar { display: none; }
 
 @media (min-width: 1024px) {
   .app-body {
@@ -573,6 +676,46 @@ html.is-embedded {
   }
 }
 
+/* One scrollbar recipe for the app's viewports — surfaces you scroll a lot and
+   where the position indicator earns its keep. The platform default ships
+   stepper arrows and a ~15px track, which looks alien next to the rounded
+   surfaces. Chrome surfaces keep no scrollbar at all (see .app-body and the
+   sidebar player). */
+.runtime-log {
+  --scrollbar-thumb: var(--separator-strong);
+}
+/* The link map is theme-independent dark, so it needs a fixed light thumb
+   rather than the light theme's near-invisible dark one. */
+.topology-detail {
+  --scrollbar-thumb: rgba(148, 163, 184, 0.45);
+}
+
+.runtime-log,
+.topology-detail {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.runtime-log::-webkit-scrollbar,
+.topology-detail::-webkit-scrollbar {
+  width: 0.375rem;
+  height: 0.375rem;
+}
+.runtime-log::-webkit-scrollbar-track,
+.topology-detail::-webkit-scrollbar-track {
+  background: transparent;
+}
+.runtime-log::-webkit-scrollbar-thumb,
+.topology-detail::-webkit-scrollbar-thumb {
+  border: 0.125rem solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+.runtime-log::-webkit-scrollbar-thumb:hover,
+.topology-detail::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-tertiary);
+}
+
 /* Main content */
 .main-content {
   flex: 1;
@@ -627,14 +770,15 @@ html.is-embedded {
 /* Grouped settings surfaces */
 .group {
   background: var(--elevated);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 0 0 0.5px var(--separator), var(--shadow-sm);
+  border-radius: var(--card-radius);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
   overflow: hidden;
   margin-bottom: var(--space-lg);
 }
 
 .group-header {
-  padding: var(--space-md) var(--space-sm) var(--space-xs);
+  padding: var(--space-md) var(--space-sm) var(--space-2xs);
   font-size: 0.8125rem;
   font-weight: 600;
   letter-spacing: 0;
@@ -642,7 +786,7 @@ html.is-embedded {
 }
 
 .group-header + .group {
-  margin-top: var(--space-xs);
+  margin-top: 0;
 }
 
 .cell {
@@ -650,8 +794,8 @@ html.is-embedded {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-md);
-  padding: var(--space-md) var(--space-lg);
-  min-height: 3.25rem;
+  padding: var(--row-padding-block) var(--row-padding-inline);
+  min-height: 3rem;
   border-bottom: 0.5px solid var(--separator);
   transition: background 160ms var(--ease-out);
 }
@@ -840,17 +984,24 @@ html.is-embedded {
   align-items: center;
   justify-content: center;
   gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
+  padding: 0 var(--space-md);
   border-radius: var(--radius-md);
   font-family: inherit;
-  font-size: 1rem;
+  font-size: 0.9375rem;
   font-weight: 600;
   border: none;
   cursor: pointer;
   white-space: nowrap;
   transition: transform 100ms var(--ease-out), background 160ms var(--ease-out), opacity 160ms var(--ease-out);
   user-select: none;
-  min-height: 2.75rem;
+  min-height: var(--control-height);
+}
+
+/* Pointer-coarse (phones, tablets, trackpads on touch screens) gets the full
+   44px target; a mouse does not need one and the extra 8px per row added up
+   across a settings page. */
+@media (pointer: coarse) {
+  :root { --control-height: 2.75rem; }
 }
 
 .button:active {
@@ -889,7 +1040,49 @@ html.is-embedded {
 .button.plain {
   background: transparent;
   color: var(--accent);
-  padding: var(--space-sm) var(--space-md);
+  padding: 0 var(--space-sm);
+}
+
+/* Paired −/+ steppers (relative volume). One track and two hit targets, so the
+   control reads as a single instrument instead of two loose buttons. */
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.125rem;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--fill-secondary);
+}
+
+.stepper button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 2.5rem;
+  min-height: 1.75rem;
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: background 140ms var(--ease-out), transform 100ms var(--ease-out), opacity 140ms var(--ease-out);
+}
+
+.stepper button:hover:not(:disabled) { background: var(--surface-hover); }
+.stepper button:active:not(:disabled) { transform: scale(0.94); }
+.stepper button:disabled { opacity: 0.45; cursor: not-allowed; }
+.stepper .stepper-divider {
+  width: 0.5px;
+  height: 1rem;
+  background: var(--separator-strong);
+}
+
+@media (pointer: coarse) {
+  .stepper button { min-height: 2.25rem; min-width: 2.75rem; }
 }
 
 .danger-text { color: var(--danger) !important; }
@@ -1001,10 +1194,17 @@ html.is-embedded {
   font-weight: 600;
 }
 .plain-state.success { color: var(--success); }
+.plain-state.warn { color: var(--warning); }
 .plain-state.error { color: var(--danger); }
 
-/* Diagnostics distill: one conclusion, four rings, and the supervisor's own
-   words only when something is actually wrong. */
+/* Diagnostics distill: one conclusion, the four stages of the signal path, and
+   the supervisor's own words only when something is actually wrong. The card
+   insets its own content — without this the headline dot, the event line and
+   the chain all sat flush against the border. */
+.diagnostic-overview {
+  padding: var(--space-md) var(--row-padding-inline) var(--space-xs);
+}
+
 .diagnostic-headline {
   display: flex;
   flex-direction: column;
@@ -1012,8 +1212,12 @@ html.is-embedded {
   padding-bottom: var(--space-sm);
 }
 .diagnostic-headline strong {
-  font-size: 1.0625rem;
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 1.25rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 .diagnostic-headline span {
@@ -1023,65 +1227,162 @@ html.is-embedded {
 .diagnostic-headline.is-warn strong { color: var(--warning); }
 .diagnostic-headline.is-bad strong { color: var(--danger); }
 
-.diagnostic-chain {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-  padding-top: var(--space-sm);
-  border-top: 0.5px solid var(--separator);
-}
-.chain-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  font-size: 0.875rem;
-}
-.chain-dot {
+.headline-state {
+  width: 0.625rem;
+  height: 0.625rem;
   flex: 0 0 auto;
-  width: 0.5rem;
-  height: 0.5rem;
   border-radius: 50%;
   background: var(--text-tertiary);
 }
-.chain-dot.success { background: var(--success); }
-.chain-dot.warn { background: var(--warning); }
-.chain-dot.error { background: var(--danger); }
-.chain-label {
-  flex: 0 0 2.75rem;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
+.headline-state[data-state="ok"] {
+  background: var(--success);
 }
-.chain-value {
-  flex: 1 1 auto;
+.headline-state[data-state="warn"] { background: var(--warning); }
+.headline-state[data-state="bad"] {
+  background: var(--danger);
+  box-shadow: 0 0 0 0.25rem color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+/* The signal path: four stages joined by connectors that carry the upstream
+   stage's colour, so a degradation is visible as the line changes colour —
+   not as a word the reader has to decode. */
+.signal-chain {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding-top: var(--space-md);
+  border-top: 0.5px solid var(--separator);
+}
+
+.signal-node {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2xs);
+  min-width: 0;
+  padding: 0 var(--space-2xs);
+  text-align: center;
+  --node-color: var(--separator-strong);
+}
+.signal-node[data-state="ok"] { --node-color: var(--success); }
+.signal-node[data-state="warn"] { --node-color: var(--warning); }
+.signal-node[data-state="bad"] { --node-color: var(--danger); }
+
+/* Connector between two adjacent icon centres. */
+.signal-node:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  left: calc(50% + 1.25rem);
+  right: calc(-50% + 1.25rem);
+  height: 0.125rem;
+  border-radius: var(--radius-full);
+  background: linear-gradient(90deg, var(--node-color), var(--separator-strong));
+}
+
+/* While audio flows, the connector pulses in the stage's own colour. */
+.signal-chain[data-flow="on"] .signal-node:not(:last-child)::after {
+  background: linear-gradient(
+    90deg,
+    var(--node-color) 0%,
+    color-mix(in srgb, var(--node-color) 20%, transparent) 50%,
+    var(--node-color) 100%
+  );
+  background-size: 220% 100%;
+  animation: signal-flow 2.6s linear infinite;
+}
+
+@keyframes signal-flow {
+  from { background-position: 130% 0; }
+  to { background-position: -30% 0; }
+}
+
+.signal-node-icon {
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--fill-secondary);
+  color: var(--text-secondary);
+  transition: background 200ms var(--ease-out), color 200ms var(--ease-out);
+}
+.signal-node-icon svg { width: 1rem; height: 1rem; }
+.signal-node[data-state="ok"] .signal-node-icon {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+}
+.signal-node[data-state="warn"] .signal-node-icon {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+.signal-node[data-state="bad"] .signal-node-icon {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+  box-shadow: 0 0 0 0.25rem color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.signal-node-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.0625rem;
+  min-width: 0;
+  min-height: 2.5rem;
+  text-align: center;
+}
+.signal-node-label {
+  color: var(--text-tertiary);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.signal-node-value {
   color: var(--text);
+  font-size: 0.9375rem;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.signal-node-note {
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signal-chain[data-flow="on"] .signal-node:not(:last-child)::after {
+    animation: none;
+  }
 }
 
 .diagnostic-alert {
   margin-top: var(--space-sm);
   padding: 0.5rem 0.75rem;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   background: var(--warning-soft);
   color: var(--text-secondary);
   font-size: 0.8125rem;
 }
 .diagnostic-alert.is-bad { background: var(--danger-soft); }
 
+/* A wrapped line of timestamped events reads in a quarter of the height of one
+   event per row. */
 .diagnostic-events {
   display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
+  flex-wrap: wrap;
+  gap: var(--space-2xs) var(--space-md);
   margin-top: var(--space-sm);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
+.diagnostic-events > span { white-space: nowrap; }
 
 .diagnostic-details {
   margin: 0 0 var(--space-md);
-  border-radius: var(--radius-sm);
+  border-radius: var(--card-radius);
   background: var(--elevated);
-  box-shadow: 0 0 0 0.5px var(--separator);
+  border: var(--card-border);
   color: var(--text-secondary);
   font-size: 0.8125rem;
   overflow: hidden;
@@ -1119,9 +1420,194 @@ html.is-embedded {
 .technical-metrics {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-xs) var(--space-lg);
+  gap: var(--space-xs) var(--space-sm);
   padding: var(--space-md) var(--space-lg);
+  border-top: 0.5px solid var(--separator);
 }
+
+/* ---- 连接明细: one compact row per stream ----
+   The old rows were full-height settings cells with an icon tile; nine of them
+   filled the screen. A status dot plus two text lines carries the same facts in
+   roughly a third of the height, and live rows sort above idle variants. */
+.stream-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.stream-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--row-padding-inline);
+  border-bottom: 0.5px solid var(--separator);
+}
+.stream-row:last-child { border-bottom: none; }
+.stream-row[data-status="idle"] { opacity: 0.62; }
+
+.stream-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+.stream-row[data-status="playing"] .stream-dot {
+  background: var(--success);
+}
+.stream-row[data-status="waiting"] .stream-dot { background: var(--warning); }
+
+.stream-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.0625rem;
+  min-width: 0;
+}
+.stream-name {
+  font-size: 0.9375rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stream-meta {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stream-kick {
+  min-height: 1.75rem;
+  padding-inline: var(--space-sm);
+  font-size: 0.8125rem;
+}
+.stream-kick:disabled { color: var(--text-tertiary); }
+
+/* ---- 音频路径: stat tiles ----
+   Six metrics used to be six tall label/description/word rows. Each tile pairs
+   a headline figure with its qualifiers and carries severity in the accent bar.
+   Inset in a rounded sub-panel: flush to the card, the first tile's accent bar
+   was glued to the outer border and collided with its corner radius. */
+/* Two columns at the app's standard content width, one on a phone. Three
+   columns left the fourth tile orphaned alone on its own row, and the long
+   qualifier notes need the room. `min()` keeps the track from overflowing a
+   narrower container than the minimum. */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr));
+  gap: var(--space-sm);
+  padding: var(--space-md);
+}
+/* ---- 音频路径: a divided stat list ----
+   Six metrics are a readout, so they read like one: rows on the panel's own
+   surface, hairline-divided, severity carried by a dot beside the name. An
+   earlier pass gave every metric its own tinted panel and accent bar — six
+   frames, four of them green, chrome that says nothing.
+   Two metrics share a row once there is room for it: stacked full-width rows
+   on a phone (the qualifiers need the width), two columns on anything wider,
+   where a single column left the right half of every row empty. */
+.metric-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0 var(--row-padding-inline);
+}
+
+.metric-tile {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2xs) var(--space-sm);
+  padding: var(--space-sm) 0;
+  border-bottom: 0.5px solid var(--separator);
+  min-width: 0;
+}
+.metric-tile:last-child { border-bottom: 0; }
+
+.metric-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+/* Severity dot. Healthy is quiet on purpose — colouring the normal rows made
+   the abnormal one no easier to find. */
+.metric-tile .metric-label::before {
+  content: "";
+  width: 0.375rem;
+  height: 0.375rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--separator-strong);
+}
+.metric-tile[data-state="warn"] .metric-label::before { background: var(--warning); }
+.metric-tile[data-state="bad"] .metric-label::before { background: var(--danger); }
+
+.metric-headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2xs) var(--space-sm);
+  min-width: 0;
+}
+.metric-value {
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.metric-value small {
+  margin-left: 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.metric-flag {
+  padding: 0 0.375rem;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.metric-tile[data-state="warn"] .metric-flag {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+}
+/* Its own line, indented past the dot so it reads as the row's detail. */
+.metric-note {
+  flex: 1 1 100%;
+  padding-left: calc(0.375rem + var(--space-xs));
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 40rem) {
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* The gutter is the pair's inner padding, so the divider sits halfway. */
+  .metric-tile:nth-child(odd) {
+    padding-right: var(--space-lg);
+    border-right: 0.5px solid var(--separator);
+  }
+  .metric-tile:nth-child(even) { padding-left: var(--space-lg); }
+  .metric-tile:nth-last-child(-n + 2) { border-bottom: 0; }
+  .metric-events { border-top: 0.5px solid var(--separator); }
+}
+
+.metric-events {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-sm) var(--row-padding-inline);
+  border-top: 0.5px solid var(--separator);
+}
+.metric-events .diagnostic-events { margin-top: 0; }
 .diagnostic-test {
   display: flex;
   align-items: center;
@@ -1141,7 +1627,9 @@ html.is-embedded {
 .diagnostic-test:active { transform: scale(0.99); }
 .diagnostic-test strong {
   flex: 0 0 11rem;
-  color: var(--accent);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text);
 }
 .diagnostic-test span {
   flex: 1;
@@ -1163,9 +1651,20 @@ html.is-embedded {
   line-height: 1.45;
 }
 .group-header-hint + .group { margin-top: var(--space-xs); }
-.diagnostic-details .runtime-log-panel {
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+/* A details panel IS the card. Whatever sits inside it is a section, not
+   another card: the shared surface recipe gave these children the same border,
+   radius and shadow, so a second rounded card appeared a few pixels inside the
+   first one — a double frame that reads as a mistake rather than a hierarchy. */
+.diagnostic-details > .group,
+.diagnostic-details > .runtime-log-panel {
+  border: 0;
+  border-radius: 0;
   box-shadow: none;
+  background: transparent;
+  margin-bottom: 0;
+}
+.diagnostic-details > .group + .group {
+  border-top: 0.5px solid var(--separator);
 }
 .advanced-url-content {
   display: flex;
@@ -1197,7 +1696,9 @@ html.is-embedded {
   }
   .page-heading { margin-bottom: var(--space-lg); }
   .page-heading .page-title { font-size: 1.625rem; }
-  .group-header { margin-top: var(--space-lg); }
+  /* The header already carries its own top padding; the extra margin stacked a
+     second gap on every section heading below the first. */
+  .group-header { margin-top: 0; }
   .diagnostic-workbench > .debug-target-row {
     align-items: stretch;
     flex-direction: column;
@@ -1214,11 +1715,23 @@ html.is-embedded {
     padding: var(--space-md);
     gap: var(--space-md);
   }
-  .test-session-bar .button { min-width: 7.5rem; }
+  /* The primary action sits in a two-column row beside a two-line label, where
+     the default 15.9px label made it a 130px slab. It stays a full 44px target;
+     only the label steps down to the compact size. */
+  .test-session-bar .button {
+    min-width: 0;
+    padding-inline: var(--space-sm);
+    font-size: 0.875rem;
+  }
   .diagnostic-utilities { gap: 0; padding: 0 var(--space-md); }
+  /* Flat rows on a phone: identity and action share the first line so the row
+     reads as actionable, and the action wears a real button shape instead of
+     the same weight and colour as the copy. */
   .diagnostic-utilities .diagnostic-test {
     display: grid;
-    gap: var(--space-2xs);
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-2xs) var(--space-sm);
     min-height: 0;
     padding: var(--space-md) 0;
     border-radius: 0;
@@ -1232,8 +1745,29 @@ html.is-embedded {
   }
   .diagnostic-tools-label { padding-top: var(--space-md); }
   .diagnostic-utilities .diagnostic-test:last-child { border-bottom: 0; }
-  .diagnostic-utilities .diagnostic-test strong { flex-basis: auto; }
-  .diagnostic-utilities .diagnostic-test em { justify-self: start; margin-top: var(--space-xs); }
+  .diagnostic-utilities .diagnostic-test strong {
+    grid-column: 1;
+    grid-row: 1;
+    font-size: 1rem;
+  }
+  .diagnostic-utilities .diagnostic-test em {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    min-height: 2rem;
+    padding: 0 var(--space-md);
+    border-radius: var(--radius-full);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 0.875rem;
+  }
+  .diagnostic-utilities .diagnostic-test span {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    line-height: 1.45;
+  }
   .test-volume-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1283,15 +1817,19 @@ html.is-embedded {
   }
   .debug-warning strong { white-space: normal; }
 }
-.receiver-form,
-.group-form {
+.receiver-form {
   align-items: flex-end;
   flex-wrap: wrap;
 }
 .receiver-form > .input { width: auto; min-width: 10rem; flex: 1; }
+/* A column form must never wrap. It used to inherit `flex-wrap: wrap` from the
+   shared receiver-form rule, which made Chrome reserve a phantom extra line:
+   the speaker-checklist fieldset measured 120px for 51px of content, and the
+   form carried two unexplained blank bands. */
 .group-form {
   display: flex;
   flex-direction: column;
+  flex-wrap: nowrap;
   align-items: stretch;
   gap: var(--space-md);
   padding: var(--space-lg);
@@ -1357,7 +1895,20 @@ html.is-embedded {
 .sync-group > .cell { border-bottom: none; }
 .sync-group-header { flex-wrap: wrap; }
 .sync-group-header .cell-content { flex: 1 1 12rem; }
-.group-delete { margin-left: auto; white-space: nowrap; }
+/* Members summary and the codec chips share one wrap-friendly line. */
+.group-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs) var(--space-xs);
+}
+.group-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  flex: none;
+}
+.group-delete { white-space: nowrap; }
 .sync-delay-list { padding: 0 var(--space-lg) var(--space-md); }
 .sync-delay-row {
   display: flex;
@@ -1421,6 +1972,21 @@ html.is-embedded {
   padding-left: calc(1rem + var(--space-xs));
   color: var(--text-secondary);
   font-size: 0.8125rem;
+}
+/* Rows of one speaker's tuning: the control line, with the live delay state
+   chip trailing its own value (where the eye already is, and where it can be
+   read without stealing a whole line per speaker). */
+.stereo-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+.stereo-row .sync-control {
+  flex: 1 1 auto;
+}
+.stereo-row .meta-chip {
+  flex: none;
 }
 .time-reference {
   display: inline-flex;
@@ -1519,6 +2085,17 @@ html.is-embedded {
 @media (max-width: 640px) {
   .live-calibration-control { grid-template-columns: repeat(4, minmax(0, 1fr)) 4.5rem; }
 }
+/* Live "is this delay actually applied yet?" line under each member's slider. */
+.live-calibration-state {
+  display: block;
+  min-height: 1.25rem;
+  margin-top: var(--space-2xs);
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.live-calibration-state.ready { color: var(--success); }
+.live-calibration-state.pending { color: var(--warning); }
 @media (max-width: 520px) {
   .calibration-dialog form { padding: var(--space-lg); }
   .calibration-amount { grid-template-columns: 1fr minmax(5rem, 7rem) auto; }
@@ -1541,6 +2118,29 @@ html.is-embedded {
 .stereo-speaker.is-time-reference {
   background: color-mix(in srgb, var(--accent) 2.5%, transparent);
 }
+/* Mirror rows are one flex line, so the live delay chip would otherwise land
+   wherever the name and the value happen to end: the reference row (no delay
+   control at all) put it in a completely different place from the others. Both
+   it and the reference control get a fixed slot, so the chips line up down the
+   column — from 720px up, where there is room to spare. */
+.sync-state,
+.sync-anchor-slot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+@media (min-width: 720px) {
+  .sync-state {
+    width: 6.5rem;
+    justify-content: flex-end;
+  }
+  .sync-anchor-slot {
+    width: 7.25rem;
+    justify-content: flex-end;
+  }
+}
+
 .speaker-row-icon {
   display: inline-flex;
   color: var(--text-tertiary);
@@ -1654,11 +2254,22 @@ html.is-embedded {
 .login-panel { width: min(100%, 24rem); display: grid; gap: var(--space-lg); }
 .login-brand { margin-bottom: var(--space-lg); }
 .form-error { padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); color: var(--danger) !important; background: var(--danger-soft); font-size: 0.8125rem; }
-.access-settings-form { padding: var(--space-lg); display: grid; gap: var(--space-md); border-top: 0.5px solid var(--separator); }
+.access-settings-form { padding: var(--space-md); display: grid; gap: var(--space-sm); border-top: 0.5px solid var(--separator); }
 .access-settings-form[hidden] { display: none; }
-.access-settings-fields { display: grid; gap: var(--space-md); padding: 0 var(--space-md); }
+.access-settings-form .choice-row { padding: var(--space-sm) var(--space-md); }
+.access-settings-fields { display: grid; gap: var(--space-sm); padding: 0 var(--space-xs); }
 .access-settings-fields[hidden] { display: none; }
 .access-settings-fields label { display: grid; gap: var(--space-xs); color: var(--text-secondary); font-size: 0.8125rem; font-weight: 600; }
+/* The save-result line is an aria-live sink. Empty, it must not hold space:
+   an unstyled empty <p> in the grid added a gap plus its own margins, which is
+   the blank band under the save button. */
+.settings-form-status {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+.settings-form-status:empty { display: none; }
+.settings-form-status.error { color: var(--danger); }
 .recovery-sheet { text-align: left; }
 .recovery-sheet h2 { margin: var(--space-md) 0 var(--space-xs); }
 .recovery-sheet p { margin-bottom: var(--space-xl); }
@@ -1763,7 +2374,8 @@ html.is-embedded {
   flex: 0 0 auto;
 }
 .port-control .plain-state { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.port-control .settings-number { width: 6rem; }
+.port-control .port-actual { font-variant-numeric: tabular-nums; }
+.port-control .settings-number { width: 5.5rem; }
 .port-actions {
   display: flex;
   gap: var(--space-xs);
@@ -1801,7 +2413,6 @@ html.is-embedded {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--success);
-  animation: status-breathe 1.8s ease-in-out infinite;
 }
 
 .plain-state.success {
@@ -1871,14 +2482,59 @@ html.is-embedded {
   white-space: nowrap;
 }
 
+/* Small inline facts — format lists, counts, encoders. One chip recipe shared
+   by group headers, device rows and the diagnostics footer, so a fact reads the
+   same wherever it appears instead of being a sentence on one page and a badge
+   on the next. */
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--radius-xs);
+  background: var(--fill-secondary);
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.meta-chip.ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.meta-chip.warn {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
+}
+
+.meta-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+/* Inline hint under a form control (e.g. the create-group codec note). */
+.codec-compatibility-hint {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
 /* Status overview */
 .hero-card {
   background: var(--elevated);
   color: var(--text);
-  border-radius: var(--radius-lg);
-  padding: var(--space-xl);
+  border-radius: var(--card-radius);
+  padding: var(--space-lg) var(--space-xl);
   margin-bottom: var(--space-lg);
-  box-shadow: 0 0 0 0.5px var(--separator), var(--shadow-sm);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
   position: relative;
   overflow: hidden;
 }
@@ -1892,12 +2548,11 @@ html.is-embedded {
   right: var(--space-xl);
   border-radius: 50%;
   background: var(--success);
-  animation: status-breathe 1.8s ease-in-out infinite;
   pointer-events: none;
 }
 
-.hero-card.warning::before { background: var(--warning); animation: none; }
-.hero-card.error::before { background: var(--danger); animation: none; }
+.hero-card.warning::before { background: var(--warning); }
+.hero-card.error::before { background: var(--danger); }
 
 .hero-card .title-2,
 .hero-card .caption {
@@ -1923,6 +2578,12 @@ html.is-embedded {
   color: var(--text-secondary);
 }
 
+.empty-state-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
 .empty-state-icon {
   width: 4rem;
   height: 4rem;
@@ -1943,27 +2604,37 @@ html.is-embedded {
 
 .device-card {
   background: var(--elevated);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 0 0 0.5px var(--separator), var(--shadow-sm);
+  border-radius: var(--card-radius);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
   overflow: hidden;
   transition: box-shadow 160ms var(--ease-out);
 }
 
 .device-card.expanded {
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--card-shadow-raised);
 }
 
 .device-card-header {
   display: flex;
   align-items: center;
   gap: var(--space-md);
-  padding: var(--space-md) var(--space-lg);
-  min-height: 3.75rem;
+  padding: var(--space-sm) var(--space-lg);
+  min-height: 3.5rem;
   cursor: pointer;
 }
 
+.device-card-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.device-card.expanded .device-card-header {
+  box-shadow: 0 0.5px 0 var(--separator);
+}
+
 .device-card-body {
-  padding: 0 var(--space-lg) var(--space-lg);
+  padding: var(--space-md) var(--space-lg) var(--space-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
@@ -2019,6 +2690,48 @@ html.is-embedded {
   gap: var(--space-md);
   padding: var(--space-sm) 0;
   border-top: 0.5px solid var(--separator);
+}
+
+/* Format verdicts: one chip per format, so four answers stay scannable (the
+   evidence moved into each chip's tooltip). */
+.codec-row {
+  align-items: flex-start;
+}
+
+.codec-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2xs);
+}
+
+.codec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--radius-xs);
+  background: var(--fill-secondary);
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.codec-chip.ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.codec-chip.bad {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.codec-chip.unknown {
+  color: var(--text-tertiary);
 }
 
 .device-detail-row:first-child {
@@ -2547,7 +3260,7 @@ html.is-embedded {
 }
 
 .group-toggle:hover {
-  color: var(--text-primary);
+  color: var(--text);
 }
 
 .sync-group-header .cell-content {
@@ -2599,12 +3312,13 @@ html.is-embedded {
 
 .receiver-card {
   background: var(--elevated);
-  border-radius: var(--radius-lg);
-  box-shadow: 0 0 0 0.5px var(--separator), var(--shadow-sm);
-  padding: var(--space-lg);
+  border-radius: var(--card-radius);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
+  padding: var(--space-md) var(--space-lg);
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: var(--space-sm);
   transition: box-shadow 160ms var(--ease-out);
 }
 
@@ -2728,8 +3442,16 @@ html.is-embedded {
   height: 100%;
   display: grid;
   place-items: center;
-
+  padding: var(--space-md);
+  text-align: center;
   color: var(--text-secondary);
+}
+
+/* Retry (failure) and cancel stack instead of sitting side by side: the retry
+   is the action that matters and a long error message needs the width. */
+.sheet-actions {
+  display: grid;
+  gap: var(--space-sm);
 }
 
 /* Toast */
@@ -2896,15 +3618,23 @@ html.is-embedded {
   gap: var(--space-sm);
 }
 
+.now-playing-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  flex: none;
+}
+
 .now-playing-master { flex: 1; min-width: 6rem; }
 .now-playing-master input[type="range"] { min-width: 3rem; }
 
+/* Same disclosure vocabulary as the group cards: right = collapsed,
+   down = expanded. */
 .now-playing-expand svg {
-  transform: rotate(90deg);
   transition: transform 200ms var(--ease-spring);
 }
 .now-playing.expanded .now-playing-expand svg {
-  transform: rotate(-90deg);
+  transform: rotate(90deg);
 }
 
 /* Per-speaker drawer: slides open below the main row; grows with content. */
@@ -2985,13 +3715,23 @@ html.is-embedded {
     box-shadow: 0 0.5px 0 var(--separator), var(--shadow-sm);
     overflow-y: auto;
   }
+
+  /* Narrow column, three honest rows: identity, volume, transport. The expand
+     toggle now sits with the other controls, so the identity row gets the full
+     width — it used to be squeezed to 114px and clipped the state line. */
   .is-embedded .now-playing-main {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) repeat(3, auto);
-    gap: var(--space-xs);
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "icon copy"
+      "volume volume"
+      "controls controls";
+    align-items: center;
+    gap: var(--space-xs) var(--space-sm);
   }
+  .is-embedded .now-playing-icon { grid-area: icon; }
   .is-embedded .now-playing-copy {
-    grid-column: 2 / -1;
+    grid-area: copy;
     min-width: 0;
   }
   .is-embedded .now-playing-copy strong {
@@ -3002,23 +3742,12 @@ html.is-embedded {
     line-height: 1.25;
     overflow-wrap: anywhere;
   }
-  .is-embedded .now-playing-main > [data-playback-toggle] { grid-column: 3; grid-row: 2; }
-  .is-embedded .now-playing-main > [data-playback-stop] { grid-column: 4; grid-row: 2; }
   .is-embedded .now-playing-master {
-    grid-column: 2 / 3;
-    grid-row: 3;
+    grid-area: volume;
     min-width: 0;
     margin-top: var(--space-2xs);
   }
-  .is-embedded .now-playing-main > [data-mute] {
-    grid-column: 1;
-    grid-row: 3;
-    margin-top: var(--space-2xs);
-  }
-  .is-embedded .now-playing-expand {
-    grid-column: 5;
-    grid-row: 1;
-  }
+  .is-embedded .now-playing-controls { grid-area: controls; justify-content: space-between; }
   .is-embedded .now-playing-icon { width: 1.875rem; height: 1.875rem; }
   .is-embedded .now-playing-copy strong { font-size: 0.9375rem; }
   .is-embedded .now-playing-copy span { font-size: 0.75rem; }
@@ -3180,7 +3909,7 @@ html.is-embedded {
   overflow: hidden;
   border-radius: var(--radius-md);
   background: var(--surface-solid);
-  box-shadow: 0 0 0 0.5px var(--separator);
+  border: var(--card-border);
   /* Fixed-height panel: the toolbar stays put and the log body scrolls
      inside — the page must never grow as log lines arrive. */
   display: flex;
@@ -3197,6 +3926,9 @@ html.is-embedded {
   padding: var(--space-xs) var(--space-md);
   border-bottom: 0.5px solid var(--separator);
   background: var(--surface-solid);
+  /* Two scope selects plus four actions: let the actions drop to a second row
+     on a narrow desktop window instead of squeezing every label. */
+  flex-wrap: wrap;
 }
 .live-indicator {
   display: inline-flex;
@@ -3224,27 +3956,56 @@ html.is-embedded {
   font-size: 0.8125rem;
 }
 .log-action { min-height: 2rem; padding: 0 var(--space-sm); font-size: 0.8125rem; }
+/* The frozen-window bar sits between the toolbar and the body, inside the same
+   fixed-height panel, so freezing must not push the scrollable area down. */
+.log-freeze-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border-bottom: 0.5px solid var(--separator);
+  background: var(--fill-tertiary);
+  font-size: 0.8125rem;
+}
+.log-freeze-bar > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+.log-freeze-bar strong { font-variant-numeric: tabular-nums; }
+.log-freeze-bar small { color: var(--text-secondary); }
+.log-freeze-new {
+  border-radius: var(--radius-xs);
+  padding: 0.125rem var(--space-xs);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.log-freeze-bar [data-log-unfreeze] { margin-left: auto; }
+.runtime-log-footer {
+  flex: 0 0 auto;
+  padding: var(--space-xs) var(--space-md);
+  border-top: 0.5px solid var(--separator);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
 .runtime-log {
   overflow: auto;
   flex: 1 1 auto;
   min-height: 8rem;
   font-size: 0.8125rem;
-  scrollbar-width: thin;
-  scrollbar-color: var(--separator-strong) transparent;
   /* Newest line is at the bottom and auto-appends; without this the browser
      anchors scroll to the changed content and the view jumps on every poll. */
   overflow-anchor: none;
 }
-.runtime-log::-webkit-scrollbar { width: 0.5rem; height: 0.5rem; }
-.runtime-log::-webkit-scrollbar-track { background: transparent; }
-.runtime-log::-webkit-scrollbar-thumb {
-  border: 0.125rem solid transparent;
-  border-radius: var(--radius-full);
-  background: var(--separator-strong);
-  background-clip: padding-box;
-}
-.runtime-log::-webkit-scrollbar-thumb:hover { background-color: var(--text-tertiary); }
 
+/* Only the runtime log's liveness dot breathes now. State indicators (在线,
+   监听中, 当前状态, 播放中) used to share this animation, which faded the dot
+   most of the way to the track colour and read as blinking grey. */
 @keyframes status-breathe {
   0%, 100% {
     opacity: 0.45;
@@ -3257,9 +4018,6 @@ html.is-embedded {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .status-pill.running::before,
-  .plain-state.success::before,
-  .hero-card::before,
   .live-indicator > span {
     animation: none;
     opacity: 1;
@@ -3292,13 +4050,18 @@ html.is-embedded {
 @media (max-width: 639px) {
   .runtime-log-toolbar {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* Two columns: the three selects span the row, the three actions pair up
+       with 导出报告 on a full row of its own. */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-xs);
   }
   .live-indicator { grid-column: 1 / -1; margin-right: 0; }
   .log-filter { grid-column: 1 / -1; width: 100%; min-width: 0; }
   .log-action { min-width: 0; padding-inline: var(--space-xs); }
-  .log-report-action { width: 100%; }
+  .log-report-action { grid-column: 1 / -1; width: 100%; }
+  .log-freeze-bar { flex-wrap: wrap; }
+  .log-freeze-bar [data-log-unfreeze] { margin-left: 0; }
+  .log-scope-option { padding-inline: var(--space-xs); }
 }
 
 .switch-label { display: inline-flex; }
@@ -3407,25 +4170,25 @@ html.is-embedded {
     animation: restore-mobile-player 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
     transform-origin: top right;
   }
+  /* Same three-row shape as the fnOS sidebar, at phone touch sizes. */
   .now-playing-main {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) repeat(4, auto);
-    gap: var(--space-xs);
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "icon copy"
+      "volume volume"
+      "controls controls";
+    align-items: center;
+    gap: var(--space-sm) var(--space-sm);
   }
-  .now-playing-copy { flex: 1; min-width: 0; }
+  .now-playing-icon { grid-area: icon; }
+  .now-playing-copy { grid-area: copy; min-width: 0; }
+  .now-playing-master { grid-area: volume; min-width: 0; }
+  .now-playing-controls { grid-area: controls; justify-content: space-between; }
   .now-playing-minimize { display: grid; }
   .now-playing .icon-button.compact { width: 2.75rem; height: 2.75rem; }
-  .now-playing .now-playing-master {
-    grid-column: 2 / -1;
-    grid-row: 2;
-    min-width: 0;
-  }
-  .now-playing-main > [data-mute] {
-    grid-column: 1;
-    grid-row: 2;
-  }
   .has-playback .main-content {
-    padding-bottom: calc(10rem + var(--tab-bar-height) + env(safe-area-inset-bottom));
+    padding-bottom: calc(12rem + var(--tab-bar-height) + env(safe-area-inset-bottom));
   }
   .has-playback.playback-minimized .main-content {
     padding-bottom: calc(var(--tab-bar-height) + var(--space-xl) + env(safe-area-inset-bottom));
@@ -3530,7 +4293,6 @@ html.is-embedded {
 
   .sync-group-header .cell-content { flex-basis: 100%; }
   .sync-group-header .segmented-control { flex: 1; }
-  .group-delete { margin-left: 0; }
   .sync-delay-list { padding-inline: var(--space-md); }
   .sync-delay-row { flex-wrap: wrap; }
   .sync-delay-row > span:first-child { flex-basis: 4rem; }
@@ -3737,9 +4499,11 @@ html.is-embedded {
 .device-expand-icon {
   display: inline-grid;
   place-items: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  color: var(--text-tertiary);
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
+  background: var(--fill-secondary);
+  color: var(--text-secondary);
   transition: transform 180ms var(--ease-spring);
 }
 .device-expand-icon svg { width: 0.875rem; height: 0.875rem; }
@@ -3806,7 +4570,7 @@ html.is-embedded {
   /* Device cards */
   .device-card { padding: 1rem; }
   .device-card-header { gap: 0.75rem; }
-  .device-actions { grid-template-columns: minmax(0, 1fr) 2.5rem 1.5rem; gap: 0.5rem; }
+  .device-actions { grid-template-columns: minmax(0, 1fr) 2.5rem 1.75rem; gap: 0.5rem; }
   .device-volume-inline .volume-icon { display: none; }
   .device-detail-row .cell-value { max-width: 60%; font-size: 0.75rem; }
   .device-detail-row .alias-input { width: min(100%, 12rem); }
@@ -3846,33 +4610,23 @@ html.is-embedded {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
   }
-  .group > .cell:has([data-volume-step]) .settings-inline-control { gap: 0.5rem; }
-  .group > .cell:has([data-volume-step]) .button {
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-    padding-inline: 0.625rem;
-  }
 
-  /* Group header actions have dedicated rows instead of wrapping unpredictably. */
+  /* Group header actions own a full row under the identity, so nothing wraps
+     unpredictably and the destructive action stays away from 辅助校准. */
   .sync-group-header {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: 0.5rem;
   }
-  .sync-group-header .cell-content { grid-column: 2 / -1; }
+  .sync-group-header .cell-content { grid-column: 2; }
   .sync-group-header > .segmented-control { grid-column: 1 / -1; width: 100%; }
-  .sync-group-header > [data-group-calibrate] {
-    grid-column: 1 / 3;
-    justify-self: start;
-    padding-inline: 0.5rem;
+  .sync-group-header > .group-header-actions {
+    grid-column: 1 / -1;
+    justify-content: space-between;
+    width: 100%;
   }
-  .sync-group-header > .group-delete {
-    grid-column: 3;
-    justify-self: end;
-    margin-left: 0;
-    padding-inline: 0.5rem;
-  }
+  .sync-group-header > .group-header-actions .button { padding-inline: 0.5rem; }
   .sync-delay-list { padding: 0 1rem 0.75rem; }
   .stereo-speaker { padding-block: 0.375rem; }
   .stereo-head { display: grid; grid-template-columns: minmax(5.5rem, auto) minmax(10rem, 1fr); gap: 0.5rem; }
