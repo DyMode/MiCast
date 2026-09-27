@@ -25,6 +25,17 @@ RTP_IDLE_TIMEOUT_SECONDS = 15.0
 # time to land while staying far below the speaker-side stream buffer.
 JITTER_BUFFER_PACKETS = 48
 
+# Retransmission: ask again while the gap is still open.
+#
+# Field data (0.3.3): 283 packets skipped over ~100s while only ONE resend
+# request went out, and every skip is an audible beat. A single NACK is not
+# enough on a lossy Wi-Fi link — the reply to it can be lost too, and iOS keeps
+# a short history precisely so that repeated requests can still be answered.
+# There is no timer here on purpose: an incoming packet is the natural moment to
+# notice the gap is still open, and they arrive every ~8 ms.
+RESEND_RETRY_SECONDS = 0.06
+RESEND_MAX_ATTEMPTS = 6
+
 
 def build_timing_reply(packet: bytes) -> bytes | None:
     """Answer a 0x52 timing request with the current NTP timestamp.
@@ -111,7 +122,7 @@ class RaopSession:
         self.timing_requests = 0
         self.timing_responses = 0
         self._timing_task = None
-        self.requested: set[int] = set()
+        self.requested: dict[int, tuple[int, float]] = {}  # gap start -> (attempts, last sent)
         self._resend_blind_logged = False
         # Dead-sender detection: RECORD marks the session as recording, RTP
         # traffic keeps last_rtp_at fresh, and the timing loop flags idleness.
@@ -258,16 +269,29 @@ class RaopSession:
         while self.expected in self.pending:
             sequence = self.expected
             self._decode(self.pending.pop(sequence))
-            self.requested.discard(sequence)
+            self.requested.pop(sequence, None)
             self.expected = (sequence + 1) & 0xFFFF
 
     def _can_request_resend(self) -> bool:
         return bool(self.control_transport and self.client_host and self.client_control_port)
 
     def _request_resend(self, first: int, count: int) -> None:
-        if not self._can_request_resend() or first in self.requested:
+        """Ask the sender for a gap, again and again while it stays open.
+
+        On a lossy link the reply to a single NACK is easily lost with the audio
+        it was meant to replace, so one request per gap leaves the beat missing.
+        Every arriving packet re-enters here (see push), which is what drives the
+        retries without a timer.
+        """
+        if not self._can_request_resend():
             return
-        self.requested.add(first)
+        attempts, last_at = self.requested.get(first, (0, 0.0))
+        if attempts >= RESEND_MAX_ATTEMPTS:
+            return
+        now = time.monotonic()
+        if last_at and now - last_at < RESEND_RETRY_SECONDS:
+            return
+        self.requested[first] = (attempts + 1, now)
         self.resend_requests += 1
         self.resend_sequence = (self.resend_sequence + 1) & 0xFFFF
         packet = struct.pack(">BBHHH", 0x80, 0xD5, self.resend_sequence, first, count)

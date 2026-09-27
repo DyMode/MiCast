@@ -96,3 +96,60 @@ async def test_timing_probe_is_sent_to_sender_port():
     assert packet[:2] == b"\x80\xd2"
     assert len(packet) == 32
     assert address == ("192.168.0.20", 6002)
+
+
+def _gap_session(monkeypatch):
+    """A session stuck on a 3-packet gap, with a controllable clock."""
+    import micast.raop.transport as transport_module
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(transport_module.time, "monotonic", lambda: clock["now"])
+
+    session = RaopSession(lambda _data: None)
+    session.expected = 10
+    session.client_host = "192.168.0.20"
+    session.client_control_port = 6001
+    session.control_transport = FakeTransport()
+    session.pending[10] = b"first"
+    session.push(13, b"fourth")  # 11 and 12 missing
+    return session, clock
+
+
+def test_an_open_gap_is_asked_again_until_the_sender_answers(monkeypatch):
+    """One NACK is not enough on a lossy link: its reply can be lost too.
+
+    Field data (0.3.3): 283 packets skipped over ~100s with only ONE resend
+    request — every skip is an audible beat.
+    """
+    session, clock = _gap_session(monkeypatch)
+    sent = session.control_transport.sent
+
+    assert len(sent) == 1
+    # Still inside the retry window: another incoming packet must not spam.
+    session.push(14, b"fifth")
+    assert len(sent) == 1
+
+    clock["now"] += 0.1
+    session.push(15, b"sixth")
+    assert len(sent) == 2
+    # The request always describes the gap that is open *now* (11..12).
+    assert struct.unpack(">BBHHH", sent[1][0])[3:] == (11, 2)
+
+    # The answer arrives: the gap closes and the bookkeeping is forgotten.
+    session.push(11, b"second")
+    session.push(12, b"third")
+    assert session.requested == {}
+    assert session.dropped_packets == 0
+
+
+def test_retries_stop_at_the_attempt_cap(monkeypatch):
+    """Bounded: a sender that never answers must not be asked forever."""
+    from micast.raop.transport import RESEND_MAX_ATTEMPTS
+
+    session, clock = _gap_session(monkeypatch)
+
+    for _ in range(RESEND_MAX_ATTEMPTS + 3):
+        clock["now"] += 0.1
+        session.push(13, b"fourth")
+
+    assert session.resend_requests == RESEND_MAX_ATTEMPTS
