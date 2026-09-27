@@ -513,6 +513,11 @@ export interface SinkLatencyMetrics {
   buffer_ms: number;
   /** Times the speaker was served from the delay line during a source gap. */
   bridges?: number;
+  /** Times this speaker fell behind the delay line and was skipped to live. */
+  lag_drops?: number;
+  /** Times silence had to be injected because the speaker was not reading. */
+  silence_fills?: number;
+  queue_drops?: number;
 }
 
 export interface TopologyNode {

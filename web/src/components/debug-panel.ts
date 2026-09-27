@@ -231,9 +231,28 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
   );
   const latencyMs = inputBufferMs + chainLatencyMs;
 
-  // Alerts are the supervisor's own words: an entry that is not simply
-  // healthy says why, and what it already tried.
-  const alerts = Object.entries(entries)
+  // Conclusions, in one place and sorted by severity. Two rules for every
+  // entry: name the domain the evidence actually points at ("the sender's link"
+  // is not "our encoder"), and always carry the numbers it was drawn from, so a
+  // reader can disagree with the verdict.
+  const verdicts: Array<{ severity: "bad" | "warn" | "ok"; text: string }> = [];
+
+  if ((debug?.cloud?.failures ?? 0) >= 3) {
+    verdicts.push({
+      severity: "bad",
+      text: `米家云端连续 ${debug?.cloud?.failures} 次无响应：音箱列表与扫码登录都需要这台设备能访问外网服务器（DNS、防火墙、代理都会影响）`,
+    });
+  }
+  if (state.xiaomi.status === "expired") {
+    verdicts.push({
+      severity: "bad",
+      text: "小米登录已失效：音箱与播放配置都在，重新扫码即可恢复",
+    });
+  }
+
+  // Supervisor alerts: an entry that is not simply healthy says why, and what
+  // it already tried.
+  Object.entries(entries)
     .filter(
       ([, health]) =>
         health.state !== "idle" &&
@@ -241,46 +260,103 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
         health.state !== "quiet" &&
         health.state !== "paused",
     )
-    .map(([entryId, health]) => {
+    .forEach(([entryId, health]) => {
       const label = ENTRY_STATE_LABELS[health.state] || health.state;
       const action = health.last_action ? ENTRY_ACTION_LABELS[health.last_action.replace(/\(rate-limited\)$/, "")] || health.last_action : "";
       const parts = [
-        health.reason && !label.includes(health.reason) && !health.reason.includes(label)
-          ? health.reason
-          : "",
+        health.reason && !label.includes(health.reason) && !health.reason.includes(label) ? health.reason : "",
         action ? `已${action}${health.last_action_ok === true ? " · 已恢复" : health.escalations > 1 ? `（第 ${health.escalations} 次）` : ""}` : "",
         health.buffer_override_s ? `缓冲已加大到 ${health.buffer_override_s}s` : "",
       ].filter(Boolean);
-      return {
+      verdicts.push({
         severity: health.state === "unhealthy" ? "bad" : "warn",
         text: `${entryLabel(entryId, state)}：${[label, ...parts].join(" · ")}`,
-      };
+      });
     });
 
-  // Where the audio is actually being lost. MiCast's own three stages report
-  // zero drops in this state, so naming the sender→device link as the source
-  // (with its numbers) is what keeps the reader from hunting in the wrong place.
+  // Which hop is losing audio. The three groups of counters are independent:
+  // RAOP loss is the sender→device link, sink counters are the device→speaker
+  // side, encoder/CPU/loop numbers are this process on this machine. Our own
+  // three stages reporting zero drops is what allows the attribution below.
   const packetsSkipped = sum(raop.map((item) => item.dropped_packets));
   const resendRequests = sum(raop.map((item) => item.resend_requests));
+  const decodeErrors = sum(raop.map((item) => item.decode_errors));
   const sourceGaps = audio ? audio.source.gaps || 0 : 0;
   const sourceGapMaxMs = audio ? audio.source.gap_max_ms || 0 : 0;
-  if (
-    playing &&
-    (packetsSkipped >= 20 || sourceGaps >= 5 || sourceGapMaxMs >= 150)
-  ) {
-    alerts.unshift({
+  const sinkMetrics = Object.values(debug?.diagnostics?.sinks || {}).flatMap((perSink) =>
+    Object.values(perSink || {}),
+  );
+  const sinkLagSkips = sum(sinkMetrics.map((item) => item.lag_drops || 0));
+  const sinkSilenceFills = sum(sinkMetrics.map((item) => item.silence_fills || 0));
+  const reconnects = audio?.client.reconnects || 0;
+  const ourDrops = (audio ? audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out : 0) + droppedMs;
+  const encodeP95 = audio?.encode.p95_ms || 0;
+  const encodeMax = audio?.encode.max_ms || 0;
+  const cpuPercent = audio?.runtime?.cpu_percent || 0;
+  const loopLagMax = audio?.runtime?.loop_lag_max_ms || 0;
+
+  if (playing && (packetsSkipped >= 20 || (sourceGapMaxMs >= 150 && resendRequests >= 3))) {
+    verdicts.push({
       severity: "bad",
       text: [
-        "投送链路不稳：",
+        "投送端（手机/电脑）到这台设备之间链路不稳：",
         packetsSkipped ? `已跳过 ${packetsSkipped} 个音频包` : "",
-        sourceGaps ? `音源空隙 ${sourceGaps} 次（最长 ${Math.round(sourceGapMaxMs)}ms）` : "",
         resendRequests ? `已请求重传 ${resendRequests} 次` : "",
-        "。编码、流服务与音箱三段没有丢弃，问题在手机/电脑到这台设备之间，听感上会少拍、卡顿；改善两者之间的 Wi-Fi（5G 频段、靠近路由器、关闭发送端省电）通常最有效。",
+        sourceGaps ? `音源空隙 ${sourceGaps} 次（最长 ${Math.round(sourceGapMaxMs)}ms）` : "",
+        decodeErrors ? `解码错误 ${decodeErrors}` : "",
+        "。编码、流服务与音箱三段没有丢弃，所以卡顿来自这一段；让发送端靠近路由器、用 5GHz 频段、关闭发送端的省电模式通常最有效。",
       ]
         .filter(Boolean)
         .join(" "),
     });
+  } else if (playing && sourceGaps >= 5 && packetsSkipped < 5) {
+    verdicts.push({
+      severity: "warn",
+      text: `投送端送来的音频成团/停顿：音源空隙 ${sourceGaps} 次（最长 ${Math.round(sourceGapMaxMs)}ms）但没有丢包。多为发送端应用自身或其省电策略，换播放器或保持前台可改善。`,
+    });
   }
+
+  if (playing && reconnects > 0) {
+    verdicts.push({
+      severity: "bad",
+      text: `音箱端链路不佳：音箱重连 ${reconnects} 次${sinkLagSkips ? `、被跳至实时 ${sinkLagSkips} 次` : ""}${ourDrops ? `（MiCast 侧同时丢弃了 ${Math.round(ourDrops)}ms，也可能与它有关）` : "（MiCast 侧没有丢弃）"}。优先检查这台音箱的 Wi-Fi 位置与信号。`,
+    });
+  } else if (playing && (sinkLagSkips > 0 || sinkSilenceFills > 0)) {
+    verdicts.push({
+      severity: "warn",
+      text: `音箱跟不上取流：被跳至实时 ${sinkLagSkips} 次、注入静音 ${sinkSilenceFills} 次，但没有重连（MiCast 侧没有丢弃）。更像这台音箱自身的处理能力，换 MP3 试一次可区分。`,
+    });
+  }
+
+  if (playing && (cpuPercent >= 80 || ourDrops > 0) && loopLagMax >= 150) {
+    // Attribution by our own cost, never by the output-interval metric: that
+    // one is gated by the source (see the 输出间隔 tile), so a big number there
+    // is an upstream symptom, not evidence of a slow encoder.
+    verdicts.push({
+      severity: "bad",
+      text: `MiCast 自身余量不足：本进程 CPU ${Math.round(cpuPercent)}%（单核口径）、事件循环最长阻塞 ${Math.round(loopLagMax)}ms${ourDrops > 0 ? `、丢弃 ${Math.round(ourDrops)}ms` : ""}。减少同时取流的目标数，或降码率/采样率。`,
+    });
+  } else if (playing && cpuPercent < 50 && loopLagMax >= 150) {
+    verdicts.push({
+      severity: "warn",
+      text: `事件循环最长被阻塞 ${Math.round(loopLagMax)}ms，而本进程 CPU 只有 ${Math.round(cpuPercent)}%：这台设备上还有别的负载（我们看不到是谁），先排查主机上的其他服务。`,
+    });
+  }
+
+  if (playing && !verdicts.length) {
+    verdicts.push({
+      severity: "ok",
+      text: `未发现明显瓶颈：输出间隔 P95 ${Math.round(encodeP95)}ms · 无丢包 · 无重连 · 事件循环 ${Math.round(audio?.runtime?.loop_lag_ms || 0)}ms。仍觉得卡就导出报告，用运行记录里的时间点对齐听感。`,
+    });
+  }
+
+  const severityRank = { bad: 0, warn: 1, ok: 2 } as const;
+  const orderedVerdicts = [...verdicts].sort(
+    (left, right) => severityRank[left.severity] - severityRank[right.severity],
+  );
+  const VERDICT_LIMIT = 4;
+  const alerts = orderedVerdicts.slice(0, VERDICT_LIMIT);
+  const hiddenVerdicts = orderedVerdicts.length - alerts.length;
 
   const entryStates = Object.values(entries).map((item) => item.state);
   const anyQuiet = entryStates.some((state) => state === "quiet" || state === "paused");
@@ -471,6 +547,7 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       <div class="diagnostic-alert ${alert.severity === "bad" ? "is-bad" : ""}">${alert.text}</div>`,
         )
         .join("")}
+      ${hiddenVerdicts > 0 ? `<div class="diagnostic-alert">还有 ${hiddenVerdicts} 条结论，见下方运行记录</div>` : ""}
       ${
         events.length
           ? `<div class="diagnostic-events">${events
@@ -549,10 +626,14 @@ export function renderAudioPath(debug: DebugState | null): string {
   const totalDrops = audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out;
   const tiles = [
     {
-      label: "编码耗时",
+      // Not "how long encoding takes": this is the interval between two encoded
+      // chunks leaving the pipeline (measured around the pump loop). Encoding
+      // itself measures ~3% of real time here; a long interval means the source
+      // had nothing to hand over — check 音源供给 and 投送链路 first.
+      label: "输出间隔",
       value: `${audio.encode.p95_ms}`,
       unit: "ms P95",
-      note: `P50 ${audio.encode.p50_ms} ms · 最长 ${audio.encode.max_ms} ms`,
+      note: `P50 ${audio.encode.p50_ms} ms · 最长 ${audio.encode.max_ms} ms · 正常约等于音频块时长`,
       state: encodeLost > 0 ? "bad" : audio.encode.stalls > 0 ? "warn" : "ok",
     },
     {
