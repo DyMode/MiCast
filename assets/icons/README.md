@@ -1,16 +1,12 @@
-# MiCast platform icons
+# 平台图标
 
-Regenerate with `.venv\Scripts\python.exe assets\export_icons.py`.
-This also syncs Web icons into `web/public/icons` and rebuilds the ZIP archive.
+使用 `.venv\Scripts\python.exe assets\export_icons.py` 生成平台图标，同步 Web 图标至 `web/public/icons`，并生成 `assets/micast-icons.zip`。
 
-- Windows: rounded transparent tile, independently rendered frames, 32-bit BGRA DIB plus explicit 1-bit AND mask. Area averaging avoids transparent-edge ringing. Do not replace this with a square tile to conceal a mask defect.
-- Windows 16–48 px frames use binary outer alpha for shell image-list compatibility. Interior speaker edges retain antialiasing; larger frames retain smooth outer alpha.
-- iOS: `apple-touch-icon.png` is an opaque 180×180 RGB image with a full terracotta background. iOS supplies its own corner mask.
-- fnOS: 64×64 and 256×256 sRGB PNG files with transparent corners; the tile occupies 97% of the canvas. The speaker group is about 12% larger than the previous cropped fnOS assets, with a stronger rear outline (3.05 design units; 3.25 at 64 px). The export script synchronizes these files to `web/public/icons/fnos-64.png` and `fnos-256.png`, used by both fnOS packaging scripts.
-- Browser tabs: `favicon.svg` / `favicon.ico` use a full-width rounded tile, 28% larger speaker group and stronger rear outline. The in-page `micast.svg` retains the approved application proportions.
+- Windows：透明圆角底板，多尺寸独立渲染，32 位 BGRA 图像与显式 AND 掩码。16–48 px 的外缘使用二值透明度，内部图形保留抗锯齿。
+- iOS：180×180 不透明 RGB 图标，陶土红背景，由系统裁切圆角。
+- fnOS：64×64 与 256×256 sRGB PNG，透明圆角，底板占画布 97%，打包使用同步至 Web 目录的图标。
+- 浏览器：`favicon.svg` 与 `favicon.ico` 采用适合小尺寸的图形；页面内 `micast.svg` 使用品牌母版比例。
 
-Use stable names without revision suffixes. `fnos`, `windows`, `tray`, and `web` contain purpose-specific exports of the one approved design; numerical size suffixes indicate pixel dimensions. The current package is `assets/micast-icons.zip`. Native verification previews belong in `.run`, not in the distributable assets.
+`fnos`、`windows`、`tray`、`web` 按用途组织导出文件，尺寸后缀表示像素大小。视觉母版见 [品牌图标](../brand-approved/README.md)。
 
-Validate on Windows with `.venv\Scripts\python.exe assets\verify_icons.py --exe` after rebuilding. The check compares generated frames with the EXE resources, checks alpha/AND-mask consistency, renders icons using native DrawIconEx, and checks the touch icon's size and opaque corners.
-
-After deploying updated Web resources, reload the page and recreate an existing iOS home-screen shortcut. Existing installed shortcuts may retain their previous icon.
+构建 Windows 程序后运行 `.venv\Scripts\python.exe assets\verify_icons.py --exe`，检查程序资源、透明度掩码、系统绘制结果和触摸图标尺寸。

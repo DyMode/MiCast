@@ -8,9 +8,9 @@
 - 网关 Socket：`${TRIM_APPDEST}/app.sock`
 - 持久数据：`${TRIM_PKGVAR}`
 - 运行身份：`micast`
-- AirPlay 2：单入口、默认关闭
+- AirPlay 2：单入口；安装向导默认请求启用，运行条件不满足时单独受阻
 
-应用不监听固定的管理端口，因此 manifest 使用 `checkport=false`，由 fnOS 统一网关转发到 Unix Socket。安装和配置不使用 fnOS 表单向导；首次运行所需的管理访问、米家登录、音箱选择及 AirPlay 2 开关均由应用内引导完成。
+应用不监听固定的管理端口，因此 manifest 使用 `checkport=false`，由 fnOS 统一网关转发到 Unix Socket。安装向导提供投送功能选项和可调整端口的 auto/手动配置；AirPlay 2 接收器固定使用 TCP 7000，不能修改或自动顺延；安装前初检，安装回调按应用用户验证时钟运行时。至少一种输入协议可用即可安装。管理访问、米家登录和音箱选择由应用内引导完成；后续设置与功能恢复统一使用应用设置页。
 
 ## 生命周期
 

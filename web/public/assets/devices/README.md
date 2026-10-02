@@ -17,4 +17,4 @@
 - `xiaomi-wifispeaker-l15a.png`：Xiaomi Sound Pro
 - `xiaomi-wifispeaker-l17a.png`：Xiaomi Sound Move
 
-现有详情图为 480×480；LX06、OH2、OH2P 另有 360×400 卡片图。图片根据米家产品百科页面的公开产品图整理，产品型号映射位于 `web/src/components/devices-view.ts`。部分旧型号在米家百科接口中已无可用图片，会继续使用通用音箱图标，避免错误复用其他产品图。
+现有详情图为 480×480；LX06、OH2、OH2P 另有 360×400 卡片图。图片根据米家产品百科页面的公开产品图整理，产品型号映射位于 `web/src/components/devices-view.ts`。其他型号使用通用音箱图标。

@@ -58,3 +58,10 @@ logs/
 # Local agent/editor artifacts
 .impeccable/
 .run/
+
+# Generated Docker host port plans
+docker/.micast-ports-*.env
+
+# Generated review output and frontend cache
+artifacts/
+.vite/

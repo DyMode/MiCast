@@ -26,13 +26,13 @@ fnOS 打包的实际实现是 `scripts/build-fnos.sh`：校验 manifest 的平�
 | 用途 | 入口 |
 | --- | --- |
 | Windows 防火墙配置 | 管理员终端运行 `pwsh -File scripts/configure-windows-firewall.ps1` |
+| 更新 FnDepot 应用源 | `pwsh -File scripts/update-fndepot.ps1`，参数见 [应用源说明](../docs/fndepot.md) |
 | 测量音频流交付间隔 | `python scripts/measure_stream.py <STREAM_URL>` |
-
-`docs/screenshots/*.png` 是 README 与飞牛应用简介内嵌的成品图（1560×975，显示宽 780），由截图工具与图片编辑器产出，仓库里没有生成脚本。
 
 防火墙工具默认绑定仓库虚拟环境的 Python，也可以用 `-Program` 指定 MiCast 可执行文件；它只允许专用网络内本地子网的入站 TCP/UDP，不固定运行时端口。
 
 ## 容器内脚本
 
 - `start.sh`：Docker 主镜像的启动入口。
+- `receiver-callback.sh`：发送带进程身份与事件序号的接收器回调。
 - `receiver-session-start.sh`、`receiver-session-stop.sh`、`receiver-volume.sh`：Docker AirPlay 2 接收器容器调用，用于会话状态与音量回传。

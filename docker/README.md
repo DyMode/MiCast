@@ -26,6 +26,8 @@ docker compose -f docker-compose.classic.yml up -d --build
 
 ## AirPlay 2 单例版（实验性）
 
+当前 Shairport 接收器固定使用 TCP 7000；同一接收器网络空间内冲突时不能自动换端口。macvlan 接收器使用独立 IP，与宿主机端口分开检查。旧 `MICAST_AIRPLAY2_PORT` 设置不再改变接收器端口。
+
 `docker-compose.single.yml`：控制器加一个固定的 AirPlay 2 接收器，不启动编排器，也不挂载 Docker Socket。两者通过内部网络传输 PCM，接收器用 macvlan 参与局域网发现。
 
 ```bash
@@ -45,3 +47,12 @@ docker compose --env-file docker/.env -f docker/docker-compose.single.yml up -d 
 ## 数据目录
 
 容器内数据目录由 `MICAST_DATA_DIR` 指定，挂载出来即可保留设置与登录态；文件清单与迁移注意事项见[部署说明](../docs/deployment.md)。
+
+
+## 统一安装预检与端口规划
+
+源码与 Windows 可执行文件支持 --preflight；源码启动脚本在新建安装时预检，已有配置的启动保留管理恢复入口。飞牛安装向导默认 auto，允许手填端口；可选功能不足不阻断其他协议可用的安装。
+
+在仓库根目录使用 python -m micast.docker_install --mode classic 规划宿主机端口；single/multi 替换 mode。默认只生成方案和启动命令，--up 才启动 Docker。经典容器允许自动避让并按实际端口检查健康；桥接映射必须在宿主机规划，不能在容器内自动改映射。
+
+端口分配与冲突处理见 [端口配置](../docs/ports.md)。

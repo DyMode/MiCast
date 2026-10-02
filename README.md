@@ -13,7 +13,7 @@
 - **多音箱同步**：同一音源可同声播放到多台音箱（支持跨型号），并可逐台校准延迟、响度、音量与静音。
 - **立体声组合**：两台音箱分配为左、右声道，实时拆分并同步输出。
 - **逐台调音**：每台音箱独立的 EQ 曲线、预设、夜间模式与等响度补偿。
-- **AirPlay 2**：飞牛原生包与 Docker 编排版提供一个可选的 AirPlay 2 入口（实验性，默认关闭）。
+- **AirPlay 2**：飞牛原生包与 Docker 编排版提供一个可选的 AirPlay 2 入口（实验性，可在引导或设置中调整）。
 
 ## 界面预览
 
@@ -98,10 +98,10 @@ pwsh -NoProfile -File scripts/build-fnos.ps1
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 npm --prefix web ci
 npm --prefix web run build
-.\.venv\Scripts\python.exe -m uvicorn micast.main:app --host 0.0.0.0 --port 3000
+.\.venv\Scripts\python.exe -m micast
 ```
 
 质量检查：
@@ -109,6 +109,7 @@ npm --prefix web run build
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check micast tests
 .\.venv\Scripts\python.exe -m pytest
+npm --prefix web test
 npm --prefix web run typecheck
 npm --prefix web run build
 ```
