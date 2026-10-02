@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 _lock = asyncio.Lock()
 
 
+async def run_config_runtime(work: Callable[[], Awaitable[object]]) -> object:
+    """Serialize recovery with configuration without writing or rolling back settings."""
+    async with _lock:
+        return await work()
+
+
 async def apply_config_transaction(
     mutate: Callable[[], object],
     apply_runtime: Callable[[], Awaitable[None]],
@@ -49,14 +55,13 @@ async def apply_config_transaction(
             applied = True
             await apply_runtime()
             return result
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             settings.restore(snapshot)
             if applied:
-                # mutate() committed nothing, so the runtime was never touched
-                # and re-applying it would only redo work (e.g. encoder
-                # restarts, shutdowns) for a state that did not change.
+                # The mutation committed before runtime application failed
+                # or was cancelled. Restore the previous runtime as well.
                 try:
                     await (rollback_runtime or apply_runtime)()
-                except Exception:
+                except (Exception, asyncio.CancelledError):
                     logger.exception("Runtime config rollback failed")
             raise

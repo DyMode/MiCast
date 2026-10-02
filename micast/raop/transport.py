@@ -9,6 +9,7 @@ from collections.abc import Callable
 import av
 from Crypto.Cipher import AES
 
+from micast.audio_metrics import metrics
 from micast.raop.crypto import alac_cookie
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,8 @@ class RaopSession:
             pass
 
     def _check_idle(self) -> None:
+        if getattr(self, "idle_managed", False):
+            return  # the shared lifecycle owns this session's deadlines
         if (
             self.recording
             and not self.idle_notified
@@ -260,6 +263,7 @@ class RaopSession:
                 self.pending.pop(next_sequence, None)
                 return
             self.dropped_packets += missing
+            metrics.note_link_skip(missing)
             self.expected = next_sequence
             self.requested.clear()
             self._drain_pending()
@@ -293,6 +297,7 @@ class RaopSession:
             return
         self.requested[first] = (attempts + 1, now)
         self.resend_requests += 1
+        metrics.note_link_resend()
         self.resend_sequence = (self.resend_sequence + 1) & 0xFFFF
         packet = struct.pack(">BBHHH", 0x80, 0xD5, self.resend_sequence, first, count)
         self.control_transport.sendto(packet, (self.client_host, self.client_control_port))
@@ -309,6 +314,7 @@ class RaopSession:
                     self.pcm_callback(bytes(output.planes[0])[:length])
         except Exception as exc:
             self.decode_errors += 1
+            metrics.note_link_decode_error()
             if self.decode_errors <= 3:
                 logger.warning("Unable to decode ALAC packet: %s", exc)
 

@@ -126,43 +126,6 @@ async def test_eq_edit_refreshes_pipeline_curve_before_encoder_restart(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_rapid_eq_edits_apply_only_the_latest_curve_and_all_callers_wait(monkeypatch):
-    s = _settings()
-    s.set_speaker_eq_curve("a", enabled=True, points=[(100, 1), (1000, -1)])
-    bridge = _bare_bridge(monkeypatch, s)
-    pipeline = MagicMock()
-    pipeline.restart_encoder = AsyncMock()
-    bridge._pipelines = {"r1-q1": pipeline}
-    bridge._plan = compute_plan(s)
-    debounce_entered = asyncio.Event()
-    release_debounce = asyncio.Event()
-    real_sleep = asyncio.sleep
-
-    async def controlled_sleep(_seconds):
-        debounce_entered.set()
-        await release_debounce.wait()
-
-    monkeypatch.setattr("micast.audio_bridge.asyncio.sleep", controlled_sleep)
-    s.set_speaker_eq_curve("a", enabled=True, points=[(100, 2), (1000, -2)])
-    first = asyncio.create_task(bridge.apply_config_change())
-    await debounce_entered.wait()
-
-    s.set_speaker_eq_curve("a", enabled=True, points=[(100, 5), (1000, -5)])
-    second = asyncio.create_task(bridge.apply_config_change())
-    await real_sleep(0)
-    assert not first.done() and not second.done()
-
-    release_debounce.set()
-    await asyncio.gather(first, second)
-
-    pipeline.set_audio_character.assert_called_once_with(
-        eq_curve=((100.0, 5.0), (1000.0, -5.0)), loudness=False
-    )
-    pipeline.restart_encoder.assert_awaited_once()
-    assert bridge._plan == compute_plan(s)
-
-
-@pytest.mark.asyncio
 async def test_config_change_waits_for_busy_restart_lock(monkeypatch):
     s = _settings()
     bridge = _bare_bridge(monkeypatch, s)

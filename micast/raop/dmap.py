@@ -121,7 +121,11 @@ def track_meta(body: bytes) -> dict[str, str]:
     if not raw_title:
         return {}
     artist = first("asar")
-    if artist and _looks_like_lyric(artist):
+    stripped_title, recovered = _split_title_artist(raw_title)
+    # A corroborated title suffix identifies the artist even for short lyric
+    # lines without punctuation; sentence-length heuristics alone lose these.
+    suffix_lyric = bool(recovered and artist and artist != recovered and not _derive_title_from_artist(artist))
+    if artist and not _derive_title_from_artist(artist) and (_looks_like_lyric(artist) or suffix_lyric):
         # Lyric line parked in asar: not an artist. The real one is usually the
         # title's suffix ("共您别离 - 张国荣"), which the strip helpers refuse to
         # cut without a corroborating artist — recover it directly.
@@ -131,8 +135,16 @@ def track_meta(body: bytes) -> dict[str, str]:
             "artist": recovered,
             "album": first("asal"),
             "derived": "",
+            # The raw line itself feeds the player's lyric display.
+            "lyric_line": artist,
         }
     title = _strip_artist_prefix(_strip_artist_suffix(raw_title, artist), artist)
+    derived = _derive_title_from_artist(artist)
+    if derived and derived != title:
+        separator = "--" if "--" in artist else ("·" if "·" in artist else "—")
+        parts = [part.strip() for part in artist.split(separator)]
+        singer = parts[0] if separator == "--" else parts[-1]
+        return {"title": derived, "artist": singer, "album": first("asal"), "derived": derived, "lyric_line": raw_title}
     return {
         "title": title,
         "artist": artist,

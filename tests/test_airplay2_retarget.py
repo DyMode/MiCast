@@ -8,7 +8,7 @@ the target speaker, EQ and delay are egress concerns of our own pipelines.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -210,3 +210,67 @@ async def test_retarget_play_goes_through_the_verified_orchestrator_path(monkeyp
     assert receiver_id == "ap2"
     assert url.endswith("/stream/ap2")
     assert steal is False  # never steal a speaker another receiver owns
+
+
+@pytest.mark.asyncio
+async def test_retarget_releases_old_speaker(monkeypatch):
+    """A retargeted AirPlay 2 instance must unload the speaker it left behind,
+    otherwise both speakers pull the instance's stream side by side."""
+    bridge = object.__new__(AudioBridge)
+    bridge._stream_server = MagicMock()
+    bridge._stream_server.stream_ids.return_value = ["ap2", "ap2-q1"]
+    # _start_airplay2_pipelines already refreshed the snapshot to the new
+    # target; the previous map is what the rebuild captured beforehand.
+    bridge._airplay2_targets = {"ap2": "new-did"}
+    hook = AsyncMock()
+    bridge.on_airplay2_retarget = hook
+
+    monkeypatch.setattr(
+        "micast.audio_bridge.settings",
+        SimpleNamespace(
+            airplay2_instances=[SimpleNamespace(id="ap2", target_id="new-did")]
+        ),
+    )
+
+    await AudioBridge._release_retargeted_speakers(bridge, {"ap2"}, {"ap2": "old-did"})
+
+    # The leftover speaker's client is dropped on every stream of the instance,
+    # and the orchestrator is asked to stop its playback.
+    assert bridge._stream_server.kick_clients.call_args_list == [
+        call("ap2", sink="old-did"),
+        call("ap2-q1", sink="old-did"),
+    ]
+    assert hook.await_args.args == ("old-did", "ap2")
+
+
+@pytest.mark.asyncio
+async def test_retarget_without_change_keeps_speaker(monkeypatch):
+    bridge = object.__new__(AudioBridge)
+    bridge._stream_server = MagicMock()
+    bridge._stream_server.stream_ids.return_value = ["ap2"]
+    bridge._airplay2_targets = {"ap2": "same-did"}
+    hook = AsyncMock()
+    bridge.on_airplay2_retarget = hook
+
+    monkeypatch.setattr(
+        "micast.audio_bridge.settings",
+        SimpleNamespace(
+            airplay2_instances=[SimpleNamespace(id="ap2", target_id="same-did")]
+        ),
+    )
+
+    await AudioBridge._release_retargeted_speakers(bridge, {"ap2"}, {"ap2": "same-did"})
+
+    bridge._stream_server.kick_clients.assert_not_called()
+    hook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retarget_does_not_control_unmapped_placeholder():
+    bridge = object.__new__(AudioBridge)
+    bridge._stream_server = MagicMock()
+    bridge._airplay2_targets = {"ap2": "real-speaker"}
+    bridge.on_airplay2_retarget = AsyncMock()
+    await bridge._release_retargeted_speakers({"ap2"}, {"ap2": "unmapped"})
+    bridge.on_airplay2_retarget.assert_not_awaited()
+    bridge._stream_server.kick_clients.assert_not_called()

@@ -1,7 +1,7 @@
 """Realtime state push over WebSocket — replaces UI polling when connected.
 
-Pushes the same payloads the poll endpoints serve: {"type": "status"} every
-2s and {"type": "playback"} every 6s. The client falls back to plain polling
+Pushes status and topology every 2s, with metadata changes delivered within
+0.5s. Cloud playback remains at 6s. The client falls back to plain polling
 if the socket drops.
 """
 
@@ -15,6 +15,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from micast.access import COOKIE_NAME, AccessManager
 from micast.config import settings
 from micast.routes.playback import build_playback_state
+from micast.topology import build_topology
 
 logger = logging.getLogger(__name__)
 
@@ -34,18 +35,30 @@ def install(bridge, device_manager, access_manager: AccessManager | None = None)
         await websocket.accept()
         try:
             status_json = ""
+            metadata_json = ""
             playback_json = ""
             tuning_json = ""
             config_revision = -1
             ticks = 0
             while True:
-                status = json.dumps(bridge.status, ensure_ascii=False)
-                if status != status_json:
-                    status_json = status
-                    await websocket.send_text(
-                        json.dumps({"type": "status", "data": bridge.status}, ensure_ascii=False)
+                # Fast metadata checks are local only. Ordinary telemetry and
+                # expensive topology/cloud projections retain their cadence.
+                metadata = json.dumps(bridge._now_playing, ensure_ascii=False)
+                if ticks % 4 == 0 or metadata != metadata_json:
+                    metadata_json = metadata
+                    snapshot = bridge.status
+                    status = json.dumps(snapshot, ensure_ascii=False)
+                    if status != status_json:
+                        status_json = status
+                        await websocket.send_text(
+                            json.dumps({"type": "status", "data": snapshot}, ensure_ascii=False)
+                        )
+                if ticks % 4 == 0:
+                    await websocket.send_json(
+                        {"type": "topology", "data": build_topology(bridge, device_manager)}
                     )
-                if ticks % 3 == 0:  # playback every 6s (3 × 2s tick)
+                    await websocket.send_json({"type": "heartbeat"})
+                if ticks % 12 == 0:  # cloud playback stays at 6s
                     playback = await build_playback_state(device_manager)
                     payload = json.dumps(playback, ensure_ascii=False)
                     if payload != playback_json:
@@ -66,7 +79,7 @@ def install(bridge, device_manager, access_manager: AccessManager | None = None)
                         json.dumps({"type": "config", "revision": config_revision})
                     )
                 ticks += 1
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.5)
         except WebSocketDisconnect:
             pass
         except asyncio.CancelledError:

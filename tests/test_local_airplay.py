@@ -40,3 +40,36 @@ async def test_reconcile_keeps_unchanged_receiver_running():
     assert first.started == 1
     assert provider.receivers["kitchen"].status == "running"
     await provider.stop()
+
+
+@pytest.mark.asyncio
+async def test_queued_callbacks_cannot_revive_replaced_session_or_receiver():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from micast.playback_sessions import PlaybackSessions
+
+    provider = LocalAirPlayProvider(FakeServer, FakeZeroconf)
+    provider.sessions = PlaybackSessions(lambda: 60)
+    started, stopped = AsyncMock(), AsyncMock()
+    await provider.start([("living", "客厅")], "localhost", started, stopped)
+    server = provider.receivers["living"].server
+    old = provider.sessions.begin("living", "airplay", "old")
+    server.on_play_start(token=old.token)
+    server.on_play_stop(token=old.token)
+    provider.sessions.begin("living", "airplay", "new")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    started.assert_not_awaited()
+    stopped.assert_not_awaited()
+    current = provider.sessions.current("living")
+    server.on_play_start(token=current.token)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    started.assert_awaited_once_with("living", False)
+    server.on_play_start(token=current.token)
+    await provider.start([("living", "改名")], "localhost", started, stopped)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert started.await_count == 1
+    await provider.stop()

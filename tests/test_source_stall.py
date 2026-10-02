@@ -2,12 +2,9 @@
 
 import asyncio
 import time
-from unittest.mock import AsyncMock
 
 import pytest
 
-import micast.audio_bridge as bridge_module
-from micast.audio_bridge import AudioBridge
 from micast.pcm_source import PCMSource
 from micast.speaker_pipeline import SpeakerPipeline
 from micast.stream_server import StreamServer
@@ -40,36 +37,6 @@ class NeverFeedsSource(StarvingSource):
         return self._reader
 
 
-@pytest.mark.asyncio
-async def test_bridge_coalesces_stalled_source_recovery(monkeypatch):
-    """A second stall on the same entry while its rebuild is still running must
-    not start a second rebuild: the re-entry latch coalesces them.
-
-    Recovery is scoped to the entry that owns the stream, so the fixture maps
-    both stream ids of that entry onto it (a stream NO entry owns is left
-    alone on purpose — see test_unattributable_stall_leaves_running_sessions_alone).
-    """
-    bridge = AudioBridge()
-    monkeypatch.setattr(
-        type(bridge_module.settings), "entry_id_of_stream", lambda self, stream_id: "r1"
-    )
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def rebuild(entry_id):
-        assert entry_id == "r1"
-        entered.set()
-        await release.wait()
-
-    bridge.rebuild_entry = AsyncMock(side_effect=rebuild)
-
-    first = asyncio.create_task(bridge._recover_stalled_source("r1"))
-    await entered.wait()
-    await bridge._recover_stalled_source("r1-q1")
-    release.set()
-    await first
-
-    assert bridge.rebuild_entry.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -86,36 +53,6 @@ async def test_session_start_resets_idle_time_and_first_audio_disarms_watchdog()
     assert pipeline._stall_armed is False
 
 
-@pytest.mark.asyncio
-async def test_airplay2_stall_rebuilds_only_entry_without_stopping_speaker(monkeypatch):
-    from micast.config import AirPlay2InstanceConfig, settings
-
-    monkeypatch.setattr(settings, "airplay2_enabled", True)
-    monkeypatch.setattr(
-        settings,
-        "airplay2_instances",
-        [
-            AirPlay2InstanceConfig(
-                id="airplay2", name="MiCast", target_type="speaker", target_id="did", enabled=True
-            )
-        ],
-    )
-    bridge = AudioBridge()
-    speaker_stop = AsyncMock()
-    bridge.on_session_stop = speaker_stop
-
-    async def rebuild(affected):
-        assert affected == {"airplay2"}
-        await bridge.session_stop("airplay2")
-
-    bridge._rebuild_airplay2_instances = AsyncMock(side_effect=rebuild)
-    bridge.restart = AsyncMock()
-
-    await bridge._recover_stalled_source("airplay2")
-
-    bridge._rebuild_airplay2_instances.assert_awaited_once_with({"airplay2"})
-    bridge.restart.assert_not_awaited()
-    speaker_stop.assert_not_awaited()
 
 
 def _pipeline(source: PCMSource, session_active) -> SpeakerPipeline:

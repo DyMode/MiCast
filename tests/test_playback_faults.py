@@ -34,7 +34,7 @@ async def _run_one_retry_pass(dm, monkeypatch) -> list:
     """Drive _error_retry_loop through exactly one scan of the entries."""
     plays = []
 
-    async def fake_play(device_id, replay_url, owner=None, force=False, audio_id=None):
+    async def fake_play(device_id, replay_url, owner=None, force=False, audio_id=None, steal=True):
         plays.append((device_id, replay_url, owner, force))
         return True
 

@@ -157,6 +157,35 @@ async def test_prebuffer_eof_returns_none():
     assert await AirPlayTargetManager._prebuffer(reader, 1000) is None
 
 
+async def test_short_finite_clip_survives_a_longer_output_delay():
+    reader = asyncio.StreamReader()
+    pcm = b"\x00\x10\x00\x10" * 441
+    reader.feed_data(pcm)
+    reader.feed_eof()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert await AirPlayTargetManager._prebuffer(reader, 40) == pcm
+    assert loop.time() - started >= 0.035
+
+
+async def test_external_airplay_loudness_tracks_source_level(monkeypatch):
+    from micast.airplay_targets import _Hub, _TargetRuntime
+    from micast.config import SpeakerConfig, settings
+
+    monkeypatch.setattr(
+        settings, "speakers", [SpeakerConfig(did="airplay:a", loudness_comp_enabled=True)]
+    )
+    manager = AirPlayTargetManager(None)
+    hub = _Hub(asyncio.StreamReader())
+    runtime = _TargetRuntime("a", "a")
+    hub.targets["a"] = runtime
+    manager._hubs["r"] = hub
+    manager.set_loudness_level("r", 100)
+    high = runtime.audio_filter
+    manager.set_loudness_level("r", 25)
+    assert runtime.audio_filter and runtime.audio_filter != high
+
+
 @pytest.mark.asyncio
 async def test_play_error_retry_loop(monkeypatch):
     manager = DeviceManager.__new__(DeviceManager)
@@ -168,7 +197,7 @@ async def test_play_error_retry_loop(monkeypatch):
     monkeypatch.setattr("micast.xiaomi.device_manager.PLAY_ERROR_RETRY_SECONDS", 0.01)
     attempts: list[tuple[str, str]] = []
 
-    async def fake_play_stream(did, url, owner=None, force=False):
+    async def fake_play_stream(did, url, owner=None, force=False, steal=True):
         attempts.append((did, url))
         if len(attempts) < 2:
             raise RuntimeError("offline")
@@ -203,7 +232,7 @@ async def test_play_error_retry_loop_gives_up_after_cap(monkeypatch):
     monkeypatch.setattr("micast.xiaomi.device_manager.PLAY_ERROR_MAX_ATTEMPTS", 3)
     attempts: list[str] = []
 
-    async def failing_play_stream(did, url, owner=None, force=False):
+    async def failing_play_stream(did, url, owner=None, force=False, steal=True):
         attempts.append(did)
         raise RuntimeError("gone")
 

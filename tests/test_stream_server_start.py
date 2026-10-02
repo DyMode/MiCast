@@ -25,7 +25,7 @@ class _FailingServer:
         self.started = False
         self.should_exit = False
 
-    async def serve(self):
+    async def serve(self, sockets=None):
         raise SystemExit(1)
 
 
@@ -48,8 +48,8 @@ async def test_start_failure_cleans_task_and_server_state(monkeypatch):
 
     assert server._task is None
     assert server._server is None
-    # All five bind attempts ran; a later start() must be able to retry clean.
-    assert _FailingServer.constructions == 5
+    # Binding is reserved before serve; process startup failure must clean up.
+    assert _FailingServer.constructions == 1
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_start_with_cancelled_serve_task_reports_cleanly(monkeypatch):
             self.started = False
             self.should_exit = False
 
-        async def serve(self):
+        async def serve(self, sockets=None):
             await asyncio.Event().wait()
 
     server = StreamServer()

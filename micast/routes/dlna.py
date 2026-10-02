@@ -7,15 +7,18 @@ from html import escape
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
+from starlette.background import BackgroundTask
 
 from micast.dlna import (
     AV_TRANSPORT,
     CONNECTION_MANAGER,
+    DLNA_SINK_PROTOCOLS,
     MEDIA_RENDERER,
     RENDERING_CONTROL,
     DlnaService,
     xml_value,
 )
+from micast.dlna_events import SubscriptionError
 
 router = APIRouter(prefix="/dlna", tags=["dlna"])
 logger = logging.getLogger(__name__)
@@ -58,11 +61,21 @@ def install(service: DlnaService) -> APIRouter:
     @router.post("/{receiver_id}/{service_name}/control")
     async def control(receiver_id: str, service_name: str, request: Request):
         _receiver(service, receiver_id)
-        body = await request.body()
+        # Keep an unauthenticated protocol request from allocating unlimited
+        # metadata before XML parsing or session creation.
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 1024 * 1024:
+                raise HTTPException(status_code=413, detail="DLNA control body too large")
+            body.extend(chunk)
+        body = bytes(body)
         soap_action = request.headers.get("soapaction", "").strip('"').rsplit("#", 1)[-1]
         logger.info("DLNA %s: %s#%s", receiver_id, service_name, soap_action)
         try:
-            values = await _dispatch(service, receiver_id, service_name, soap_action, body)
+            values = await _dispatch(
+                service, receiver_id, service_name, soap_action, body,
+                play_advances_next=request.headers.get("x-micast-play-next") == "1",
+            )
         except ValueError as exc:
             logger.warning("DLNA %s action failed: %s", receiver_id, exc)
             return _soap_fault(701, str(exc))
@@ -78,13 +91,32 @@ def install(service: DlnaService) -> APIRouter:
 
     @router.api_route(
         "/{receiver_id}/{service_name}/event",
-        methods=["SUBSCRIBE", "UNSUBSCRIBE"],
+        methods=["SUBSCRIBE"],
         operation_id="dlna_event_subscription",
+    )
+    @router.api_route(
+        "/{receiver_id}/{service_name}/event", methods=["UNSUBSCRIBE"],
+        operation_id="dlna_event_unsubscription",
     )
     async def event_subscription(receiver_id: str, service_name: str, request: Request):
         _receiver(service, receiver_id)
-        sid = request.headers.get("sid") or f"uuid:{service.uuid_for(receiver_id)}-{service_name}"
-        return Response(status_code=200, headers={"SID": sid, "TIMEOUT": "Second-1800"})
+        try:
+            if request.method == "UNSUBSCRIBE":
+                await service.events.unsubscribe(
+                    receiver_id, service_name, request.headers,
+                    peer=request.client.host if request.client else None,
+                )
+                return Response(status_code=200)
+            subscription, seconds = await service.events.subscribe_from_peer(
+                receiver_id, service_name, request.headers,
+                request.client.host if request.client else None,
+            )
+        except SubscriptionError as exc:
+            return Response(status_code=exc.status)
+        return Response(
+            status_code=200, headers={"SID": subscription.sid, "TIMEOUT": f"Second-{seconds}"},
+            background=BackgroundTask(service.events.start, subscription),
+        )
 
     return router
 
@@ -97,7 +129,8 @@ def _receiver(service: DlnaService, receiver_id: str):
 
 
 async def _dispatch(
-    service: DlnaService, receiver_id: str, service_name: str, action: str, body: bytes
+    service: DlnaService, receiver_id: str, service_name: str, action: str, body: bytes,
+    *, play_advances_next: bool = False,
 ) -> dict[str, str | int]:
     state = service.state_for(receiver_id)
     if service_name == "AVTransport":
@@ -116,7 +149,10 @@ async def _dispatch(
             )
             return {}
         if action == "Play":
-            await service.play(receiver_id)
+            await service.play(receiver_id, advance_next=play_advances_next)
+            return {}
+        if action == "Next":
+            await service.next_track(receiver_id)
             return {}
         if action == "Pause":
             await service.pause(receiver_id)
@@ -133,24 +169,28 @@ async def _dispatch(
         if action == "GetTransportInfo":
             return {
                 "CurrentTransportState": state.state,
-                "CurrentTransportStatus": "OK",
+                "CurrentTransportStatus": "ERROR_OCCURRED" if state.error else "OK",
                 "CurrentSpeed": "1",
             }
         if action == "GetPositionInfo":
+            seconds = (
+                int(service.media.position(receiver_id) or 0) if service.media is not None else 0
+            )
+            position = f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
             return {
                 "Track": 1,
-                "TrackDuration": "00:00:00",
+                "TrackDuration": service.duration_time(receiver_id),
                 "TrackMetaData": state.metadata,
                 "TrackURI": state.uri,
-                "RelTime": "00:00:00",
-                "AbsTime": "00:00:00",
+                "RelTime": position,
+                "AbsTime": position,
                 "RelCount": 0,
                 "AbsCount": 0,
             }
         if action == "GetMediaInfo":
             return {
                 "NrTracks": 1,
-                "MediaDuration": "00:00:00",
+                "MediaDuration": service.duration_time(receiver_id),
                 "CurrentURI": state.uri,
                 "CurrentURIMetaData": state.metadata,
                 "NextURI": state.next_uri,
@@ -174,18 +214,9 @@ async def _dispatch(
             return {"CurrentMute": int(state.muted)}
     elif service_name == "ConnectionManager":
         if action == "GetProtocolInfo":
-            sink = ",".join(
-                [
-                    "http-get:*:audio/mpeg:*",
-                    "http-get:*:audio/mp4:*",
-                    "http-get:*:audio/aac:*",
-                    "http-get:*:audio/flac:*",
-                    "http-get:*:audio/wav:*",
-                ]
-            )
             return {
                 "Source": "",
-                "Sink": sink,
+                "Sink": DLNA_SINK_PROTOCOLS,
             }
         if action == "GetCurrentConnectionIDs":
             return {"ConnectionIDs": "0"}
@@ -230,6 +261,8 @@ def _service_xml(service_type: str, service_name: str, base: str) -> str:
 
 def _scpd(service_name: str) -> str:
     action_specs, state_variables = _scpd_spec(service_name)
+    if service_name in {"AVTransport", "RenderingControl"}:
+        state_variables = [*state_variables, _state_variable("LastChange", "string", evented=True)]
     action_xml = "".join(_action_xml(name, arguments) for name, arguments in action_specs)
     state_xml = "".join(state_variables)
     return f"""<?xml version="1.0"?><scpd xmlns="urn:schemas-upnp-org:service-1-0">
@@ -246,7 +279,9 @@ def _action_xml(name: str, arguments: list[tuple[str, str, str]]) -> str:
     return f"<action><name>{name}</name><argumentList>{argument_xml}</argumentList></action>"
 
 
-def _state_variable(name: str, data_type: str, allowed: tuple[str, ...] = ()) -> str:
+def _state_variable(
+    name: str, data_type: str, allowed: tuple[str, ...] = (), *, evented=False
+) -> str:
     allowed_xml = ""
     if allowed:
         allowed_xml = (
@@ -255,7 +290,7 @@ def _state_variable(name: str, data_type: str, allowed: tuple[str, ...] = ()) ->
             + "</allowedValueList>"
         )
     return (
-        f'<stateVariable sendEvents="no"><name>{name}</name>'
+        f'<stateVariable sendEvents="{"yes" if evented else "no"}"><name>{name}</name>'
         f"<dataType>{data_type}</dataType>{allowed_xml}</stateVariable>"
     )
 
@@ -284,6 +319,7 @@ def _scpd_spec(
                 ],
             ),
             ("Play", [instance, ("Speed", "in", "TransportPlaySpeed")]),
+            ("Next", [instance]),
             ("Pause", [instance]),
             ("Stop", [instance]),
             (
@@ -397,9 +433,9 @@ def _scpd_spec(
             ),
         ]
         return actions, [
-            _state_variable("SourceProtocolInfo", "string"),
-            _state_variable("SinkProtocolInfo", "string"),
-            _state_variable("CurrentConnectionIDs", "string"),
+            _state_variable("SourceProtocolInfo", "string", evented=True),
+            _state_variable("SinkProtocolInfo", "string", evented=True),
+            _state_variable("CurrentConnectionIDs", "string", evented=True),
             _state_variable("A_ARG_TYPE_ConnectionID", "i4"),
             _state_variable("A_ARG_TYPE_RcsID", "i4"),
             _state_variable("A_ARG_TYPE_AVTransportID", "i4"),

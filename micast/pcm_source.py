@@ -7,6 +7,7 @@ import re
 import struct
 import sys
 from abc import ABC, abstractmethod
+from collections import deque
 from contextlib import suppress
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ FRAME_SIZE = SAMPLE_WIDTH * CHANNELS
 
 
 def _parse_pcm_source(source: str) -> tuple[str, dict[str, str]]:
-    """Parse a source string like 'tcp:192.168.0.12:9001' or 'local:shairport-sync'."""
+    """Parse a source string like 'tcp:192.168.0.12:42800' or 'local:shairport-sync'."""
     if source == "mock":
         return "mock", {}
 
@@ -52,6 +53,12 @@ def _parse_pcm_source(source: str) -> tuple[str, dict[str, str]]:
 
 class PCMSource(ABC):
     """Abstract PCM source returning an asyncio StreamReader."""
+
+    @property
+    def pcm_format(self):
+        from micast.pcm_format import PCMFormat
+
+        return PCMFormat(48000)
 
     @abstractmethod
     async def start(self) -> asyncio.StreamReader:
@@ -116,12 +123,16 @@ class LocalPCMSource(PCMSource):
     """Spawn a local process that outputs PCM on stdout."""
 
     def __init__(self, command: str, env: dict[str, str] | None = None):
+        import uuid
+
         self.command = command
         # Extra environment for the child (e.g. MICAST_AIRPLAY2_PORT for the
         # bundled shairport launcher); merged over the inherited environment.
-        self.env = env or {}
+        self.epoch = uuid.uuid4().hex
+        self.env = {**(env or {}), "MICAST_RECEIVER_EPOCH": self.epoch}
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._stderr_tail = deque(maxlen=16)
 
     @property
     def alive(self) -> bool:
@@ -133,7 +144,25 @@ class LocalPCMSource(PCMSource):
         return self._process is not None and self._process.returncode is None
 
     async def start(self) -> asyncio.StreamReader:
+        try:
+            return await self._start()
+        except BaseException:
+            await self.stop()
+            raise
+
+    async def _start(self) -> asyncio.StreamReader:
         args = self.command.split()
+        from pathlib import Path
+
+        if args and Path(args[0]).name == "run-shairport":
+            launcher = Path(args[0])
+            if not launcher.is_file():
+                raise RuntimeError("AirPlay 2 启动脚本缺失，请重新安装修复版")
+            if launcher.read_bytes().split(b"\n", 1)[0] != b"#!/bin/sh":
+                raise RuntimeError("AirPlay 2 启动脚本格式错误，请重新安装修复版（需要 LF 换行）")
+        ready_path = self.env.get("MICAST_AIRPLAY2_READY_FILE")
+        if ready_path:
+            Path(ready_path).unlink(missing_ok=True)
         env = None
         if self.env:
             import os  # noqa: PLC0415 — only needed on the spawn path
@@ -148,29 +177,39 @@ class LocalPCMSource(PCMSource):
         )
         if self._process.stdout is None:
             raise RuntimeError("Subprocess stdout is not a pipe")
+        self._stderr_tail.clear()
+        if self._process.stderr is not None:
+            self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
         # A local receiver can fail immediately (missing runtime library,
         # unavailable mDNS service, invalid config). Surface that failure
         # instead of marking the pipeline as running with an already-dead
         # process.
-        await asyncio.sleep(0.25)
+        if ready_path:
+            # One fixed-port startup, including interpreter and child cleanup.
+            deadline = asyncio.get_running_loop().time() + 30
+            while self._process.returncode is None and not Path(ready_path).exists():
+                if asyncio.get_running_loop().time() >= deadline:
+                    await self.stop()
+                    raise RuntimeError("AirPlay 2 接收端口或时钟服务未就绪")
+                await asyncio.sleep(0.1)
+        else:
+            await asyncio.sleep(0.25)
         if self._process.returncode is not None:
-            stderr = b""
-            if self._process.stderr is not None:
-                stderr = await self._process.stderr.read()
-            detail = stderr.decode(errors="replace").strip()[-2000:]
+            if self._stderr_task:
+                await self._stderr_task
+            detail = b"".join(self._stderr_tail).decode(errors="replace").strip()[-2000:]
             raise RuntimeError(
                 f"Local PCM source exited with code {self._process.returncode}"
                 + (f": {detail}" if detail else "")
             )
-        if self._process.stderr is not None:
-            self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
         logger.info("Started local PCM source: %s (pid %s)", self.command, self._process.pid)
         return self._process.stdout
 
     async def _drain_stderr(self, reader: asyncio.StreamReader) -> None:
         """Keep chatty receiver processes from blocking on a full stderr pipe."""
         try:
-            while line := await reader.readline():
+            while line := await reader.read(4096):
+                self._stderr_tail.append(line)
                 logger.debug("PCM source: %s", line.decode(errors="replace").rstrip())
         except asyncio.CancelledError:
             pass
@@ -179,7 +218,10 @@ class LocalPCMSource(PCMSource):
         if self._process and self._process.returncode is None:
             self._process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=3)
+                # The bundled supervisor may need two child shutdowns and a
+                # stderr-reader join. Do not kill it before it cleans them up.
+                timeout = 8 if self.env.get("MICAST_AIRPLAY2_READY_FILE") else 3
+                await asyncio.wait_for(self._process.wait(), timeout=timeout)
             except TimeoutError:
                 self._process.kill()
                 await self._process.wait()
@@ -231,8 +273,15 @@ class TCPPCMSource(PCMSource):
 class ReaderPCMSource(PCMSource):
     """Wrap an existing StreamReader so an external process can feed it."""
 
-    def __init__(self, reader: asyncio.StreamReader):
+    def __init__(self, reader: asyncio.StreamReader, sample_rate: int = 44100):
         self._reader = reader
+        self.sample_rate = sample_rate
+
+    @property
+    def pcm_format(self):
+        from micast.pcm_format import PCMFormat
+
+        return PCMFormat(self.sample_rate)
 
     async def start(self) -> asyncio.StreamReader:
         return self._reader

@@ -20,14 +20,16 @@ from pathlib import Path
 from micast.audio_bridge import AudioBridge
 from micast.config import settings
 from micast.lyrics import LyricsSession
+from micast.playback_sessions import OUTPUT_GRACE_SECONDS, PlaybackSessions
 from micast.test_tone import silent_probe_wav
+from micast.track_metadata import TrackMetadataRegistry
 from micast.xiaomi.device_manager import CODEC_PULL_MIN_BYTES, DeviceManager
 
 logger = logging.getLogger(__name__)
 
 # Grace period before a torn-down AirPlay session pauses its speakers;
 # reconnects within this window are transparent to the speakers.
-SESSION_STOP_GRACE_SECONDS = 3.0
+SESSION_STOP_GRACE_SECONDS = OUTPUT_GRACE_SECONDS
 
 # Upper bound for hook awaits that issue cloud commands while the bridge
 # holds its restart lock — a hanging cloud call must not wedge every later
@@ -60,11 +62,19 @@ class PlaybackOrchestrator:
         bridge: AudioBridge,
         device_manager: DeviceManager,
         start_background: Callable[[Awaitable, str], asyncio.Task],
+        track_metadata: TrackMetadataRegistry | None = None,
     ):
         self.bridge = bridge
+        if not isinstance(getattr(bridge, "sessions", None), PlaybackSessions):
+            bridge.sessions = PlaybackSessions(lambda: settings.stale_session_timeout)
         self.device_manager = device_manager
         self._start_background = start_background
-        self._pending_stops: dict[str, asyncio.Task] = {}
+        # Session-scoped now-playing enrichment (library cover/duration). A
+        # private instance keeps legacy direct constructions working; main.py
+        # injects the shared registry the cover endpoint reads.
+        self._track_metadata = (
+            track_metadata if track_metadata is not None else TrackMetadataRegistry()
+        )
         self._pending_group_recoveries: dict[str, asyncio.Task] = {}
         self._auto_probe_task: asyncio.Task | None = None
         self._auto_probe_at: dict[str, float] = {}
@@ -76,6 +86,7 @@ class PlaybackOrchestrator:
         # cloud play in that case only makes the Xiaomi player reload the URL.
         self._started_sessions: set[str] = set()
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._output_locks: dict[str, asyncio.Lock] = {}
 
     def attach(self) -> None:
         """Install every bridge/device-manager hook this orchestrator serves."""
@@ -93,6 +104,7 @@ class PlaybackOrchestrator:
 
     async def stop_all(self) -> None:
         """Tear down lyrics sessions (lifespan shutdown)."""
+        await self.bridge.sessions.close_all()
         probe = self._auto_probe_task
         if probe is not None and not probe.done():
             probe.cancel()
@@ -101,11 +113,23 @@ class PlaybackOrchestrator:
             return_exceptions=True,
         )
         self._lyrics_sessions.clear()
+        self._track_metadata.clear()
 
-    async def resend_with_audio_id(self, receiver_id: str, audio_id: str) -> None:
-        """Re-issue play with a library audioID so touch-screen speakers swap
-        the default cover for real cover art + scrolling lyrics."""
+    async def resend_with_match(self, receiver_id: str, hit: dict) -> None:
+        """Re-issue play with a library match: speakers swap the default cover
+        for real cover art + scrolling lyrics, and the now-playing registry
+        gains the cover URL/duration for the web player."""
+        audio_id = str(hit.get("audio_id") or "")
+        if not audio_id:
+            return
         self.bridge.lyrics_matched[receiver_id] = audio_id
+        self._track_metadata.set_library_match(
+            receiver_id,
+            audio_id=audio_id,
+            cover_url=str(hit.get("cover_url") or ""),
+            duration=hit.get("duration"),
+            updated_at=time.time(),
+        )
         for did in self.device_manager.playing_ids():
             if self.device_manager.owner_of(did) != receiver_id:
                 continue
@@ -128,7 +152,7 @@ class PlaybackOrchestrator:
             receiver_id,
             server,
             self.device_manager,
-            lambda audio_id: self.resend_with_audio_id(receiver_id, audio_id),
+            lambda hit: self.resend_with_match(receiver_id, hit),
         )
         self._lyrics_sessions[receiver_id] = session
         session.start()
@@ -146,11 +170,22 @@ class PlaybackOrchestrator:
                 logger.debug("默认音量设置失败 %s", did, exc_info=True)
 
     async def play_receiver(self, receiver_id: str, url: str, steal: bool = True):
+        lock = self._output_locks.setdefault(receiver_id, asyncio.Lock())
+        async with lock:
+            await self._play_receiver_locked(receiver_id, url, steal)
+
+    async def _play_receiver_locked(self, receiver_id: str, url: str, steal: bool = True):
         # Any playback (re)start cancels a pending stop from a recent teardown:
         # the stream outlives individual sessions, so quick reconnects are free.
-        pending = self._pending_stops.pop(receiver_id, None)
-        if pending:
-            pending.cancel()
+        protocol = (
+            self.bridge._session_protocol(receiver_id)
+            if hasattr(self.bridge, "_session_protocol") else "airplay"
+        )
+        lease = self.bridge.sessions.begin(receiver_id, protocol)
+        self.bridge.sessions.register(
+            lease.token, "receiver-output",
+            lambda: self._release_receiver_output(receiver_id, lease.token),
+        )
         targets = settings.receiver_targets(receiver_id)
         if not targets:
             logger.warning("Receiver %s has no playback target", receiver_id)
@@ -309,10 +344,8 @@ class PlaybackOrchestrator:
     def _stream_active_for(self, device_id: str) -> bool:
         """Watchdog ground truth: is the speaker really pulling its stream right
         now? The cloud reports "playing" even when the speaker fetches nothing."""
-        # Imported here to avoid a hard cycle: main imports this module.
-        from micast.main import _stream_active_for
-
-        return _stream_active_for(device_id)
+        checker = getattr(self.device_manager, "stream_active", None)
+        return checker(device_id) if checker else True
 
     # ---- background format detection -------------------------------------
 
@@ -477,46 +510,43 @@ class PlaybackOrchestrator:
             if lyrics:
                 await lyrics.stop()
             self.bridge.lyrics_matched.pop(receiver_id, None)
+            self._track_metadata.drop(receiver_id)
 
-        async def delayed_stop():
-            try:
-                await asyncio.sleep(SESSION_STOP_GRACE_SECONDS)
-                results = await asyncio.gather(
-                    *(
-                        self.device_manager.stop_playback(did, owner=receiver_id)
-                        for did in settings.receiver_targets(receiver_id)
-                    ),
-                    return_exceptions=True,
-                )
-                for did, result in zip(
-                    settings.receiver_targets(receiver_id), results, strict=True
-                ):
-                    if isinstance(result, Exception):
-                        logger.warning("Speaker %s cleanup failed: %s", did, result)
-                # Give paused speakers a clean EOF: otherwise they hold the
-                # HTTP connection open forever, silently waiting for data.
-                self.bridge.drop_stream_clients(receiver_id)
-                # External AirPlay targets get the same grace as the speakers:
-                # a reconnect within the window never tore them down.
-                await self.bridge.stop_airplay_targets(receiver_id)
-                await self.bridge.stop_dlna_targets(receiver_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Receiver cleanup failed for %s", receiver_id)
-            finally:
-                if self._pending_stops.get(receiver_id) is asyncio.current_task():
-                    self._pending_stops.pop(receiver_id, None)
-
-        pending = self._pending_stops.pop(receiver_id, None)
-        if pending:
-            pending.cancel()
-        self._pending_stops[receiver_id] = self._start_background(
-            delayed_stop(), f"delayed-stop:{receiver_id}"
-        )
+        lease = self.bridge.sessions.current(receiver_id)
+        if lease:
+            self.bridge.sessions.quiet(lease.token, grace=SESSION_STOP_GRACE_SECONDS)
         # The speakers are about to be free: a good moment to learn what formats
         # they accept, without a single sound leaving them (silent fixtures).
         self.schedule_codec_probe()
+
+    async def _release_receiver_output(self, receiver_id, token):
+        lock = self._output_locks.setdefault(receiver_id, asyncio.Lock())
+        async with lock:
+            await self._release_receiver_output_locked(receiver_id, token)
+
+    async def _release_receiver_output_locked(self, receiver_id, token):
+        lease = self.bridge.sessions.current(receiver_id)
+        if lease is not None and lease.token != token:
+            return  # an old generation cannot tear down the replacement's outputs
+        self.bridge.drop_stream_clients(receiver_id)
+        speaker_cleanup = []
+        if getattr(self.device_manager, "sessions", None) is not self.bridge.sessions:
+            speaker_cleanup = [
+                self.device_manager.stop_playback(did, owner=receiver_id)
+                for did in settings.receiver_targets(receiver_id)
+            ]
+        await asyncio.gather(
+            *speaker_cleanup,
+        )
+        # Covers source-idle transitions detected without a protocol stop callback.
+        self._started_sessions.discard(receiver_id)
+        self.bridge._sender_volumes.pop(receiver_id, None)
+        self.bridge._volume_modes.pop(receiver_id, None)
+        lyrics = self._lyrics_sessions.pop(receiver_id, None)
+        if lyrics:
+            await lyrics.stop()
+        self.bridge.lyrics_matched.pop(receiver_id, None)
+        self._track_metadata.drop(receiver_id)
 
     async def reconcile_group(self, group_id: str, removed_dids: list[str]):
         """Live membership edit on a group: stop the removed speakers and
@@ -635,7 +665,9 @@ class PlaybackOrchestrator:
                 self._pending_group_recoveries.pop(receiver_id, None)
 
         self._pending_group_recoveries[receiver_id] = self._start_background(
-            recover(), f"group-recovery:{receiver_id}"
+            (self.bridge.recovery.run(receiver_id, "group", recover)
+             if getattr(self.bridge, "recovery", None) else recover()),
+            f"group-recovery:{receiver_id}"
         )
 
     async def on_receiver_volume(self, receiver_id: str, percent: int):

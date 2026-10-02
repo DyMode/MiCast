@@ -25,6 +25,9 @@ def test_track_meta_plain():
     assert meta["title"] == "告白气球"
     assert meta["artist"] == "周杰伦"
     assert meta["derived"] == ""
+    # Only scrolling-lyrics senders expose a lyric line; plain senders must
+    # not put the artist there.
+    assert "lyric_line" not in meta
 
 
 def test_track_meta_strips_artist_suffix():
@@ -58,9 +61,27 @@ def test_track_meta_lyric_line_in_artist_recovers_from_title():
     meta = track_meta(_dmap({"minm": "共您别离 - 张国荣", "asar": "人在这一刻分开 再不要对对相相"}))
     assert meta["title"] == "共您别离"
     assert meta["artist"] == "张国荣"
+    # The raw line feeds the player's lyric display.
+    assert meta["lyric_line"] == "人在这一刻分开 再不要对对相相"
 
 
 def test_track_meta_lyric_with_punctuation_in_artist():
     meta = track_meta(_dmap({"minm": "风继续吹 - 张国荣", "asar": "过去多少，快乐记忆"}))
     assert meta["title"] == "风继续吹"
     assert meta["artist"] == "张国荣"
+    assert meta["lyric_line"] == "过去多少，快乐记忆"
+
+
+def test_short_lyric_is_not_promoted_to_artist():
+    meta = track_meta(_dmap({"minm": "Demo - Singer", "asar": "short line"}))
+    assert meta["title"] == "Demo"
+    assert meta["artist"] == "Singer"
+    assert meta["lyric_line"] == "short line"
+
+
+def test_title_channel_lyrics_keep_stable_song_identity():
+    first = track_meta(_dmap({"minm": "first line", "asar": "Demo · Singer"}))
+    second = track_meta(_dmap({"minm": "next line", "asar": "Demo · Singer"}))
+    assert first["title"] == second["title"] == "Demo"
+    assert first["artist"] == second["artist"] == "Singer"
+    assert second["lyric_line"] == "next line"

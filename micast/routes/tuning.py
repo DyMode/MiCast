@@ -61,11 +61,11 @@ def install(bridge: AudioBridge | None, device_manager: DeviceManager | None = N
             await bridge.apply_config_change(debounce=False)
 
     async def apply_audio_settled() -> None:
-        """EQ/audio commits debounce BEFORE the config transaction opens.
+        """Settle and apply while the caller holds the config transaction lock.
 
-        The 0.6s settle runs here, lock-free; the transaction then applies the
-        final state directly (debounce=False), so the process-wide config lock
-        is never held across the wait and rollback never re-sleeps.
+        This serializes revision checks, persistence and runtime rollback, but
+        also blocks other configuration commits during the settle window.
+        Moving the wait outside needs a separate concurrent-commit contract.
         """
         if bridge:
             # Test doubles may not implement the settle hook; real bridges do.

@@ -15,6 +15,7 @@ by the second.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import platform
@@ -26,7 +27,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from micast import __version__
-from micast.config import settings
+from micast.config import default_log_dir, settings
 from micast.runtime_log import (
     PREVIEW_LIMIT,
     LogQuery,
@@ -193,6 +194,27 @@ def _stamp(at: float | None) -> str:
     return datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def receiver_startup_logs() -> dict:
+    """Include bounded native startup evidence in the normal report download."""
+    result = {}
+    for name in ("airplay2-startup.json", "shairport-startup.log", "nqptp.log"):
+        path = default_log_dir() / name
+        if not path.exists():
+            path = settings.config_path.parent / name
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                handle.seek(max(0, size - 32768))
+                result[name] = {
+                    "text": handle.read(32768).decode("utf-8", errors="replace"),
+                    "truncated": size > 32768,
+                }
+        except OSError:
+            continue
+    return result
+
+
 async def build_report(
     bridge,
     device_manager,
@@ -222,5 +244,6 @@ async def build_report(
         },
         "settings": sanitize_obj(public_settings()),
         "state": sanitize_obj(await collect_state(bridge, device_manager)),
+        "receiver_startup": sanitize_obj(await asyncio.to_thread(receiver_startup_logs)),
         "logs": sanitize_obj(selection.records),
     }

@@ -6,16 +6,11 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 
-from micast.audio_encoder import AudioEncoder, firequalizer_available, raw_pcm_format, wav_header
+from micast.audio_encoder import AudioEncoder, raw_pcm_format, wav_header
 from micast.audio_metrics import ENCODER_STALL_MS, metrics
 from micast.config import settings
 from micast.curve_fit import (
-    add_curve,
-    equalizer_chain,
-    firequalizer_args,
-    gain_table,
     loudness_band,
-    loudness_curve,
 )
 from micast.pcm_source import PCMSource
 from micast.spectrum import SpectrumAnalyzer, spectrum_wanted
@@ -134,7 +129,14 @@ class SpeakerPipeline:
         self._pcm_source = pcm_source
         self._stream_server = stream_server
         self._on_session_start = on_session_start
-        self._input_sample_rate = input_sample_rate
+        # One source contract drives encoding, pacing, silence and spectrum.
+        # Local AirPlay 2 is 48 kHz; guessing 44.1 kHz here throttles its pipe.
+        source_format = getattr(pcm_source, "pcm_format", None)
+        self._input_sample_rate = (
+            input_sample_rate if input_sample_rate is not None
+            else source_format.sample_rate if source_format is not None
+            else 44100
+        )
         self._stream_id = stream_id or device_id
         self._group_id = group_id
         self._channel = channel
@@ -261,45 +263,18 @@ class SpeakerPipeline:
         return f"http://{settings.effective_stream_host}:{settings.stream_port}/stream/{self._stream_id}"
 
     def _build_audio_filter(self) -> list[tuple[str, str]] | None:
-        """Audio filter chain: per-speaker EQ curve first, then stereo shaping.
+        from micast.audio_dsp import build_audio_filter
 
-        Returns structured ``(filter_name, args)`` links consumed by
-        micast.audio_encoder._build_filter_graph. The drawn EQ curve renders
-        as one firequalizer gain table, or a multi-band equalizer chain when
-        the bundled libavfilter lacks firequalizer.
-        """
-        parts: list[tuple[str, str]] = []
-        # The effective curve is the drawn EQ plus the equal-loudness shelf; a
-        # loudness-only speaker (flat EQ) still gets a non-empty curve so it is
-        # encoded rather than bypassed raw.
-        curve = self._eq_curve
-        if self._loudness:
-            shelf = loudness_curve(self._loudness_level)
-            if shelf:
-                curve = add_curve(curve or [], shelf)
-        if curve:
-            table = gain_table(curve)
-            if firequalizer_available():
-                parts.append(("firequalizer", firequalizer_args(table)))
-            else:
-                for link in equalizer_chain(table):
-                    name, _, args = link.partition("=")
-                    parts.append((name, args))
         group = next((g for g in settings.groups if g.id == self._group_id), None)
         stereo = group is not None and group.mode == "stereo" and self._channel in ("left", "right")
-        if not stereo:
-            return parts or None
-        # Keep the stream stereo (duplicate the picked channel to both sides):
-        # byte-rate pacing and speaker decoders all assume two channels.
-        side = "FL" if self._channel == "left" else "FR"
-        parts.append(("pan", f"stereo|c0={side}|c1={side}"))
-        # Trims are configured per speaker; follow whoever holds this channel.
-        holder = self._channel_holder()
-        if holder:
-            gain = float(group.gains_db.get(holder, 0.0))
-            if gain:
-                parts.append(("volume", f"{gain}dB"))
-        return parts
+        holder = self._channel_holder() if stereo else None
+        return build_audio_filter(
+            self._eq_curve,
+            self._loudness,
+            self._loudness_level,
+            self._channel if stereo else None,
+            float(group.gains_db.get(holder, 0)) if group and holder else 0,
+        )
 
     def _channel_holder(self) -> str | None:
         """The speaker currently assigned to this pipeline's stereo channel."""
@@ -544,9 +519,7 @@ class SpeakerPipeline:
         ahead = self._input_ahead_ms / 1000.0
         if ahead <= INPUT_LEAD_SECONDS:
             return
-        await self._pace_sleep(
-            min(ahead - INPUT_LEAD_SECONDS, INPUT_MAX_SLEEP_SECONDS), loop
-        )
+        await self._pace_sleep(min(ahead - INPUT_LEAD_SECONDS, INPUT_MAX_SLEEP_SECONDS), loop)
 
     async def _pace_sleep(self, seconds: float, loop) -> None:
         """Hold the pump back by ``seconds`` so the source's lead stays banked.
@@ -594,9 +567,7 @@ class SpeakerPipeline:
                 if self._on_source_stall is not None:
                     # A ReaderPCMSource cannot repair its upstream RAOP/TCP
                     # producer by restarting around the same dead reader.
-                    self._spawn_aux(
-                        self._on_source_stall(self._stream_id), "source-stall-recovery"
-                    )
+                    self._spawn_aux(self._on_source_stall(self._stream_id), "source-stall-recovery")
                     return
                 await self._restart_source()
         except asyncio.CancelledError:
@@ -692,7 +663,9 @@ class SpeakerPipeline:
             metrics.note_source_stall(
                 (asyncio.get_running_loop().time() - call_started) * 1000, self._stream_id
             )
-        metrics.note_silence_fill()
+        # Stall padding is a SOURCE-side symptom (the source-stall event above
+        # carries it); it must not feed the speaker-side "跟不上取流" verdict.
+        metrics.note_silence_fill(windowed=False)
         return b"\x00" * SOURCE_SILENCE_CHUNK_BYTES, True
 
     async def _pump_source_to_encoder(self, reader: asyncio.StreamReader, writer) -> None:

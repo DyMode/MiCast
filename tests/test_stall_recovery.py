@@ -11,7 +11,7 @@ session_start logged "unknown receiver" and playback never came back.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -232,9 +232,9 @@ async def test_orchestrator_replays_after_maintenance_style_state_loss(monkeypat
         play_stream=AsyncMock(return_value=True),
         stop_playback=AsyncMock(),
         stop=AsyncMock(),
-        note_codec_capability=AsyncMock(),
-        note_play_error=AsyncMock(),
-        clear_play_error=AsyncMock(),
+        note_codec_capability=Mock(),
+        note_play_error=Mock(),
+        clear_play_error=Mock(),
         owner_of=lambda did: None,
         stream_url_of=lambda did: None,
         playing_ids=lambda: [],
@@ -258,3 +258,67 @@ async def test_orchestrator_replays_after_maintenance_style_state_loss(monkeypat
     for task in list(tasks):
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bridge_coalesces_stalled_source_recovery(monkeypatch):
+    """A second stall on the same entry while its rebuild is still running must
+    not start a second rebuild: the re-entry latch coalesces them.
+
+    Recovery is scoped to the entry that owns the stream, so the fixture maps
+    both stream ids of that entry onto it (a stream NO entry owns is left
+    alone on purpose — see test_unattributable_stall_leaves_running_sessions_alone).
+    """
+    bridge = AudioBridge()
+    monkeypatch.setattr(
+        type(bridge_module.settings), "entry_id_of_stream", lambda self, stream_id: "r1"
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def rebuild(entry_id):
+        assert entry_id == "r1"
+        entered.set()
+        await release.wait()
+
+    bridge.rebuild_entry = AsyncMock(side_effect=rebuild)
+
+    first = asyncio.create_task(bridge._recover_stalled_source("r1"))
+    await entered.wait()
+    await bridge._recover_stalled_source("r1-q1")
+    release.set()
+    await first
+
+    assert bridge.rebuild_entry.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_airplay2_stall_rebuilds_only_entry_without_stopping_speaker(monkeypatch):
+    from micast.config import AirPlay2InstanceConfig, settings
+
+    monkeypatch.setattr(settings, "airplay2_enabled", True)
+    monkeypatch.setattr(
+        settings,
+        "airplay2_instances",
+        [
+            AirPlay2InstanceConfig(
+                id="airplay2", name="MiCast", target_type="speaker", target_id="did", enabled=True
+            )
+        ],
+    )
+    bridge = AudioBridge()
+    speaker_stop = AsyncMock()
+    bridge.on_session_stop = speaker_stop
+
+    async def rebuild(affected):
+        assert affected == {"airplay2"}
+        await bridge.session_stop("airplay2")
+
+    bridge._rebuild_airplay2_instances = AsyncMock(side_effect=rebuild)
+    bridge.restart = AsyncMock()
+
+    await bridge._recover_stalled_source("airplay2")
+
+    bridge._rebuild_airplay2_instances.assert_awaited_once_with({"airplay2"})
+    bridge.restart.assert_not_awaited()
+    speaker_stop.assert_not_awaited()

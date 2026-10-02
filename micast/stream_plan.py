@@ -82,6 +82,17 @@ def entry_fingerprint(s: Settings, entry_id: str) -> EntryFingerprint | None:
         "audio": s.audio.model_dump(),
         "external_airplay": dict(sorted(s.receiver_airplay_delays(entry_id).items())),
         "external_dlna": sorted(s.receiver_dlna_targets(entry_id)),
+        "external_tuning": {
+            f"{kind}:{did}": (
+                s.speaker_eq_curve(f"{kind}:{did}"),
+                s.speaker_loudness(f"{kind}:{did}"),
+            )
+            for kind, ids in (
+                ("airplay", s.receiver_airplay_targets(entry_id)),
+                ("dlna", s.receiver_dlna_targets(entry_id)),
+            )
+            for did in ids
+        },
         "network_channels": dict(sorted(s.receiver_network_channels(entry_id).items())),
         "member_delays": (
             {did: group.delay_holds().get(did, 0) for did in sorted(group.speaker_ids)}
@@ -274,6 +285,7 @@ def diff_plans(old: PlanSnapshot | None, new: PlanSnapshot) -> PlanDiff:
         if (
             o["external_airplay"] != n["external_airplay"]
             or o["network_channels"] != n["network_channels"]
+            or o.get("external_tuning") != n.get("external_tuning")
         ):
             diff.external_airplay_changed.add(entry_id)
         if (

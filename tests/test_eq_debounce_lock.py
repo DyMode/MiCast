@@ -1,17 +1,4 @@
-"""EQ debounce lock-outer regression tests.
-
-The debounce wait and the plan diff in ``AudioBridge.apply_config_change`` were
-moved OUTSIDE ``_restart_lock`` (and therefore outside the config transaction
-lock that every tuning route holds across apply_runtime). These tests pin that
-behavior:
-
-* a burst of EQ edits coalesces into ONE encoder apply of the latest curve;
-* the debounce wait never holds ``_restart_lock`` — a concurrent task must be
-  able to take it while a drag is settling (the old in-lock sleep froze every
-  config/tuning route for the whole window);
-* the lock-free outer diff can go stale while the task waits for the lock —
-  the in-lock recompute must apply the FINAL settings, not the stale diff.
-"""
+"""EQ debounce, latest-state application and tuning transaction regressions."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -130,8 +117,7 @@ async def test_rapid_eq_burst_coalesces_into_one_latest_curve_apply(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_debounce_wait_does_not_hold_restart_lock(monkeypatch):
-    """Regression: the 0.6s EQ debounce used to sleep INSIDE ``_restart_lock``
-    (and inside the config transaction lock), freezing every config route.
+    """Regression: sleeping inside ``_restart_lock`` blocked bridge restarts.
     While a drag settles, another task must take the lock immediately."""
     s = _settings()
     s.set_speaker_eq_curve("a", enabled=True, points=[(100, 1)])
@@ -202,33 +188,53 @@ async def test_stale_lock_free_diff_is_recomputed_inside_lock(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_settle_wait_does_not_hold_config_transaction_lock(monkeypatch):
-    """wait_config_settled() runs BEFORE apply_config_transaction, so while it
-    sleeps the process-wide config lock must stay free for other routes (the
-    old in-transaction debounce froze every config/tuning route for the whole
-    drag window)."""
+async def test_tuning_transaction_releases_config_lock_after_cancelled_settle(monkeypatch):
+    """Exercise the route and rollback rather than an isolated settle hook.
+
+    The route currently settles inside the transaction. Cancellation must
+    release that lock and restore the curve without another debounce wait.
+    """
     from micast import config_apply
+    from micast.routes import tuning
 
     s = _settings()
+    s.set_speaker_eq_curve("a", enabled=True, points=[(100, 1)])
+    before = s.get_speaker("a").model_copy(deep=True)
     bridge = _bare_bridge(monkeypatch, s)
-    gate = _GatedSleep()
-    real_sleep = asyncio.sleep
-    monkeypatch.setattr("micast.audio_bridge.asyncio.sleep", gate)
+    bridge.apply_config_change = AsyncMock()
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
-    pending = asyncio.create_task(bridge.wait_config_settled())
-    while gate.entries < 1:
-        await real_sleep(0)
+    async def settle():
+        entered.set()
+        await release.wait()
 
-    async def take_config_lock() -> bool:
-        async with config_apply._lock:
-            return True
-
-    # Old behavior (sleep inside the transaction) would block here and the
-    # wait_for would expire.
-    assert await asyncio.wait_for(take_config_lock(), timeout=0.2) is True
-
-    gate.release.set()
-    await pending
+    bridge.wait_config_settled = settle
+    monkeypatch.setattr(tuning, "settings", s)
+    monkeypatch.setattr(config_apply, "settings", s)
+    monkeypatch.setattr(config_apply, "_lock", asyncio.Lock())
+    old_routes = list(tuning.router.routes)
+    pending = None
+    try:
+        router = tuning.install(bridge)
+        endpoint = [r.endpoint for r in router.routes if r.path == "/api/tuning/eq"][-1]
+        pending = asyncio.create_task(endpoint({
+            "did": "a", "enabled": True, "points": [[100, 7]],
+        }))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert config_apply._lock.locked()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pending, timeout=1)
+        assert not config_apply._lock.locked()
+        assert s.get_speaker("a").model_dump() == before.model_dump()
+        bridge.apply_config_change.assert_awaited_once_with(debounce=False)
+    finally:
+        release.set()
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        tuning.router.routes[:] = old_routes
 
 
 @pytest.mark.asyncio

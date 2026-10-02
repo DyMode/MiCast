@@ -48,21 +48,54 @@ def build_topology(bridge, device_manager) -> dict:
     diagnostics = bridge.diagnostics
     raop = diagnostics.get("raop", {})
     streams = diagnostics.get("streams", {})
+    sinks = diagnostics.get("sinks")
     airplay_targets = diagnostics.get("airplay_targets", {})
     dlna_targets = diagnostics.get("dlna_targets", {})
-    receiver_status = {item["did"]: item for item in bridge.status.get("receivers", [])}
+    snapshot = bridge.status
+    receiver_status = {item["did"]: item for item in snapshot.get("receivers", [])}
 
     nodes: list[dict] = []
     edges: list[dict] = []
     speaker_ids: list[str] = []
 
     receivers = [(receiver, "classic", None) for receiver in settings.active_receivers()]
-    airplay2_status = {item.get("id"): item for item in bridge.status.get("airplay2_instances", [])}
+    airplay2_status = {item.get("id"): item for item in snapshot.get("airplay2_instances", [])}
     receivers.extend(
         (instance, "airplay2", airplay2_status.get(instance.id, {}))
         for instance in settings.airplay2_instances
         if instance.enabled
     )
+    if settings.dlna_enabled:
+        for receiver in settings.active_receivers():
+            owner = f"dlna:{receiver.id}"
+            session = next(
+                (
+                    item
+                    for item in snapshot.get("runtime", {}).get("sessions", [])
+                    if item["owner"] == owner
+                ),
+                None,
+            )
+            if session is None and not any(
+                sid == owner or sid.startswith(owner + "-") for sid in streams
+            ):
+                nodes.append(
+                    {
+                        "id": f"src:{owner}",
+                        "kind": "source",
+                        "label": f"DLNA · {receiver.name}",
+                        "protocol": "DLNA",
+                        "active": False,
+                    }
+                )
+                continue
+            receivers.append(
+                (
+                    receiver.model_copy(update={"id": owner, "name": f"DLNA · {receiver.name}"}),
+                    "dlna",
+                    {"status": session["state"] if session else "idle"},
+                )
+            )
     for receiver, ingress, ingress_status in receivers:
         rid = receiver.id
         info = receiver_status.get(rid, {})
@@ -81,7 +114,7 @@ def build_topology(bridge, device_manager) -> dict:
         )
         sessions = (
             int(stream_active or target_active)
-            if ingress == "airplay2"
+            if ingress in ("airplay2", "dlna")
             else raop_info.get("active_sessions", 0)
         )
 
@@ -89,7 +122,7 @@ def build_topology(bridge, device_manager) -> dict:
             "id": f"src:{rid}",
             "kind": "source",
             "label": receiver.name,
-            "protocol": "AirPlay 2" if ingress == "airplay2" else "经典 AirPlay",
+            "protocol": {"airplay2": "AirPlay 2", "dlna": "DLNA"}.get(ingress, "经典 AirPlay"),
             "active": sessions > 0,
             "sessions": sessions,
         }
@@ -117,7 +150,7 @@ def build_topology(bridge, device_manager) -> dict:
             {
                 "from": f"src:{rid}",
                 "to": f"engine:{rid}",
-                "protocol": "AirPlay 2" if ingress == "airplay2" else "RAOP",
+                "protocol": {"airplay2": "AirPlay 2", "dlna": "媒体解码"}.get(ingress, "RAOP"),
                 "direction": "push",
                 "latency_ms": input_buffer_ms,
                 "segments": {"input_buffer_ms": input_buffer_ms},
@@ -176,7 +209,10 @@ def build_topology(bridge, device_manager) -> dict:
             for did in targets:
                 if settings.stream_suffix(rid, did) != variant["suffix"]:
                     continue
-                edges.append(_pull_edge(stream_id, did, stream_info, delays, group, receiver.name))
+                edges.append(_pull_edge(
+                    stream_id, did, _sink_stream_info(stream_info, sinks, rid, did),
+                    delays, group, receiver.name,
+                ))
 
         # External AirPlay devices attached to the group: MiCast pushes RAOP
         # to them straight from the engine (they pull nothing over HTTP).
@@ -231,47 +267,19 @@ def build_topology(bridge, device_manager) -> dict:
             )
             edges.append(
                 {
-                    "from": f"engine:{rid}",
+                    "from": f"stream:{rid}{settings.stream_suffix(rid, target_id)}",
                     "to": f"dlt:{target_id}",
-                    "protocol": "DLNA 投放",
-                    "direction": "push",
-                    "active": playing,
+                    "protocol": "HTTP",
+                    "direction": "pull",
+                    "active": bool(
+                        _sink_stream_info(
+                            streams.get(f"{rid}{settings.stream_suffix(rid, target_id)}", {}),
+                            sinks, rid, target_id,
+                        ).get("flowing")
+                    ),
+                    "command_accepted": playing,
                 }
             )
-
-    # DLNA entrances: the speaker fetches the controller's URI directly, so
-    # DLNA appears as a control-only source driving speakers via the cloud.
-    if settings.dlna_enabled:
-        for receiver in settings.active_receivers():
-            node_id = f"dlna:{receiver.id}"
-            nodes.append(
-                {
-                    "id": node_id,
-                    "kind": "source",
-                    "label": f"DLNA · {receiver.name}",
-                    "protocol": "DLNA",
-                    "active": False,
-                }
-            )
-            for did in settings.receiver_targets(receiver.id):
-                owner = device_manager.owner_of(did)
-                active = owner == f"dlna:{receiver.id}"
-                if active:
-                    for node in nodes:
-                        if node["id"] == node_id:
-                            node["active"] = True
-                edges.append(
-                    {
-                        "from": node_id,
-                        "to": CLOUD_ID_XIAOMI,
-                        "protocol": "DLNA",
-                        "direction": "control",
-                        "active": active,
-                        "via": receiver.id,
-                    }
-                )
-                if did not in speaker_ids:
-                    speaker_ids.append(did)
 
     if speaker_ids:
         nodes.append(
@@ -310,7 +318,8 @@ def build_topology(bridge, device_manager) -> dict:
 
     return {
         "ts": time.time(),
-        "status": bridge.status.get("status", "idle"),
+        "status": snapshot.get("status", "idle"),
+        "runtime": snapshot.get("runtime"),
         "nodes": nodes,
         "edges": edges,
     }
@@ -355,6 +364,13 @@ def _encode_edge(
         "estimated": True,
         "active": sessions > 0,
     }
+
+
+def _sink_stream_info(info, sinks, owner, target):
+    if sinks is None:  # Compatibility with older diagnostics payloads.
+        return info
+    sink = sinks.get(owner, {}).get(target, {})
+    return {**info, "flowing": bool(sink.get("flowing")), "clients": sink.get("clients", 0)}
 
 
 def _pull_edge(

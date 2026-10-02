@@ -26,6 +26,7 @@ class LocalAirPlayProvider:
         self._zeroconf_factory = zeroconf_factory
         self._zeroconf = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self.sessions = None
 
     @property
     def zeroconf(self):
@@ -33,6 +34,12 @@ class LocalAirPlayProvider:
 
         Also used by AirPlay discovery to browse the LAN — one Zeroconf per
         process keeps mDNS traffic and sockets sane."""
+        return self._zeroconf
+
+    def ensure_zeroconf(self):
+        """Discovery can use mDNS even when classic input is disabled."""
+        if self._zeroconf is None:
+            self._zeroconf = self._create_zeroconf()
         return self._zeroconf
 
     @property
@@ -51,8 +58,6 @@ class LocalAirPlayProvider:
         on_volume: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
         self._loop = asyncio.get_running_loop()
-        if self._zeroconf is None:
-            self._zeroconf = self._create_zeroconf()
         wanted = dict(desired)
         for receiver_id, item in list(self.receivers.items()):
             if receiver_id in wanted and wanted[receiver_id] == item.name:
@@ -62,20 +67,35 @@ class LocalAirPlayProvider:
             del self.receivers[receiver_id]
 
         for receiver_id, name in desired:
-            if receiver_id in self.receivers:
+            if receiver_id in self.receivers and self.receivers[receiver_id].status == "running":
                 continue
             item = LocalReceiver(id=receiver_id, name=name)
             self.receivers[receiver_id] = item
+            server = None
             try:
+                self.ensure_zeroconf()
+                if self._server_factory is None:
+                    from micast.ports import probe_udp_group
+                    from micast.raop.server import udp_pool
+
+                    base, top = udp_pool()
+                    probe_udp_group(base, top - base + 1)
                 server = self._create_server(hostname, name)
-                server.on_play_start = self._start_handler(receiver_id, on_start)
-                server.on_play_stop = self._stop_handler(receiver_id, on_stop)
+                server.playback_sessions = self.sessions
+                server.receiver_id = receiver_id
+                server.on_play_start = self._start_handler(receiver_id, on_start, server)
+                server.on_play_stop = self._stop_handler(receiver_id, on_stop, server)
                 server.on_volume = self._volume_handler(receiver_id, on_volume)
                 await server.start()
                 item.server = server
                 item.status = "running"
                 item.detail = "经典 AirPlay · 可连接"
             except Exception as exc:
+                if server is not None:
+                    try:
+                        await server.stop()
+                    except Exception:
+                        logger.exception("Unable to clean up failed receiver %s", name)
                 item.status = "error"
                 item.detail = str(exc)
                 logger.exception("Local AirPlay receiver %s failed", name)
@@ -96,8 +116,8 @@ class LocalAirPlayProvider:
         """Disconnect senders without removing the advertised receivers."""
         items = (
             [self.receivers[receiver_id]]
-            if receiver_id and receiver_id in self.receivers
-            else list(self.receivers.values())
+            if receiver_id in self.receivers
+            else ([] if receiver_id is not None else list(self.receivers.values()))
         )
         counts = await asyncio.gather(
             *(item.server.disconnect_clients() for item in items if item.server),
@@ -119,17 +139,37 @@ class LocalAirPlayProvider:
 
         return Zeroconf(ip_version=IPVersion.All)
 
-    def _start_handler(self, receiver_id, callback):
-        def handle(resume: bool = False) -> None:
-            if callback and self._loop:
-                asyncio.run_coroutine_threadsafe(callback(receiver_id, resume), self._loop)
+    def _schedule_event(self, receiver_id, callback, server, token, *args):
+        async def deliver():
+            item = self.receivers.get(receiver_id)
+            if not item or item.server is not server:
+                return
+            if token is not None and self.sessions is not None:
+                current = self.sessions.current(receiver_id)
+                if (
+                    current is None
+                    or current.token != token
+                    or current.state.value
+                    in (
+                        "closing",
+                        "closed",
+                    )
+                ):
+                    return
+            await callback(receiver_id, *args)
+
+        if callback and self._loop:
+            asyncio.run_coroutine_threadsafe(deliver(), self._loop)
+
+    def _start_handler(self, receiver_id, callback, server):
+        def handle(resume: bool = False, token=None) -> None:
+            self._schedule_event(receiver_id, callback, server, token, resume)
 
         return handle
 
-    def _stop_handler(self, receiver_id, callback):
-        def handle() -> None:
-            if callback and self._loop:
-                asyncio.run_coroutine_threadsafe(callback(receiver_id), self._loop)
+    def _stop_handler(self, receiver_id, callback, server):
+        def handle(token=None) -> None:
+            self._schedule_event(receiver_id, callback, server, token)
 
         return handle
 

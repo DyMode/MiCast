@@ -12,6 +12,9 @@ import logging
 from array import array
 
 from micast.airplay_discovery import AirPlayDiscovery
+from micast.audio_dsp import PCMProcessor, build_audio_filter
+from micast.config import settings
+from micast.pcm_format import PCMFormat
 from micast.pcm_tee import BoundedPCMReader
 from micast.raop.alac_encoder import FRAME_SAMPLES, AlacPacketizer
 from micast.raop.client import RaopError, RaopSender
@@ -111,9 +114,7 @@ class _Hub:
                 chunk = apply_pcm_gain(chunk, getattr(self, "input_volume", 100))
                 for runtime in self.targets.values():
                     if runtime.flowing and runtime.reader and not runtime.reader.at_eof():
-                        runtime.reader.feed_data(
-                            extract_channel(chunk, runtime.channel) if runtime.channel else chunk
-                        )
+                        runtime.reader.feed_data(chunk)
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -121,12 +122,14 @@ class _Hub:
 
 
 class AirPlayTargetManager:
-    def __init__(self, discovery: AirPlayDiscovery):
+    def __init__(self, discovery: AirPlayDiscovery, sessions=None):
         self._discovery = discovery
+        self.sessions = sessions
         self._hubs: dict[str, _Hub] = {}  # receiver_id -> hub
         self._input_volumes: dict[str, int] = {}
         self._device_volumes: dict[str, int] = {}
         self._linked_volumes: dict[str, int] = {}
+        self._loudness_levels: dict[str, int] = {}
 
     def statuses(self) -> dict[str, dict]:
         return {
@@ -151,6 +154,8 @@ class AirPlayTargetManager:
         delays: dict[str, int] | None = None,
         channels: dict[str, str] | None = None,
         initial_volume: int | None = None,
+        sample_rate: int = 44100,
+        steal: bool = True,
     ) -> None:
         """Connect and stream to each attached device; running ones keep playing."""
         # `delays` arrives already normalized — non-negative holds sharing the
@@ -160,6 +165,9 @@ class AirPlayTargetManager:
         delays = delays or {}
         channels = channels or {}
         hub = self._hubs.get(receiver_id)
+        if hub is not None and hub.tap_reader is not tap_reader:
+            await self.stop_targets(receiver_id)
+            hub = None
         if hub is None:
             hub = _Hub(tap_reader)
             hub.input_volume = self._input_volumes.get(receiver_id, 100)
@@ -170,15 +178,33 @@ class AirPlayTargetManager:
         # lives at the head of the pump, the transform at the hub feed).
         for did in list(hub.targets):
             if did not in device_ids:
-                await self._stop_one(hub.targets.pop(did))
+                await self._stop_owned(hub.targets.pop(did))
         for did in device_ids:
+            if self.sessions is not None:
+                lease = self.sessions.current(receiver_id)
+                if lease is None or not self.sessions.valid(lease.token):
+                    continue
             runtime = hub.targets.get(did)
             delay_ms = int(delays.get(did, 0))
             channel = channels.get(did) if channels.get(did) in ("left", "right") else None
+            group = settings.group_for_receiver(receiver_id)
+            audio_filter = build_audio_filter(
+                settings.speaker_eq_curve(f"airplay:{did}"),
+                settings.speaker_loudness(f"airplay:{did}"),
+                self._loudness_levels.get(receiver_id, 100),
+                channel,
+                group.gains_db.get(did, 0) if group else 0,
+            )
             if runtime and runtime.status in ("connecting", "streaming"):
-                if runtime.delay_ms == delay_ms and runtime.channel == channel:
+                if (
+                    runtime.delay_ms == delay_ms
+                    and runtime.channel == channel
+                    and getattr(runtime, "sample_rate", 44100) == sample_rate
+                    and getattr(runtime, "audio_filter", None) == audio_filter
+                    and (self.sessions is None or getattr(runtime, "token", None) == lease.token)
+                ):
                     continue
-                await self._stop_one(hub.targets.pop(did))
+                await self._stop_owned(hub.targets.pop(did))
                 runtime = None
             device = self._discovery.resolve(did)
             if device is None:
@@ -194,8 +220,17 @@ class AirPlayTargetManager:
                 runtime.detail = "设备需要密码，暂不支持"
                 continue
             runtime = _TargetRuntime(did, device.name, delay_ms, channel)
+            runtime.sample_rate = sample_rate
+            runtime.audio_filter = audio_filter
             runtime.desired_volume = self._linked_volumes.get(receiver_id, initial_volume)
-            runtime.reader = BoundedPCMReader()
+            runtime.reader = BoundedPCMReader(bytes_per_second=sample_rate * 4)
+            if self.sessions is not None:
+                runtime.token = lease.token
+                if not await self.sessions.targets.acquire(
+                    f"airplay:{did}", lease.token, lambda runtime=runtime: self._stop_one(runtime),
+                    steal=steal,
+                ):
+                    continue
             hub.targets[did] = runtime
             runtime.task = asyncio.create_task(self._run(runtime))
 
@@ -204,7 +239,7 @@ class AirPlayTargetManager:
         if not hub:
             return
         for runtime in list(hub.targets.values()):
-            await self._stop_one(runtime)
+            await self._stop_owned(runtime)
         hub.targets.clear()
         await hub.stop()
 
@@ -230,6 +265,21 @@ class AirPlayTargetManager:
         if hub := self._hubs.get(receiver_id):
             hub.input_volume = percent
 
+    def set_loudness_level(self, receiver_id: str, percent: int) -> None:
+        self._loudness_levels[receiver_id] = percent
+        hub = self._hubs.get(receiver_id)
+        if hub is None:
+            return
+        group = settings.group_for_receiver(receiver_id)
+        for runtime in hub.targets.values():
+            runtime.audio_filter = build_audio_filter(
+                settings.speaker_eq_curve(f"airplay:{runtime.device_id}"),
+                settings.speaker_loudness(f"airplay:{runtime.device_id}"),
+                percent,
+                runtime.channel,
+                group.gains_db.get(runtime.device_id, 0) if group else 0,
+            )
+
     def independent_volume(self, receiver_id: str) -> None:
         self._linked_volumes.pop(receiver_id, None)
 
@@ -248,7 +298,22 @@ class AirPlayTargetManager:
         # physical value from the last command for relative adjustments.
         return None if refresh else self._device_volumes.get(device_id)
 
+    async def _stop_owned(self, runtime: _TargetRuntime) -> None:
+        if self.sessions is not None and hasattr(runtime, "token"):
+            await self.sessions.targets.execute(
+                f"airplay:{runtime.device_id}", runtime.token,
+                lambda: self._stop_one(runtime),
+            )
+        else:
+            await self._stop_one(runtime)
+
     async def _stop_one(self, runtime: _TargetRuntime) -> None:
+        if (
+            self.sessions is not None
+            and hasattr(runtime, "token")
+            and not self.sessions.targets.owns(f"airplay:{runtime.device_id}", runtime.token)
+        ):
+            return
         runtime.flowing = False
         if runtime.task:
             runtime.task.cancel()
@@ -262,9 +327,20 @@ class AirPlayTargetManager:
                 logger.exception("Failed to tear down AirPlay target %s", runtime.name)
             runtime.sender = None
         runtime.status = "idle"
+        if self.sessions is not None and hasattr(runtime, "token"):
+            self.sessions.targets.forget(f"airplay:{runtime.device_id}", runtime.token)
 
     async def _run(self, runtime: _TargetRuntime) -> None:
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            if (
+                self.sessions is not None
+                and hasattr(runtime, "token")
+                and (
+                    not self.sessions.valid(runtime.token)
+                    or not self.sessions.targets.owns(f"airplay:{runtime.device_id}", runtime.token)
+                )
+            ):
+                return
             # Re-resolve on every attempt: projectors/TVs re-announce with a
             # fresh ephemeral port after sleep, and retrying the stale address
             # just yields connection-refused.
@@ -314,29 +390,48 @@ class AirPlayTargetManager:
         PCM pre-buffer: hold back delay_ms worth of audio before sending."""
         reader = runtime.reader
         packetizer = AlacPacketizer()
-        pending = await self._prebuffer(reader, runtime.delay_ms)
+        source_format = PCMFormat(getattr(runtime, "sample_rate", 44100))
+        pending = await self._prebuffer(reader, runtime.delay_ms, source_format)
         if pending is None:
             await sender.flush()
             return
-        for packet in packetizer.encode(pending):
+        audio_filter = getattr(runtime, "audio_filter", None)
+        resampler = PCMProcessor(source_format, PCMFormat(44100), audio_filter)
+        for packet in packetizer.encode(resampler.convert(pending)):
             sender.send_alac(packet, FRAME_SAMPLES)
         while True:
             chunk = await reader.read(16384)
             if not chunk:
+                for packet in packetizer.encode(resampler.flush()) + packetizer.flush():
+                    sender.send_alac(packet, FRAME_SAMPLES)
                 await sender.flush()
                 return
-            for packet in packetizer.encode(chunk):
+            current_filter = getattr(runtime, "audio_filter", None)
+            if current_filter != audio_filter:
+                for packet in packetizer.encode(resampler.flush()):
+                    sender.send_alac(packet, FRAME_SAMPLES)
+                audio_filter = current_filter
+                resampler = PCMProcessor(source_format, PCMFormat(44100), audio_filter)
+            for packet in packetizer.encode(resampler.convert(chunk)):
                 sender.send_alac(packet, FRAME_SAMPLES)
 
     @staticmethod
-    async def _prebuffer(reader: asyncio.StreamReader, delay_ms: int) -> bytes | None:
+    async def _prebuffer(
+        reader: asyncio.StreamReader, delay_ms: int, pcm_format: PCMFormat | None = None
+    ) -> bytes | None:
         """Read delay_ms worth of PCM before letting anything through. Returns
         the buffered bytes, or None on EOF. 44100Hz stereo s16 = 176.4 B/ms."""
-        wanted = int(delay_ms * 176.4) & ~3  # whole sample frames
+        wanted = (pcm_format or PCMFormat()).bytes_for_ms(delay_ms)
+        started = asyncio.get_running_loop().time()
         buffered = bytearray()
         while len(buffered) < wanted:
             chunk = await reader.read(min(16384, wanted - len(buffered)))
             if not chunk:
+                if buffered and len(buffered) % 4 == 0:
+                    remaining = delay_ms / 1000 - (asyncio.get_running_loop().time() - started)
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    return bytes(buffered)
                 return None
             buffered += chunk
         return bytes(buffered)

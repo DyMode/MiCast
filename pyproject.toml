@@ -64,3 +64,7 @@ select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "audio: codec and timed audio delivery suites",
+    "packaging: distribution and installation artifact contracts",
+]

@@ -7,25 +7,27 @@ import time
 from collections.abc import Awaitable, Callable
 
 from micast.audio_metrics import metrics
-from micast.config import resolve_port, settings
-from micast.deployment import airplay2_mode
+from micast.config import settings
+from micast.deployment import airplay2_mode, classic_ingress_available
 from micast.local_airplay import LocalAirPlayProvider
 from micast.orchestration import DesiredReceiver, OrchestratorClient
 from micast.pcm_source import PCMSource, ReaderPCMSource, create_pcm_source
 from micast.pcm_tee import PCMTee
+from micast.pipeline_factory import build_branches
+from micast.playback_sessions import (
+    LIFECYCLE_TICK_SECONDS,
+    ActiveSessions,
+    PlaybackSessions,
+    SessionState,
+)
 from micast.receiver_manager import ReceiverManager
+from micast.receiver_startup import local_receiver_environment
 from micast.speaker_pipeline import SpeakerPipeline
 from micast.stream_plan import PlanDiff, PlanSnapshot, compute_plan, diff_plans
 from micast.stream_server import StreamServer
 
 logger = logging.getLogger(__name__)
 
-# Stale-client sweeper: Xiaomi speakers keep retrying a stream URL they were
-# once told to play, so any teardown path we miss (canceled pending stop, a
-# speaker re-pulling an old URL on its own) leaves a client attached to a
-# silent stream forever — the topology then shows a permanent 滞留 edge.
-STREAM_SWEEP_INTERVAL_SECONDS = 15.0
-STREAM_IDLE_KICK_SECONDS = 10.0
 # EQ drag edits commit one plan change per point; the settle window lets a
 # burst land as ONE encoder restart. Used by wait_config_settled() (before the
 # config transaction) and by the in-apply fallback debounce.
@@ -74,12 +76,25 @@ class AudioBridge:
         # maintenance events, not sender intent. Suppress their delayed speaker
         # stop so recovery never pauses the user's device.
         self._maintenance_sessions: set[str] = set()
-        self._sweeper_task: asyncio.Task | None = None
+        self._lifecycle_task: asyncio.Task | None = None
         self._aux_tasks: set[asyncio.Task] = set()
-        self._stale_active_since: dict[str, float] = {}
         # Receivers with a live sender session right now. Gates the pipelines'
         # PCM-stall watchdog (no session → no bytes is normal, not a stall).
-        self._active_sessions: set[str] = set()
+        self.sessions = PlaybackSessions(lambda: settings.stale_session_timeout)
+        from micast.recovery import RecoveryCoordinator
+
+        self.recovery = RecoveryCoordinator(self.sessions)
+        from micast.runtime_snapshot import RuntimeSnapshot
+
+        self.runtime_snapshot = RuntimeSnapshot()
+        self.runtime_snapshot.target_capabilities = self._target_capabilities
+        self._stream_server.sessions = self.sessions
+        self._stream_server.stream_owner = lambda stream_id: _stream_owner(
+            stream_id,
+            [*settings.audio_entry_ids(), *(s["owner"] for s in self.sessions.snapshot())],
+        )
+        self._active_session_view = ActiveSessions(self.sessions, self._session_protocol)
+        self._local_provider.sessions = self.sessions
         # External AirPlay targets (created lazily once the provider's shared
         # Zeroconf exists); both are None in tests and on the airplay2 engine.
         self._airplay_discovery = None
@@ -113,10 +128,32 @@ class AudioBridge:
         # Fired when a group's Xiaomi membership changed (group_id, removed dids);
         # main.py wires its reconcile_group closure here.
         self.on_group_membership_changed: Callable[[str, list[str]], Awaitable[None]] | None = None
-        # Fired when an AirPlay 2 instance is retargeted to a different speaker
-        # (old_did, instance_id): the previous speaker is still playing the old
-        # URL and must be unloaded, or it keeps pulling alongside the new one.
         self.on_airplay2_retarget: Callable[[str, str], Awaitable[None]] | None = None
+
+    def _session_protocol(self, owner: str) -> str:
+        return "airplay2" if owner in self._airplay2_entry_ids() else "airplay"
+
+    def _target_capabilities(self, target: str) -> dict:
+        if target.startswith("dlna-target:"):
+            discovery = self._dlna_discovery
+            device = discovery.resolve(target.removeprefix("dlna-target:")) if discovery else None
+            supported = bool(device and device.rendering_url)
+            return {"volume_control": supported, "volume_readback": supported}
+        return {"volume_control": True}
+
+    @property
+    def _active_sessions(self):
+        return self._active_session_view
+
+    @_active_sessions.setter
+    def _active_sessions(self, owners):
+        # Older integrations/tests assigned this private gate. Keep it a view,
+        # rather than creating a second authority for session state.
+        if not hasattr(self, "sessions"):
+            self.sessions = PlaybackSessions(lambda: settings.stale_session_timeout)
+            self._active_session_view = ActiveSessions(self.sessions, self._session_protocol)
+        self._active_session_view.clear()
+        self._active_session_view.update(owners)
 
     @property
     def status(self) -> dict:
@@ -135,30 +172,70 @@ class AudioBridge:
             "airplay2_instances": list(self._airplay2_runtime.values()),
             "diagnostics": self.diagnostics,
             "now_playing": self._now_playing(),
+            "runtime": self.runtime_snapshot.project(self.sessions),
         }
 
     def _now_playing(self) -> dict:
-        """Per-receiver DAAP track metadata + matched library audioID.
+        """Per-receiver now-playing: live sender metadata + library enrichment.
 
-        Lets the UI (and tests without a touch-screen speaker) see what the
-        sender reported and whether the lyrics/cover chain found a match.
+        The sender side (title/artist/album, current rolling lyric line,
+        sender-pushed artwork bytes) is pulled live from the RAOP server; the
+        library side (audioID, cover URL, duration) comes from the
+        TrackMetadataRegistry the lyrics/cover matcher writes. ``cover`` is a
+        relative endpoint URL when any artwork source exists, else None, so
+        the UI hides the cover slot without a placeholder.
         """
+        registry = getattr(self, "track_metadata", None)
         matched = getattr(self, "lyrics_matched", {}) or {}
         now = {}
         for receiver_id, item in self._local_provider.receivers.items():
+            sessions = getattr(self, "sessions", None)
+            lease = sessions.current(receiver_id) if sessions is not None else None
+            if sessions is not None and (
+                lease is None or lease.protocol != "airplay"
+                or lease.state.value not in ("active", "quiet", "paused")
+            ):
+                continue
             server = item.server
             if not server:
                 continue
             meta = getattr(server, "daap_meta", None) or {}
-            audio_id = matched.get(receiver_id)
-            if not meta and not audio_id:
+            # Recent lyric lines come from the server's rolling window
+            # (maintained incrementally on arrival); the LAST entry is the
+            # current line. Fallback for servers predating the window.
+            lyric_lines = list(getattr(server, "lyric_lines", []) or [])
+            if not lyric_lines and meta.get("lyric_line"):
+                lyric_lines = [meta["lyric_line"]]
+            enrichment = registry.enrichment_for(receiver_id) if registry else None
+            audio_id = (enrichment.audio_id if enrichment else "") or matched.get(receiver_id)
+            has_artwork = bool(getattr(server, "artwork_bytes", b""))
+            cover_url = enrichment.cover_url if enrichment else ""
+            if not meta and not audio_id and not has_artwork:
                 continue
+            # The cover contract, one shape: an endpoint URL plus an opaque
+            # cache revision (library audioID, or a monotonic counter for
+            # sender-pushed art). Null when no cover source exists.
+            if has_artwork:
+                cover = {
+                    "url": f"api/playback/cover/{receiver_id}",
+                    "rev": f"art{getattr(server, 'artwork_rev', 0)}",
+                }
+            elif cover_url:
+                cover = {"url": f"api/playback/cover/{receiver_id}", "rev": audio_id or "lib"}
+            else:
+                cover = None
             now[receiver_id] = {
                 "title": meta.get("title"),
                 "artist": meta.get("artist"),
                 "album": meta.get("album"),
+                "lyric_lines": lyric_lines or None,
                 "audio_id": audio_id,
+                "duration": enrichment.duration if enrichment else None,
+                "cover": cover,
             }
+        service = getattr(self, "dlna_service", None)
+        if service is not None:
+            now.update(service.now_playing())
         return now
 
     @property
@@ -242,6 +319,7 @@ class AudioBridge:
                 "classic": sorted(self._active_sessions - airplay2_sessions),
                 "airplay2": sorted(airplay2_sessions),
             },
+            "lifecycle": self.sessions.snapshot(),
         }
 
     def _airplay2_source_key(self, instance) -> tuple:
@@ -254,7 +332,9 @@ class AudioBridge:
         """
         return (
             instance.name,
-            str(settings.airplay2_port or ""),
+            local_receiver_environment(settings, instance.id, airplay2_mode()).get(
+                "MICAST_AIRPLAY2_PORT", ""
+            ),
             str(settings.airplay2_pcm_source),
         )
 
@@ -271,9 +351,10 @@ class AudioBridge:
         entry was removed or disabled mid-play.
         """
         ids = {item.id for item in settings.airplay2_instances}
-        ids.update(self._airplay2_runtime)
-        ids.update(self._airplay2_sources)
-        ids.update(self._airplay2_tees)
+        ids.update(getattr(self, "_airplay2_runtime", {}))
+        ids.update(getattr(self, "_airplay2_sources", {}))
+        ids.update(getattr(self, "_airplay2_tees", {}))
+        ids.update(getattr(self, "_airplay2_pipelines", {}))
         return ids
 
     def _receiver_statuses(self) -> list[dict]:
@@ -351,7 +432,7 @@ class AudioBridge:
             self._running = False
             raise RuntimeError("音频核心启动失败") from e
 
-        self._sweeper_task = asyncio.create_task(self._sweep_stale_stream_clients())
+        self._lifecycle_task = asyncio.create_task(self._run_session_lifecycle())
 
     async def stop(self) -> None:
         """Stop everything."""
@@ -361,17 +442,18 @@ class AudioBridge:
         self._status = "stopping"
         logger.info("Stopping audio bridge")
 
-        if self._sweeper_task:
-            self._sweeper_task.cancel()
+        if self._lifecycle_task:
+            self._lifecycle_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._sweeper_task
-            self._sweeper_task = None
+                await self._lifecycle_task
+            self._lifecycle_task = None
         for task in list(self._aux_tasks):
             task.cancel()
         if self._aux_tasks:
             await asyncio.gather(*list(self._aux_tasks), return_exceptions=True)
         self._aux_tasks.clear()
-
+        await self.recovery.close()
+        await self.sessions.close_all(reason="bridge_shutdown")
         await self._stop_engine()
 
         self._plan = None
@@ -411,11 +493,31 @@ class AudioBridge:
         Re-resolves from the preferred port (sliding upward when busy) so a
         hot change never binds a stale address.
         """
-        settings.stream_port = resolve_port(
-            settings.preferred_port("stream_port"), "MICAST_STREAM_PORT"
-        )
         await self._stream_server.stop()
         await self._stream_server.start()
+
+    async def reconcile_classic_feature(self) -> None:
+        """Retry failed classic entries without interrupting other protocols."""
+        async with self._restart_lock:
+            if not settings.airplay_enabled or not classic_ingress_available():
+                for receiver_id in list(self._local_provider.receivers):
+                    await self.sessions.close_all(receiver_id, reason="airplay_disabled")
+                    await self._stop_classic_entry_pipelines(receiver_id)
+                await self._local_provider.start(
+                    [], settings.effective_stream_host, None, None
+                )
+                return
+            running = {key for key, value in self._local_provider.receivers.items()
+                       if value.status == "running"}
+            await self._local_provider.start(
+                [(item.id, item.name) for item in settings.active_receivers()],
+                settings.effective_stream_host, self._local_session_start,
+                self._local_session_stop, self._local_volume,
+            )
+            await self._ensure_airplay_discovery()
+            for key, item in self._local_provider.receivers.items():
+                if key not in running and item.status == "running":
+                    await self._create_local_pipelines(item)
 
     async def _restart_engine_locked(self) -> None:
         """Full engine teardown+start. Caller must hold ``_restart_lock``."""
@@ -509,6 +611,16 @@ class AudioBridge:
                             merged_entries.pop(entry_id, None)
                     new_plan = {"engine": new_plan["engine"], "entries": merged_entries}
                 self._plan = new_plan
+                if not diff.noop and not diff.delay_only and getattr(self, "media_playback", None):
+                    affected = (
+                        diff.classic_rebuild | diff.encoder_restart | diff.classic_added
+                        | diff.airplay2_rebuild | diff.external_airplay_changed
+                        | diff.external_dlna_changed
+                    )
+                    owners = {f"dlna:{entry}" for entry in affected}
+                    await self.media_playback.refresh(
+                        None if diff.full_restart_required else owners
+                    )
                 if failed:
                     raise RuntimeError("声音设置暂未完全生效，请重试")
             settled = not debounce
@@ -610,9 +722,7 @@ class AudioBridge:
 
         if audio_hook and self.on_audio_restarted:
             try:
-                await asyncio.wait_for(
-                    self.on_audio_restarted(), timeout=_HOOK_TIMEOUT_SECONDS
-                )
+                await asyncio.wait_for(self.on_audio_restarted(), timeout=_HOOK_TIMEOUT_SECONDS)
             except Exception:
                 logger.exception("audio-restarted hook failed")
                 # The hook re-points every playing speaker, so a failure may
@@ -655,6 +765,8 @@ class AudioBridge:
             tap,
             settings.receiver_airplay_delays(entry_id),
             settings.receiver_network_channels(entry_id),
+            sample_rate=48000 if entry_id in self._airplay2_entry_ids() else 44100,
+            steal=False,
         )
 
     async def _reconcile_entry_dlna_targets(self, entry_id: str) -> None:
@@ -775,6 +887,8 @@ class AudioBridge:
         by_id = {item.id: item for item in settings.airplay2_instances}
         for instance_id in sorted(affected):
             instance = by_id.get(instance_id)
+            if instance is None or not instance.enabled:
+                await self.sessions.close_all(instance_id, reason="receiver_removed")
             keep = instance is not None and self._airplay2_ingress_unchanged(instance)
             await self._stop_airplay2_pipeline(instance_id, keep_source=keep)
         await self._start_airplay2_pipelines()
@@ -824,9 +938,7 @@ class AudioBridge:
                 try:
                     await hook(entry_id, f"{base}/stream/{entry_id}", steal=False)
                 except Exception:
-                    logger.exception(
-                        "Starting the retargeted targets of %s failed", entry_id
-                    )
+                    logger.exception("Starting the retargeted targets of %s failed", entry_id)
                 continue
             previous = previous_targets.get(entry_id)
             for did in self.entry_targets(entry_id):
@@ -856,7 +968,7 @@ class AudioBridge:
         for instance_id in sorted(affected):
             old_target = previous_targets.get(instance_id)
             new_target = getattr(self, "_airplay2_targets", {}).get(instance_id)
-            if not old_target or old_target == new_target:
+            if not old_target or old_target == "unmapped" or old_target == new_target:
                 continue
             logger.info(
                 "AirPlay 2 instance %s retargeted %s -> %s; releasing the old speaker",
@@ -878,11 +990,7 @@ class AudioBridge:
 
     def _resolve_airplay2_targets(self) -> dict[str, str]:
         """Current playback target per AirPlay 2 instance, for retarget detection."""
-        return {
-            item.id: item.target_id
-            for item in settings.airplay2_instances
-            if item.target_id
-        }
+        return {item.id: item.target_id for item in settings.airplay2_instances if item.target_id}
 
     async def stop_airplay2(self) -> None:
         """Withdraw every entry from the compose-owned orchestrator."""
@@ -900,8 +1008,10 @@ class AudioBridge:
             raise RuntimeError("内部编排服务未能停止") from exc
         await self._stop_airplay2_pipelines()
 
-    async def _start_pipelines(self) -> None:
+    async def _start_pipelines(self, only: set[str] | None = None) -> None:
         for receiver in self._receiver_manager.receivers:
+            if only is not None and receiver.device_id not in only:
+                continue
             pipeline = SpeakerPipeline(
                 device_id=receiver.device_id,
                 alias=receiver.name,
@@ -927,7 +1037,8 @@ class AudioBridge:
     async def _start_engine(self) -> None:
         if settings.airplay_engine == "local":
             await self._stream_server.start()
-            desired = [(item.id, item.name) for item in settings.active_receivers()]
+            desired = ([(item.id, item.name) for item in settings.active_receivers()]
+                       if settings.airplay_enabled and classic_ingress_available() else [])
             await self._local_provider.start(
                 desired,
                 settings.effective_stream_host,
@@ -957,17 +1068,23 @@ class AudioBridge:
 
         if self._dlna_targets is None:
             self._dlna_discovery = DlnaDiscovery()
-            self._dlna_targets = DlnaTargetManager(self._dlna_discovery)
+            self._dlna_targets = DlnaTargetManager(
+                self._dlna_discovery, self.sessions, self._stream_server.stream_content_type
+            )
             await self._dlna_discovery.start()
 
         zeroconf = self._local_provider.zeroconf
         if zeroconf is None:
-            return
+            try:
+                zeroconf = self._local_provider.ensure_zeroconf()
+            except Exception as exc:
+                logger.warning("AirPlay discovery unavailable: %s", exc)
+                return
         if self._airplay_targets is None:
             self._airplay_discovery = AirPlayDiscovery(
                 zeroconf, own_ids=lambda: self._local_provider.own_macs
             )
-            self._airplay_targets = AirPlayTargetManager(self._airplay_discovery)
+            self._airplay_targets = AirPlayTargetManager(self._airplay_discovery, self.sessions)
             await self._airplay_discovery.start()
         else:
             await self._airplay_discovery.rebind(zeroconf)
@@ -1058,6 +1175,7 @@ class AudioBridge:
                 tap,
                 settings.receiver_airplay_delays(receiver.id),
                 settings.receiver_network_channels(receiver.id),
+                steal=False,
             )
 
     async def stop_airplay_targets(self, receiver_id: str) -> None:
@@ -1069,6 +1187,7 @@ class AudioBridge:
         tracked = set(self._airplay2_runtime) | set(self._airplay2_sources)
         for instance_id in list(tracked):
             if instance_id not in active_instances:
+                await self.sessions.close_all(instance_id, reason="receiver_removed")
                 await self._stop_airplay2_pipeline(instance_id)
                 self._airplay2_runtime.pop(instance_id, None)
         # Refresh the retarget baseline only after the pipelines exist, so a
@@ -1107,12 +1226,9 @@ class AudioBridge:
             source = getattr(self, "_airplay2_sources", {}).get(instance.id)
             reader = getattr(self, "_airplay2_readers", {}).get(instance.id)
             if source is None or reader is None or not getattr(source, "alive", False):
-                # A local (shairport) source gets the configured preferred port
-                # so run-shairport scans from it instead of always starting at
-                # 7000.
-                source_env: dict[str, str] = {}
-                if settings.airplay2_port:
-                    source_env["MICAST_AIRPLAY2_PORT"] = str(settings.airplay2_port)
+                # Bundled receivers use their fixed runtime port; custom local
+                # sources retain their own environment contract.
+                source_env = local_receiver_environment(settings, instance.id, airplay2_mode())
                 source = create_pcm_source(settings.airplay2_pcm_source, env=source_env)
                 self._airplay2_sources[instance.id] = source
                 try:
@@ -1135,7 +1251,7 @@ class AudioBridge:
                 stereo,
                 variants,
                 reader,
-                input_sample_rate=None,
+                input_sample_rate=48000,
                 pace_source=True,
                 input_volume=None,
                 runtime=runtime,
@@ -1184,6 +1300,10 @@ class AudioBridge:
 
             try:
                 source = create_pcm_source(f"tcp:{result.pcm_host}:{result.pcm_port}")
+                source.epoch = result.epoch
+                source.disconnect_sender = lambda key=result.key: (
+                    OrchestratorClient().disconnect_receiver(key)
+                )
                 source_reader = await source.start()
             except Exception as exc:
                 logger.exception("AirPlay 2 PCM source connect failed for %s", instance.id)
@@ -1246,20 +1366,15 @@ class AudioBridge:
         behaves identically in both: the reader is teed and each channel/EQ
         pipeline pans or shapes its side.
         """
-        readers = [reader]
-        # External AirPlay targets get one extra tee output carrying the
-        # un-EQ'd base mix, exactly like the classic path's tap.
         wants_tap = bool(settings.receiver_airplay_targets(instance.id))
-        if len(variants) > 1 or wants_tap:
-            tee = PCMTee(reader, outputs=len(variants) + (1 if wants_tap else 0))
-            tee.start()
-            self._airplay2_tees[instance.id] = tee
-            readers = list(tee.outputs)
-            for index, variant in enumerate(variants):
-                readers[index].name = f"{instance.id}{variant['suffix']}"
-        if wants_tap:
-            self._target_taps[instance.id] = readers[-1]
-            readers = readers[:-1]
+        branches = build_branches(
+            reader, variants, instance.id, input_sample_rate or 48000, wants_tap
+        )
+        readers = branches.readers
+        if branches.tee:
+            self._airplay2_tees[instance.id] = branches.tee
+        if branches.tap:
+            self._target_taps[instance.id] = branches.tap
         else:
             self._target_taps.pop(instance.id, None)
         for index, variant in enumerate(variants):
@@ -1271,7 +1386,7 @@ class AudioBridge:
             pipeline = SpeakerPipeline(
                 device_id=instance.id,
                 alias=alias,
-                pcm_source=ReaderPCMSource(readers[index]),
+                pcm_source=ReaderPCMSource(readers[index], input_sample_rate or 48000),
                 stream_server=self._stream_server,
                 on_session_start=self.on_session_start,
                 stream_id=stream_id,
@@ -1314,20 +1429,13 @@ class AudioBridge:
                 {"suffix": "", "base": "", "channel": None, "eq": None}
             ]
 
-        readers = [item.server.pcm_reader]
-        # External AirPlay targets get one extra tee output carrying the
-        # un-EQ'd base mix (EQ is per Xiaomi speaker and stays on their streams).
         wants_tap = bool(settings.receiver_airplay_targets(item.id))
-        if len(variants) > 1 or wants_tap:
-            tee = PCMTee(item.server.pcm_reader, outputs=len(variants) + (1 if wants_tap else 0))
-            tee.start()
-            self._tees[item.id] = tee
-            readers = tee.outputs
-            for index, variant in enumerate(variants):
-                readers[index].name = f"{item.id}{variant['suffix']}"
-        if wants_tap:
-            self._target_taps[item.id] = readers[-1]
-            readers = readers[:-1]
+        branches = build_branches(item.server.pcm_reader, variants, item.id, 44100, wants_tap)
+        readers = branches.readers
+        if branches.tee:
+            self._tees[item.id] = branches.tee
+        if branches.tap:
+            self._target_taps[item.id] = branches.tap
         else:
             self._target_taps.pop(item.id, None)
 
@@ -1343,7 +1451,7 @@ class AudioBridge:
             pipeline = SpeakerPipeline(
                 device_id=item.id,
                 alias=alias,
-                pcm_source=ReaderPCMSource(readers[index]),
+                pcm_source=ReaderPCMSource(readers[index], 44100),
                 stream_server=self._stream_server,
                 input_sample_rate=44100,
                 stream_id=stream_id,
@@ -1496,10 +1604,34 @@ class AudioBridge:
         ingress the phone used.
         """
         tap = self._target_taps.get(entry_id)
+        lease = self.sessions.current(entry_id)
+
+        def available(ids, prefix):
+            if not resume:
+                return ids
+            return [
+                did for did in ids
+                if (target := self.sessions.targets.current(prefix + did)) is None
+                or (lease is not None and target.token == lease.token)
+            ]
+
+        def register_external(key, manager):
+            if lease is None:
+                return
+
+            async def release():
+                current = self.sessions.current(entry_id)
+                if current is None or current.token == lease.token:
+                    await manager.stop_targets(entry_id)
+
+            self.sessions.register(lease.token, key, release)
+
         if tap is not None and self._airplay_targets:
+            if settings.receiver_airplay_targets(entry_id):
+                register_external("external:airplay", self._airplay_targets)
             await self._airplay_targets.start_targets(
                 entry_id,
-                settings.receiver_airplay_targets(entry_id),
+                available(settings.receiver_airplay_targets(entry_id), "airplay:"),
                 tap,
                 settings.receiver_airplay_delays(entry_id),
                 settings.receiver_network_channels(entry_id),
@@ -1510,15 +1642,19 @@ class AudioBridge:
                     and self._volume_modes.get(entry_id) == "independent"
                     else None
                 ),
+                sample_rate=48000 if entry_id in self._airplay2_entry_ids() else 44100,
+                steal=not resume,
             )
-        dlna_ids = settings.receiver_dlna_targets(entry_id)
+        dlna_ids = available(settings.receiver_dlna_targets(entry_id), "dlna-target:")
         if dlna_ids and self._dlna_targets:
+            register_external("external:dlna", self._dlna_targets)
             # DLNA renderers pull the HTTP stream — no PCM tap needed.
             cast_url = (
                 f"http://{settings.effective_stream_host}:{settings.stream_port}/stream/{entry_id}"
             )
             await self._dlna_targets.play_targets(
-                entry_id, dlna_ids, cast_url, settings.receiver_network_channels(entry_id)
+                entry_id, dlna_ids, cast_url, settings.receiver_network_channels(entry_id),
+                steal=not resume,
             )
             if (
                 not resume
@@ -1539,6 +1675,13 @@ class AudioBridge:
         return lambda: receiver_id in self._active_sessions
 
     async def _recover_stalled_source(self, stream_id: str) -> None:
+        recovery = getattr(self, "recovery", None)
+        if recovery is None:
+            return await self._recover_stalled_source_impl(stream_id)
+        owner = settings.entry_id_of_stream(stream_id) or stream_id
+        await recovery.run(owner, "source", lambda: self._recover_stalled_source_impl(stream_id))
+
+    async def _recover_stalled_source_impl(self, stream_id: str) -> None:
         """Replace the upstream receiver after PCM stalls in a live session.
 
         Recovery is scoped to the ENTRY that owns the stream: rebuilding one
@@ -1653,6 +1796,9 @@ class AudioBridge:
             self._airplay_targets.set_input_volume(
                 receiver_id, 100 if mode == "linked" else percent
             )
+            loudness = getattr(self._airplay_targets, "set_loudness_level", None)
+            if loudness is not None:
+                loudness(receiver_id, percent)
             if mode == "linked":
                 await self._airplay_targets.set_volume(receiver_id, percent)
             else:
@@ -1667,8 +1813,8 @@ class AudioBridge:
         # Receiver teardown invalidates every sender session. Leaving these
         # latches set makes freshly-created silent pipelines immediately look
         # stalled and creates a restart loop.
+        await self.sessions.close_all(reason="bridge_shutdown")
         self._active_sessions.clear()
-        self._stale_active_since.clear()
         if self._airplay_targets:
             await self._airplay_targets.stop_all()
         if self._dlna_targets:
@@ -1694,8 +1840,10 @@ class AudioBridge:
         yet and froze it at "idle": the diagnostics panel then said "服务未运行"
         while 26 MB of audio was streaming to two speakers.
         """
-        if self._status in {"starting", "stopping", "restarting", "error"}:
+        if self._status in {"starting", "stopping", "restarting"}:
             return self._status
+        if self._status == "error" and not self._running:
+            return "error"
         return self._derive_status()
 
     def _derive_status(self) -> str:
@@ -1704,10 +1852,17 @@ class AudioBridge:
             if settings.airplay_engine == "local"
             else self._receiver_manager.receivers
         )
-        if not receivers:
+        states = [receiver.status for receiver in receivers]
+        if settings.airplay2_enabled:
+            states.extend(item.get("status", "starting")
+                          for item in getattr(self, "_airplay2_runtime", {}).values())
+        dlna = getattr(self, "dlna_service", None)
+        if dlna and settings.dlna_enabled and classic_ingress_available():
+            states.append(dlna.status)
+        if not states:
             return "idle"
-        failed = sum(receiver.status == "error" for receiver in receivers)
-        if failed == len(receivers):
+        failed = sum(state in {"error", "failed", "blocked"} for state in states)
+        if failed == len(states):
             return "error"
         if failed:
             return "degraded"
@@ -1768,7 +1923,10 @@ class AudioBridge:
             sorted(diff.classic_added),
             sorted(diff.classic_removed),
         )
-        desired = [(item.id, item.name) for item in settings.active_receivers()]
+        for entry_id in sorted(diff.classic_removed):
+            await self.sessions.close_all(entry_id, reason="receiver_removed")
+        desired = ([(item.id, item.name) for item in settings.active_receivers()]
+                   if settings.airplay_enabled and classic_ingress_available() else [])
         await self._local_provider.start(
             desired,
             settings.effective_stream_host,
@@ -1813,6 +1971,7 @@ class AudioBridge:
             | set(getattr(self, "_airplay2_readers", {}))
         )
         for instance_id in instance_ids:
+            await self.sessions.close_all(instance_id, reason="receiver_removed")
             await self._stop_airplay2_pipeline(instance_id)
         self._airplay2_runtime.clear()
         # A full stop really stops: never leave a receiver or reader behind for
@@ -1875,8 +2034,10 @@ class AudioBridge:
                 logger.warning("session_start called without device_id in multi-receiver mode")
                 return
         pipeline = self._pipelines.get(device_id) or self._airplay2_pipelines.get(device_id)
-        if pipeline and device_id in self._airplay2_pipelines and self._pipeline_needs_rebuild(
+        if (
             pipeline
+            and device_id in self._airplay2_pipelines
+            and self._pipeline_needs_rebuild(pipeline)
         ):
             # Same revival rule as classic receivers: a pipeline whose reader
             # finished needs a rebuild, not a start() that reuses it.
@@ -1885,6 +2046,48 @@ class AudioBridge:
             pipeline = self._airplay2_pipelines.get(device_id) or pipeline
         if pipeline:
             self._active_sessions.add(device_id)
+            lease = self.sessions.current(device_id)
+            if lease and (
+                device_id in self._airplay2_entry_ids() or settings.airplay_engine != "local"
+            ):
+                lease.activity = lambda: self._source_activity_at(device_id)
+                source = self.ingress_source(device_id)
+
+                async def release_ingress():
+                    # Close the captured process, never whichever replaced it.
+                    if self.ingress_source(device_id) is not source:
+                        return
+                    if source is not None:
+                        await source.stop()
+                        disconnect = getattr(source, "disconnect_sender", None)
+                        if disconnect is not None and lease.reason not in (
+                            "shutdown",
+                            "bridge_shutdown",
+                            "receiver_removed",
+                        ):
+                            await disconnect()
+                    current = self.sessions.current(device_id)
+                    if (
+                        self._running
+                        and lease.reason
+                        not in (
+                            "shutdown",
+                            "bridge_shutdown",
+                            "receiver_removed",
+                        )
+                        and (current is None or current.token == lease.token)
+                    ):
+                        if device_id in self._airplay2_entry_ids():
+                            await self._rebuild_airplay2_instances({device_id})
+                        else:
+                            async with self._restart_lock:
+                                old = self._pipelines.pop(device_id, None)
+                                if old is not None:
+                                    await old.stop()
+                                await self._receiver_manager.reset_receiver(device_id)
+                                await self._start_pipelines({device_id})
+
+                self.sessions.register(lease.token, "sender", release_ingress, kind="transport")
             self._volume_modes[device_id] = settings.sender_volume_mode
             await pipeline.session_start()
             if device_id in self._airplay2_pipelines:
@@ -1930,12 +2133,16 @@ class AudioBridge:
 
     def is_session_active(self, receiver_id: str) -> bool:
         """Whether a sender session is currently live for this receiver."""
+        registry = getattr(self, "sessions", None)
+        if registry is not None:
+            lease = registry.current(receiver_id)
+            return bool(lease and registry.valid(lease.token))
         return receiver_id in self._active_sessions
 
     def has_active_sessions(self) -> bool:
         """True while any sender is connected — the guard for anything that
         must not touch a speaker mid-playback (background format detection)."""
-        return bool(self._active_sessions)
+        return any(s.state == SessionState.ACTIVE for s in self.sessions._current.values())
 
     def stream_client_count(self, stream_id: str) -> int:
         """How many speakers are currently pulling a stream (ground truth for
@@ -1948,14 +2155,21 @@ class AudioBridge:
     def attach_device_manager(self, device_manager) -> None:
         """Give the supervisor primitives access to the speaker controller."""
         self._device_manager = device_manager
+        device_manager.recovery = self.recovery
 
     def attach_supervisor(self, supervisor) -> None:
         """Expose the health arbiter's state in diagnostics."""
         self._supervisor = supervisor
 
     def entry_ids(self) -> list[str]:
-        """Every audio entry: classic receivers plus AirPlay 2 instances."""
-        return sorted(set(self._pipelines) | set(self._airplay2_pipelines))
+        """One health/recovery owner per ingress, independent of DSP variants."""
+        registry = getattr(self, "sessions", None)
+        owners = [item["owner"] for item in registry.snapshot()] if registry else []
+        owners.extend(settings.audio_entry_ids())
+        return sorted({
+            _stream_owner(stream, owners) or stream
+            for stream in set(self._pipelines) | set(self._airplay2_pipelines)
+        })
 
     def entry_stream_ids(self, entry_id: str) -> list[str]:
         return [
@@ -1982,9 +2196,7 @@ class AudioBridge:
         ]
         if not pipelines:
             return False
-        return all(
-            pipeline.running and pipeline.status == "running" for pipeline in pipelines
-        )
+        return all(pipeline.running and pipeline.status == "running" for pipeline in pipelines)
 
     def entry_source_idle_ms(self, entry_id: str) -> float | None:
         """Milliseconds since the entry's PCM source last delivered real bytes."""
@@ -1992,11 +2204,28 @@ class AudioBridge:
             idle
             for stream_id in self.entry_stream_ids(entry_id)
             if (pipeline := self.pipeline_for_stream(stream_id)) is not None
-            and (idle := pipeline.source_idle_ms()) is not None
+            and isinstance(idle := pipeline.source_idle_ms(), (int, float))
         ]
         if not idles:
             return None
-        return max(idles)
+        return min(idles)  # any real branch keeps the shared ingress alive
+
+    def _source_activity_at(self, entry_id: str) -> float | None:
+        idle = self.entry_source_idle_ms(entry_id)
+        return None if idle is None else time.monotonic() - idle / 1000
+
+    def ingress_source(self, entry_id: str):
+        source = getattr(self, "_airplay2_sources", {}).get(entry_id)
+        if source is not None:
+            return source
+        manager = getattr(self, "_receiver_manager", None)
+        return (
+            next(
+                (item.pcm_source for item in manager.receivers if item.device_id == entry_id), None
+            )
+            if manager
+            else None
+        )
 
     def entry_source_bursty(self, entry_id: str) -> bool:
         """True when the source delivers in lumps rather than steadily."""
@@ -2073,7 +2302,17 @@ class AudioBridge:
         )
 
     async def rebuild_entry(self, entry_id: str) -> None:
+        recovery = getattr(self, "recovery", None)
+        if recovery is None:
+            return await self._rebuild_entry_impl(entry_id)
+        owner = settings.entry_id_of_stream(entry_id) or entry_id
+        await recovery.run(owner, "rebuild", lambda: self._rebuild_entry_impl(entry_id))
+
+    async def _rebuild_entry_impl(self, entry_id: str) -> None:
         """Give an entry fresh pipelines (new PCM reader and tee). Idempotent."""
+        if entry_id.startswith("dlna:") and getattr(self, "media_playback", None):
+            await self.media_playback.refresh({entry_id})
+            return
         async with self._restart_lock:
             if entry_id in self._airplay2_pipelines or entry_id in self._airplay2_sources:
                 await self._rebuild_airplay2_instances_locked({entry_id})
@@ -2084,6 +2323,11 @@ class AudioBridge:
     async def recover_source(self, entry_id: str) -> None:
         """Restart the entry's PCM source without touching the speaker."""
         stream_ids = self.entry_stream_ids(entry_id)
+        if entry_id.startswith("dlna:") and getattr(self, "media_playback", None):
+            await self.recovery.run(
+                entry_id, "source", lambda: self.media_playback.refresh({entry_id})
+            )
+            return
         await self._recover_stalled_source(stream_ids[0] if stream_ids else entry_id)
 
     async def kick_entry_clients(self, entry_id: str) -> None:
@@ -2092,6 +2336,13 @@ class AudioBridge:
             self._stream_server.kick_clients(stream_id)
 
     async def reissue_entry_play(self, entry_id: str) -> None:
+        recovery = getattr(self, "recovery", None)
+        if recovery is None:
+            return await self._reissue_entry_play_impl(entry_id)
+        owner = settings.entry_id_of_stream(entry_id) or entry_id
+        await recovery.run(owner, "reissue", lambda: self._reissue_entry_play_impl(entry_id))
+
+    async def _reissue_entry_play_impl(self, entry_id: str) -> None:
         """Re-issue the entry's play command with a fresh cache-buster.
 
         Ownership is checked per speaker: a speaker that moved to another
@@ -2115,7 +2366,9 @@ class AudioBridge:
                 continue
             play_url = f"{base}/stream/{stream_id}/for/{entry_id}/{did}?s={time.time_ns()}"
             try:
-                await self._device_manager.play_stream(did, play_url, owner=entry_id, force=True)
+                await self._device_manager.play_stream(
+                    did, play_url, owner=entry_id, force=True, steal=False
+                )
             except Exception:
                 logger.exception("Supervisor play re-issue failed for %s on %s", entry_id, did)
 
@@ -2165,93 +2418,48 @@ class AudioBridge:
             if stream_id == receiver_id or stream_id.startswith(f"{receiver_id}-"):
                 self._stream_server.kick_clients(stream_id)
 
-    async def _sweep_stale_stream_clients(self) -> None:
-        """Last-resort cleanup for speaker connections the teardown path missed.
-
-        The normal disconnect flow (delayed stop → speaker stop + client kick)
-        works, but a kicked speaker retries its last URL a few times and can
-        re-attach AFTER the kick, and a canceled pending stop never kicks at
-        all. Anything left with no data flow and no owning session is stale.
-        """
+    async def _run_session_lifecycle(self) -> None:
+        """Drive the shared lifecycle and reap orphan output connections."""
         while True:
-            await asyncio.sleep(STREAM_SWEEP_INTERVAL_SECONDS)
+            await asyncio.sleep(LIFECYCLE_TICK_SECONDS)
             try:
-                self._sweep_stale_once()
+                await self.sessions.tick()
+                # A lost shairport callback cannot hide real incoming PCM.
+                for entry_id in self._airplay2_entry_ids():
+                    lease = self.sessions.current(entry_id)
+                    idle = self.entry_source_idle_ms(entry_id)
+                    activity = self._source_activity_at(entry_id)
+                    if (lease is None and idle is not None and idle < 2000) or (
+                        lease is not None
+                        and lease.state == SessionState.QUIET
+                        and activity is not None
+                        and lease.quiet_at is not None
+                        and activity > lease.quiet_at
+                    ):
+                        await self.session_start(entry_id)
+                self._reap_orphan_stream_clients()
             except Exception:
                 logger.exception("Stale stream client sweep failed")
 
-    def _sweep_stale_once(self) -> None:
-        """Last-resort cleanup for speaker connections the teardown path missed.
-
-        Session expiry is timed per OWNER from the moment NO member stream is
-        flowing anymore: as long as any grouped sink still receives audio the
-        session is alive, and one flaky member must not restart the group's
-        timer nor let a paused group expire while another member plays.
-        """
-        now = time.monotonic()
+    def _reap_orphan_stream_clients(self) -> None:
+        """Reap orphan pulls; session expiry belongs exclusively to the registry."""
         receiver_ids = [receiver.id for receiver in settings.active_receivers()]
-        receiver_ids.extend(
-            instance.id for instance in settings.airplay2_instances if instance.enabled
-        )
-        owners_with_clients: set[str] = set()
-        flowing_owners: set[str] = set()
-        idle_streams: dict[str, list[str]] = {}
+        receiver_ids.extend(self._airplay2_entry_ids())
         for stream_id in self._stream_server.stream_ids():
+            self._stream_server.reap_ghost_clients(stream_id)
             owner = _stream_owner(stream_id, receiver_ids)
             if owner is None:
                 continue
-            if not self._stream_server.client_count(stream_id):
+            session = self.sessions.current(owner)
+            if session is not None and session.state == SessionState.ACTIVE:
                 continue
-            owners_with_clients.add(owner)
-            if self._stream_server.is_flowing(stream_id, window=STREAM_IDLE_KICK_SECONDS):
-                flowing_owners.add(owner)
+            if (
+                session is not None
+                and session.output_due is not None
+                and (time.monotonic() < session.output_due)
+            ):
                 continue
-            idle_streams.setdefault(owner, []).append(stream_id)
-
-        seen_idle: set[str] = set()
-        expired: set[str] = set()
-        for owner in sorted(owners_with_clients):
-            if owner in flowing_owners:
-                # A live member keeps the whole session alive; the next fully
-                # silent window starts a fresh timer.
-                self._stale_active_since.pop(owner, None)
-                continue
-            if owner not in self._active_sessions:
-                continue
-            seen_idle.add(owner)
-            # Read per sweep so a settings change hot-applies without an
-            # engine restart; 0 disables the expiry (pause indefinitely).
-            stale_timeout = float(settings.stale_session_timeout)
-            if stale_timeout <= 0:
-                continue  # paused sender session kept by configuration
-            started = self._stale_active_since.setdefault(owner, now)
-            if now - started < stale_timeout:
-                continue  # fully silent session: keep the waiting speakers briefly
-            logger.warning(
-                "Expiring stale active session %s after %.1fs without stream data",
-                owner,
-                now - started,
-            )
-            expired.add(owner)
-            self._active_sessions.discard(owner)
-            self._stale_active_since.pop(owner, None)
-            if self.on_session_stop:
-                self._spawn_aux(
-                    self.on_session_stop(owner),
-                    f"stale-session-stop:{owner}",
-                )
-        for owner in list(self._stale_active_since):
-            if owner not in seen_idle:
-                self._stale_active_since.pop(owner, None)
-        # Idle members of an expired or ownerless session are stale; idle
-        # members of a still-active session keep their connection — kicking
-        # them would only trigger needless speaker reconnects (a paused sender
-        # or a silent group sink while another member plays).
-        for owner, stream_ids in idle_streams.items():
-            if owner in self._active_sessions and owner not in expired:
-                continue
-            for stream_id in stream_ids:
-                self._stream_server.kick_clients(stream_id)
+            self._stream_server.kick_clients(stream_id)
 
 
 def _stream_owner(stream_id: str, receiver_ids: list[str]) -> str | None:

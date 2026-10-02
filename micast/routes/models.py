@@ -24,6 +24,9 @@ class AudioConfigResponse(BaseModel):
 class ConfigResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    config_revision: int = 0
+    runtime_epoch: str | None = None
+
     deployment: str
     audio: dict[str, Any]
     app: dict[str, Any]

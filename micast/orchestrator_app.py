@@ -8,6 +8,7 @@ import json
 import os
 import re
 import threading
+import uuid
 from typing import Literal
 
 from docker.errors import DockerException, NotFound
@@ -54,8 +55,9 @@ class ReceiverResult(BaseModel):
     name: str
     status: str
     pcm_host: str = ""
-    pcm_port: int = 9001
+    pcm_port: int = 42800
     error: str = ""
+    epoch: str = ""
 
 
 app = FastAPI(title="MiCast Receiver Orchestrator", docs_url=None, redoc_url=None)
@@ -88,6 +90,7 @@ async def capabilities() -> dict[str, object]:
             "rename_instance": True,
             "pcm_output": True,
             "mdns_publish": True,
+            "disconnect_sender": True,
         },
     }
 
@@ -99,6 +102,43 @@ async def capabilities() -> dict[str, object]:
 )
 async def reconcile(request: ReconcileRequest) -> dict[str, list[ReceiverResult]]:
     return {"receivers": await asyncio.to_thread(_reconcile_sync, request.receivers)}
+
+
+@app.post("/v1/receivers/{key}/disconnect", dependencies=[Depends(require_token)])
+async def disconnect_receiver(key: str) -> dict:
+    return await asyncio.to_thread(_disconnect_receiver_sync, key)
+
+
+def _disconnect_receiver_sync(key: str) -> dict:
+    # The managed/key label pair is the only authority; never accept arbitrary
+    # container IDs or invoke an unrestricted Docker action from this endpoint.
+    with _lock:
+        client = docker.from_env()
+        try:
+            containers = client.containers.list(
+                all=True, filters={"label": f"{MANAGED_LABEL}=true"}
+            )
+            desired = []
+            target = None
+            for container in containers:
+                container.reload()
+                env = dict(item.split("=", 1) for item in container.attrs["Config"]["Env"])
+                desired.append(ReceiverSpec(
+                    key=container.labels[KEY_LABEL], device_id=env["MICAST_DEVICE_ID"],
+                    name=env["MICAST_AIRPLAY_NAME"], protocol=env["MICAST_AIRPLAY_PROTOCOL"],
+                ))
+                if container.labels[KEY_LABEL] == key:
+                    target = container
+            if target is None:
+                raise HTTPException(status_code=404, detail="Managed receiver not found")
+            target.remove(force=True)
+            results = _reconcile_locked(client, desired)
+            result = next(item for item in results if item.key == key)
+            if result.status != "running":
+                raise HTTPException(status_code=503, detail=result.error or result.status)
+            return {"ok": True, "epoch": result.epoch}
+        finally:
+            client.close()
 
 
 def _reconcile_sync(desired: list[ReceiverSpec]) -> list[ReceiverResult]:
@@ -114,7 +154,7 @@ def _reconcile_locked(client, desired: list[ReceiverSpec]) -> list[ReceiverResul
     image = os.environ.get("MICAST_RECEIVER_IMAGE", "micast-receiver:latest")
     lan_network_name = os.environ.get("MICAST_RECEIVER_LAN_NETWORK", "micast-airplay")
     internal_network_name = os.environ.get("MICAST_INTERNAL_NETWORK", "micast-internal")
-    callback_base = os.environ.get("MICAST_CALLBACK_BASE", "http://micast:3000")
+    callback_base = os.environ.get("MICAST_CALLBACK_BASE", "http://micast:42300")
     callback_token = os.environ.get("MICAST_ORCHESTRATOR_TOKEN", "")
     pcm_host_mode = os.environ.get("MICAST_PCM_HOST_MODE", "internal").strip().lower()
 
@@ -160,7 +200,8 @@ def _reconcile_locked(client, desired: list[ReceiverSpec]) -> list[ReceiverResul
                         "MICAST_AIRPLAY_PROTOCOL": spec.protocol,
                         "MICAST_CALLBACK_BASE": callback_base,
                         "MICAST_CALLBACK_TOKEN": callback_token,
-                        "MICAST_PCM_PORT": "9001",
+                        "MICAST_PCM_PORT": "42800",
+                        "MICAST_RECEIVER_EPOCH": uuid.uuid4().hex,
                     },
                     labels={MANAGED_LABEL: "true", KEY_LABEL: spec.key, SPEC_LABEL: spec_hash},
                     restart_policy={"Name": "unless-stopped"},
@@ -185,6 +226,9 @@ def _reconcile_locked(client, desired: list[ReceiverSpec]) -> list[ReceiverResul
                         if pcm_host_mode == "lan"
                         else container.name
                     ),
+                    epoch=next((item.split("=", 1)[1]
+                                for item in container.attrs.get("Config", {}).get("Env", [])
+                                if item.startswith("MICAST_RECEIVER_EPOCH=")), ""),
                 )
             )
         except DockerException as exc:
@@ -204,7 +248,7 @@ def _spec_hash(spec: ReceiverSpec) -> str:
     # Updating the receiver callback contract must replace existing instances,
     # not leave containers running an old image behind an unchanged spec.
     payload = json.dumps(
-        {**spec.model_dump(), "receiver_contract": "central-volume-v1"},
+        {**spec.model_dump(), "receiver_contract": "session-leases-v2"},
         ensure_ascii=False,
         sort_keys=True,
     ).encode()

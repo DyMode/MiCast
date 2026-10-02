@@ -29,7 +29,8 @@ class LyricsSession:
 
     def __init__(self, receiver_id: str, server, device_manager, resend):
         """server: RaopServer (daap_meta/daap_events source).
-        resend: async callback(audio_id) re-issuing play with the audioID."""
+        resend: async callback(hit) re-issuing play with the library match;
+        hit is the dict from search_track {audio_id, cover_url, duration}."""
         self.receiver_id = receiver_id
         self.server = server
         self.device_manager = device_manager
@@ -56,7 +57,7 @@ class LyricsSession:
                 if meta.get("title"):
                     hit = await self._search(meta.get("title", ""), meta, fuzzy=False)
                     if hit:
-                        self._session_audio_id = hit
+                        self._session_audio_id = hit["audio_id"]
                         await self._resend(hit)
                         break
                     break  # one strict attempt; the watcher keeps trying
@@ -69,7 +70,7 @@ class LyricsSession:
 
     async def _watch(self) -> None:
         tried: set[str] = set()  # searched, no hit — don't spam the API
-        matched: dict[str, str] = {}  # title -> audioID, for "back to previous"
+        matched: dict[str, dict] = {}  # title -> hit, for "back to previous"
         last_seq = self.server.daap_events[-1][0] if self.server.daap_events else 0
         while True:
             await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
@@ -85,36 +86,35 @@ class LyricsSession:
                 derived = meta.get("derived") or ""
                 if derived and derived != title:
                     candidates.append(derived)
-                hit_id = ""
+                hit = None
                 for cand in candidates:
-                    audio_id = matched.get(cand)
-                    if audio_id:
-                        hit_id = audio_id
+                    cached = matched.get(cand)
+                    if cached:
+                        hit = cached
                         break
                     if cand in tried:
                         continue
                     tried.add(cand)
                     # derived is a real song title (fuzzy ok); minm may be a
                     # lyrics line — a fuzzy hit there would re-play on every line.
-                    audio_id = await self._search(cand, meta, fuzzy=(cand == derived))
-                    if audio_id:
-                        matched[cand] = audio_id
-                        hit_id = audio_id
+                    hit = await self._search(cand, meta, fuzzy=(cand == derived))
+                    if hit:
+                        matched[cand] = hit
                         break
-                if hit_id and hit_id != self._session_audio_id:
-                    self._session_audio_id = hit_id
-                    logger.info("歌词/封面切换: %s -> audioID=%s", title, hit_id)
-                    await self._resend(hit_id)
+                if hit and hit["audio_id"] != self._session_audio_id:
+                    self._session_audio_id = hit["audio_id"]
+                    logger.info("歌词/封面切换: %s -> audioID=%s", title, hit["audio_id"])
+                    await self._resend(hit)
 
-    async def _search(self, title: str, meta: dict, fuzzy: bool) -> str:
+    async def _search(self, title: str, meta: dict, fuzzy: bool) -> dict | None:
         if not title:
-            return ""
+            return None
         try:
             return await asyncio.wait_for(
-                self.device_manager.search_audio_id(
+                self.device_manager.search_track(
                     title, meta.get("artist", ""), fuzzy_fallback=fuzzy
                 ),
                 timeout=5.0,
             )
         except Exception:
-            return ""
+            return None

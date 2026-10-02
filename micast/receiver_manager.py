@@ -92,6 +92,7 @@ class ReceiverManager:
                 if item.status == "running" and item.pcm_host
                 else create_pcm_source("mock")
             )
+            source.epoch = item.epoch
             self._receivers[item.device_id] = Receiver(
                 device_id=item.device_id,
                 name=item.name,
@@ -106,6 +107,24 @@ class ReceiverManager:
             f"{len(failures)} 个接收器启动失败" if failures else f"{len(actual)} 个接收器已同步"
         )
 
+    async def reset_receiver(self, device_id: str) -> None:
+        """Release/recreate one ingress, without restarting unrelated receivers."""
+        receiver = self._receivers.get(device_id)
+        if receiver is None:
+            return
+        await receiver.pcm_source.stop()
+        if self._orchestrator.configured:
+            await self._orchestrator.disconnect_receiver(device_id)
+            results = await self._orchestrator.reconcile(self._desired())
+            result = next(item for item in results if item.device_id == device_id)
+            if result.status != "running":
+                raise RuntimeError(result.error or result.status)
+            source = create_pcm_source(f"tcp:{result.pcm_host}:{result.pcm_port}")
+            source.epoch = result.epoch
+        else:
+            source = create_pcm_source(settings.pcm_source, env={"MICAST_DEVICE_ID": device_id})
+        receiver.pcm_source = source
+
     def _start_legacy_single(self) -> None:
         definition = next(iter(settings.active_receivers()), None)
         device_id = definition.id if definition else "main"
@@ -113,7 +132,7 @@ class ReceiverManager:
         self._receivers[device_id] = Receiver(
             device_id=device_id,
             name=name,
-            pcm_source=create_pcm_source(settings.pcm_source),
+            pcm_source=create_pcm_source(settings.pcm_source, env={"MICAST_DEVICE_ID": device_id}),
             status="running",
             detail="使用外部 PCM 来源；协议由外部接收器决定",
         )

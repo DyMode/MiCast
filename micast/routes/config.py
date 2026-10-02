@@ -1,9 +1,9 @@
 """Configuration routes."""
 
 import contextlib
+import json
 import logging
 import os
-import re
 
 from fastapi import APIRouter, HTTPException
 
@@ -18,9 +18,22 @@ from micast.config import (
     storage_mode,
 )
 from micast.config_apply import apply_config_transaction
-from micast.deployment import airplay2_available, airplay2_mode, deployment_mode
+from micast.deployment import (
+    airplay2_available,
+    airplay2_mode,
+    classic_ingress_available,
+    deployment_mode,
+)
 from micast.dlna import DlnaService
+from micast.protocol_runtime import (
+    ProtocolRuntime,
+    ProtocolUnavailable,
+)
+from micast.protocol_runtime import (
+    protocol_status as _protocol_status,
+)
 from micast.raop import server as raop_server
+from micast.ports import AIRPLAY2_RECEIVER_PORT
 from micast.routes.models import AudioConfigResponse, ConfigResponse
 from micast.xiaomi.auth import XiaomiAuth
 from micast.xiaomi.device_manager import DeviceManager
@@ -43,14 +56,15 @@ def _dlna_recast_required(dlna: DlnaService | None) -> bool:
     return bool(dlna and any(state.uri for state in dlna.states.values()))
 
 
+
 def _port_mode(field: str) -> str:
     """auto (default) / custom (user-set) / env (pinned by a real env var)."""
-    env_var, default = EDITABLE_PORTS[field]
+    env_var, _ = EDITABLE_PORTS[field]
     if env_pinned(env_var):
         return "env"
-    if field in ("port", "stream_port"):
-        return "custom" if settings.preferred_port(field) != default else "auto"
-    return "custom" if getattr(settings, field) is not None else "auto"
+    if field in settings.strict_ports:
+        return "custom"
+    return "auto"
 
 
 def _preferred(field: str, fallback: int) -> int:
@@ -61,12 +75,13 @@ def _preferred(field: str, fallback: int) -> int:
 
 def _shairport_actual_port() -> int | None:
     """The port the bundled shairport-sync actually bound (fnOS single mode)."""
-    conf = default_data_dir() / "shairport-sync.conf"
     try:
-        match = re.search(r"^\s*port\s*=\s*(\d+)", conf.read_text(encoding="utf-8"), re.M)
-    except OSError:
+        data = json.loads((default_data_dir() / "airplay2-ready.json").read_text(encoding="utf-8"))
+        from micast.fnos_receiver import owns_listener
+        port = int(data["port"])
+        return port if port == AIRPLAY2_RECEIVER_PORT and owns_listener(int(data["pid"]), port) else None
+    except (OSError, ValueError, KeyError, TypeError):
         return None
-    return int(match.group(1)) if match else None
 
 
 def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
@@ -89,6 +104,21 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                 "editable": False,
             }
         )
+        entries.append(
+            {
+                "id": "dlna_http",
+                "name": "DLNA 控制端口",
+                "protocol": "tcp",
+                "mode": _port_mode("port"),
+                "preferred": _preferred("port", 42300),
+                "actual": settings.port if dlna and dlna.http_available else None,
+                "status": "listening" if dlna and dlna.status == "running" else "off",
+                "detail": dlna.http_detail
+                if dlna and not dlna.http_available
+                else "独立于飞牛管理入口，可修改后重试",
+                "editable": not env_pinned("MICAST_PORT"),
+            }
+        )
     else:
         entries.append(
             {
@@ -96,7 +126,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                 "name": "管理界面",
                 "protocol": "tcp",
                 "mode": _port_mode("port"),
-                "preferred": _preferred("port", 3000),
+                "preferred": _preferred("port", 42300),
                 "actual": settings.port,
                 "status": "listening",
                 "detail": "浏览器访问端口；修改后需重启应用",
@@ -110,7 +140,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "name": "音频流服务",
             "protocol": "tcp",
             "mode": _port_mode("stream_port"),
-            "preferred": _preferred("stream_port", 8080),
+            "preferred": _preferred("stream_port", 42400),
             "actual": settings.stream_port,
             "status": "listening",
             "detail": "音箱拉取音频流；被占用时自动顺延",
@@ -125,7 +155,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "name": "AirPlay RTSP",
             "protocol": "tcp",
             "mode": _port_mode("airplay_rtsp_port"),
-            "preferred": _preferred("airplay_rtsp_port", 5000),
+            "preferred": _preferred("airplay_rtsp_port", 42500),
             "actual": rtsp_ports[0] if rtsp_ports else None,
             "status": "listening" if rtsp_ports else "off",
             "detail": "经典 AirPlay 会话端口；被占用时自动顺延",
@@ -141,7 +171,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "name": "AirPlay 音频通道",
             "protocol": "udp",
             "mode": _port_mode("airplay_udp_base"),
-            "preferred": _preferred("airplay_udp_base", 6000),
+            "preferred": _preferred("airplay_udp_base", 42600),
             "actual": udp_in_use or None,
             "status": "listening" if udp_in_use else "off",
             "detail": f"每个 AirPlay 会话占 3 个 UDP 端口，范围 {udp_base}-{udp_top}",
@@ -150,20 +180,26 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
     )
 
     if airplay2_available():
-        if ap2_mode == "single":
-            actual = _shairport_actual_port()
+        if ap2_mode == "single" and deployment_mode() == "fnos":
+            sources = getattr(bridge, "_airplay2_sources", {})
+            actual = _shairport_actual_port() if any(
+                getattr(source, "alive", False) for source in sources.values()
+            ) else None
             enabled = settings.airplay2_enabled
+            failures = [item.get("detail", "接收器启动失败") for item in
+                        getattr(bridge, "_airplay2_runtime", {}).values()
+                        if item.get("status") in {"error", "failed", "blocked"}]
             entries.append(
                 {
                     "id": "airplay2_port",
                     "name": "AirPlay 2",
                     "protocol": "tcp",
-                    "mode": _port_mode("airplay2_port"),
-                    "preferred": _preferred("airplay2_port", 7000),
+                    "mode": "fixed",
+                    "preferred": AIRPLAY2_RECEIVER_PORT,
                     "actual": actual,
-                    "status": "listening" if (enabled and actual) else "off",
-                    "detail": "接收端口；被占用时自动顺延",
-                    "editable": not env_pinned("MICAST_AIRPLAY2_PORT"),
+                    "status": "listening" if (enabled and actual) else "error" if enabled and failures else "off",
+                    "detail": "；".join(failures) if enabled and failures else "当前接收器固定使用 TCP 7000；被占用时仅 AirPlay 2 不可用，释放后可重新启动",
+                    "editable": False,
                 }
             )
             entries.append(
@@ -174,7 +210,7 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                     "mode": "fixed",
                     "preferred": None,
                     "actual": [319, 320],
-                    "status": "listening" if enabled else "off",
+                    "status": "listening" if enabled and actual else "off",
                     "detail": "NQPTP PTP 时钟同步；由 AirPlay 2 使用",
                     "editable": False,
                 }
@@ -186,14 +222,21 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
                     "name": "AirPlay 2",
                     "protocol": "tcp",
                     "mode": "fixed",
-                    "preferred": 7000,
-                    "actual": 7000,
+                    "preferred": AIRPLAY2_RECEIVER_PORT,
+                    "actual": None,
                     "status": "hosted",
-                    "detail": "接收容器内部端口，无冲突，无需配置",
+                    "detail": "独立接收器固定使用 TCP 7000；容器桥接网络可映射主机端口，端口冲突请检查部署配置",
                     "editable": False,
                 }
             )
 
+    provider = getattr(bridge, "_local_provider", None)
+    mdns_running = bool(provider and provider.zeroconf is not None)
+    sources = getattr(bridge, "_airplay2_sources", {})
+    if deployment_mode() == "fnos" and any(
+        getattr(source, "alive", False) for source in sources.values()
+    ):
+        mdns_running = mdns_running or _shairport_actual_port() is not None
     entries.append(
         {
             "id": "mdns",
@@ -201,9 +244,9 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "protocol": "udp",
             "mode": "fixed",
             "preferred": None,
-            "actual": 5353,
-            "status": "listening",
-            "detail": "AirPlay / DLNA 发现广播，可与其他 mDNS 服务共存",
+            "actual": 5353 if mdns_running else None,
+            "status": "listening" if mdns_running else "off",
+            "detail": "AirPlay 公告与设备发现，可与其他 mDNS 服务共存",
             "editable": False,
         }
     )
@@ -226,6 +269,10 @@ def _ports_report(bridge: AudioBridge, dlna: DlnaService | None) -> list[dict]:
             "editable": False,
         }
     )
+    if not classic_ingress_available():
+        entries = [entry for entry in entries if entry["id"] not in {
+            "airplay_rtsp_port", "airplay_udp_base", "mdns", "ssdp"
+        }]
     return entries
 
 
@@ -236,6 +283,8 @@ def install(
     access: AccessManager | None = None,
     device_manager: DeviceManager | None = None,
 ) -> APIRouter:
+    protocols = ProtocolRuntime(bridge, dlna)
+
     async def persist_only() -> None:
         return None
 
@@ -260,7 +309,10 @@ def install(
 
     @router.get("", response_model=ConfigResponse)
     async def get_config():
+        runtime_epoch = getattr(getattr(bridge, "runtime_snapshot", None), "epoch", None)
         return {
+            "config_revision": settings.config_revision,
+            "runtime_epoch": runtime_epoch if isinstance(runtime_epoch, str) else None,
             "deployment": deployment_mode(),
             "audio": settings.audio.model_dump(),
             "app": settings.app.model_dump(),
@@ -268,6 +320,8 @@ def install(
             "airplay_protocol": settings.airplay_protocol,
             "airplay_engine": settings.airplay_engine,
             "dlna_enabled": settings.dlna_enabled,
+            "airplay_enabled": settings.airplay_enabled,
+            "protocol_status": _protocol_status(bridge, dlna),
             "sync_groups_enabled": settings.sync_groups_enabled,
             "large_delay_enabled": settings.large_delay_enabled,
             "touchscreen_lyrics": settings.touchscreen_lyrics,
@@ -284,6 +338,7 @@ def install(
                 "mode": storage_mode(),
                 "data_dir": str(default_data_dir()),
                 "log_dir": str(default_log_dir()),
+                "shared_dir": os.environ.get("MICAST_SHARED_DIR"),
             },
             "dlna_status": {
                 "status": dlna.status if dlna else "unavailable",
@@ -328,18 +383,33 @@ def install(
         )
         return {"airplay_protocol": protocol}
 
+    @router.post("/airplay")
+    async def set_airplay(payload: dict):
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="enabled boolean required")
+        if enabled and not classic_ingress_available():
+            raise HTTPException(status_code=409, detail="当前隔离网络部署不支持经典 AirPlay 接收")
+        await apply_config_transaction(lambda: settings.set_airplay_enabled(enabled),
+                                       bridge.reconcile_classic_feature)
+        return {"airplay_enabled": enabled, "protocol_status": _protocol_status(bridge, dlna)}
+
+    @router.post("/protocols/retry")
+    async def retry_protocol(payload: dict):
+        try:
+            status = await protocols.retry(payload.get("protocol"))
+        except ProtocolUnavailable as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        return {"protocol_status": status}
+
     @router.post("/dlna")
     async def set_dlna(payload: dict):
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise HTTPException(status_code=400, detail="enabled boolean required")
 
-        async def reconcile_dlna() -> None:
-            if dlna:
-                await dlna.reconcile()
-
         await apply_config_transaction(
-            lambda: settings.set_dlna_enabled(enabled), reconcile_dlna
+            lambda: settings.set_dlna_enabled(enabled), protocols.reconcile_dlna
         )
         return {"dlna_enabled": enabled}
 
@@ -531,8 +601,12 @@ def install(
     @router.post("/ports")
     async def set_port(payload: dict):
         key = str(payload.get("id") or "")
+        if key == "dlna_http" and os.environ.get("MICAST_UNIX_SOCKET", "").strip():
+            key = "port"
         if key not in EDITABLE_PORTS:
             raise HTTPException(status_code=400, detail=f"未知端口项: {key or '(空)'}")
+        if key == "airplay2_port":
+            raise HTTPException(status_code=409, detail="当前 AirPlay 2 接收器固定使用 TCP 7000，不能自动分配或修改；释放端口后可重新启动")
         env_var = EDITABLE_PORTS[key][0]
         if env_pinned(env_var):
             raise HTTPException(
@@ -551,6 +625,10 @@ def install(
         async def apply_port() -> None:
             nonlocal restart_required
             if key == "port":
+                listener = getattr(dlna, "http_listener", None) if dlna else None
+                if listener and settings.dlna_enabled:
+                    await protocols.restart_dlna_listener()
+                    return
                 # uvicorn can't rebind a running listener; restart to apply.
                 restart_required = True
             elif key == "stream_port":

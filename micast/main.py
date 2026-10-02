@@ -1,11 +1,10 @@
 """FastAPI application entrypoint."""
 
 import asyncio
-import contextlib
 import logging
-import re
+import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -17,9 +16,11 @@ from micast.access import COOKIE_NAME, AccessManager
 from micast.audio_bridge import AudioBridge
 from micast.audio_metrics import run_runtime_monitor
 from micast.audio_supervisor import AudioSupervisor
-from micast.config import resolve_port, settings
+from micast.config import default_runtime_dir, settings
+from micast.config_store import write_json
 from micast.deployment import airplay2_mode
 from micast.dlna import DlnaService
+from micast.media_playback import MediaPlayback
 from micast.notify import Notifier, notify_expired_soon
 from micast.paths import APP_BASE_PATH
 from micast.playback_orchestrator import PlaybackOrchestrator
@@ -43,6 +44,8 @@ from micast.routes import (
     xiaomi,
 )
 from micast.runtime_log import install_asyncio_exception_filter, install_runtime_log
+from micast.runtime_tasks import RuntimeTasks
+from micast.track_metadata import TrackMetadataRegistry
 from micast.xiaomi.auth import XiaomiAuth
 from micast.xiaomi.device_manager import DeviceManager
 
@@ -61,10 +64,8 @@ async def lifespan(app: FastAPI):
     settings.configure_airplay2_deployment(airplay2_mode())
     # Speakers pull audio from stream_port; if it's taken and the user didn't
     # pin it explicitly, slide to a free one rather than failing the session.
-    settings.apply_resolved_port(
-        "stream_port", resolve_port(settings.stream_port, "MICAST_STREAM_PORT")
-    )
     raop_server.configure_ports(settings.airplay_rtsp_port, settings.airplay_udp_base)
+
     def expiry_notice() -> None:
         notify_expired_soon(app.state.notifier)
 
@@ -72,9 +73,16 @@ async def lifespan(app: FastAPI):
     bridge: AudioBridge = app.state.bridge
     device_manager: DeviceManager = app.state.device_manager
     dlna_service: DlnaService = app.state.dlna
-    background_tasks: set[asyncio.Task] = set()
+    bridge.dlna_service = dlna_service
+    runtime_tasks = RuntimeTasks()
+    orchestrator = None
     # receiver_id -> matched audioID (for /api/status now-playing display)
     bridge.lyrics_matched = {}
+    # Session-scoped now-playing enrichment (library cover/duration); shared
+    # between the lyrics matcher (writer), the status payload (reader) and the
+    # cover endpoint (serving/redirect decision).
+    track_metadata = TrackMetadataRegistry()
+    bridge.track_metadata = track_metadata
 
     async def verify_saved_xiaomi_login() -> None:
         # Do not rely on the embedded webview's visibility state to discover
@@ -96,80 +104,74 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Initial Xiaomi login verification failed")
 
-    def start_background(coro, *, name: str) -> asyncio.Task:
-        """Own a lifespan task and always consume/report its exception."""
-        task = asyncio.create_task(coro, name=name)
-        background_tasks.add(task)
+    start_background = runtime_tasks.start
 
-        def finished(done: asyncio.Task) -> None:
-            background_tasks.discard(done)
-            if done.cancelled():
-                return
-            try:
-                error = done.exception()
-            except asyncio.CancelledError:
-                return
-            if error is not None:
-                logger.error(
-                    "Background task %s failed",
-                    done.get_name(),
-                    exc_info=(type(error), error, error.__traceback__),
-                )
-
-        task.add_done_callback(finished)
-        return task
-
-    start_background(verify_saved_xiaomi_login(), name="verify-xiaomi-login")
-    # Runtime health for the diagnostics page: CPU load of this process and how
-    # late the event loop runs its own timer. A stutter report with every drop
-    # counter at zero needs these two numbers to tell "the box is saturated"
-    # from "the sender delivers in lumps".
-    start_background(run_runtime_monitor(), name="runtime-monitor")
-
-    orchestrator = PlaybackOrchestrator(
-        bridge,
-        device_manager,
-        lambda coro, name: start_background(coro, name=name),
-    )
-    orchestrator.attach()
-    # Routes reach the group-membership reconciler through app.state.
-    app.state.reconcile_group = orchestrator.reconcile_group
-    # Learn what formats each speaker accepts while the house is quiet. Starting
-    # this here (rather than only after a session ends) means a fresh install
-    # fills the table in without anyone pressing "test formats".
-    orchestrator.schedule_codec_probe(delay=90.0)
-
-    # One authority decides whether each entry is delivering audio and drives
-    # the recovery ladder; see micast/audio_supervisor.py for why the previous
-    # six independent observers were replaced.
-    bridge.attach_device_manager(device_manager)
-    supervisor = AudioSupervisor(bridge, device_manager)
-    bridge.attach_supervisor(supervisor)
-    app.state.audio_supervisor = supervisor
-    start_background(_run_audio_supervisor(supervisor), name="audio-supervisor")
-
-    await bridge.start()
-    await dlna_service.start()
-    # Silently rotate Xiaomi serviceTokens in the background so the stored
-    # passToken keeps the login alive past the ~30-day serviceToken expiry.
-    renewal_task = asyncio.create_task(app.state.auth.run_token_renewal())
     try:
+        start_background(verify_saved_xiaomi_login(), name="verify-xiaomi-login")
+        # Runtime health for the diagnostics page: CPU load of this process and how
+        # late the event loop runs its own timer. A stutter report with every drop
+        # counter at zero needs these two numbers to tell "the box is saturated"
+        # from "the sender delivers in lumps".
+        start_background(run_runtime_monitor(), name="runtime-monitor")
+
+        orchestrator = PlaybackOrchestrator(
+            bridge,
+            device_manager,
+            lambda coro, name: start_background(coro, name=name),
+            track_metadata=track_metadata,
+        )
+        orchestrator.attach()
+        # Routes reach the group-membership reconciler through app.state.
+        app.state.reconcile_group = orchestrator.reconcile_group
+        # Learn what formats each speaker accepts while the house is quiet. Starting
+        # this here (rather than only after a session ends) means a fresh install
+        # fills the table in without anyone pressing "test formats".
+        orchestrator.schedule_codec_probe(delay=90.0)
+
+        # One authority decides whether each entry is delivering audio and drives
+        # the recovery ladder; see micast/audio_supervisor.py for why the previous
+        # six independent observers were replaced.
+        bridge.attach_device_manager(device_manager)
+        supervisor = AudioSupervisor(bridge, device_manager)
+        bridge.attach_supervisor(supervisor)
+        app.state.audio_supervisor = supervisor
+        start_background(_run_audio_supervisor(supervisor), name="audio-supervisor")
+
+        await bridge.start()
+        if os.environ.get("MICAST_UNIX_SOCKET", "").strip():
+            from micast.dlna_listener import DlnaHttpListener
+
+            app.state.dlna_listener = DlnaHttpListener(dlna_service)
+            dlna_service.http_listener = app.state.dlna_listener
+            if settings.dlna_enabled:
+                await app.state.dlna_listener.start()
+        await dlna_service.start()
+        runtime_file = default_runtime_dir() / "runtime-ports.json"
+        write_json(
+            runtime_file,
+            {
+                "pid": os.getpid(),
+                "port": settings.port,
+                "stream_port": settings.stream_port,
+            },
+        )
+        # Silently rotate Xiaomi serviceTokens in the background so the stored
+        # passToken keeps the login alive past the ~30-day serviceToken expiry.
+        start_background(app.state.auth.run_token_renewal(), name="xiaomi-token-renewal")
         yield
     finally:
         app.state.auth.unsubscribe_expiry(expiry_notice)
-        renewal_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await renewal_task
-        for task in list(background_tasks):
-            task.cancel()
-        if background_tasks:
-            await asyncio.gather(*list(background_tasks), return_exceptions=True)
-        await orchestrator.stop_all()
-        await device_manager.close()
-        await dlna_service.stop()
-        await app.state.auth.close()
-        await app.state.notifier.close()
-        await bridge.stop()
+        async with AsyncExitStack() as cleanup:
+            cleanup.push_async_callback(bridge.stop)
+            cleanup.push_async_callback(app.state.notifier.close)
+            cleanup.push_async_callback(app.state.auth.close)
+            if getattr(app.state, "dlna_listener", None):
+                cleanup.push_async_callback(app.state.dlna_listener.stop)
+            cleanup.push_async_callback(dlna_service.stop)
+            cleanup.push_async_callback(device_manager.close)
+            if orchestrator:
+                cleanup.push_async_callback(orchestrator.stop_all)
+            cleanup.push_async_callback(runtime_tasks.close)
 
 
 logger = logging.getLogger(__name__)
@@ -188,34 +190,24 @@ app.state.bridge = AudioBridge()
 app.state.access = AccessManager()
 app.state.auth = XiaomiAuth()
 app.state.device_manager = DeviceManager(app.state.auth)
-app.state.dlna = DlnaService(app.state.device_manager)
+app.state.device_manager.bridge = app.state.bridge
+app.state.media_playback = MediaPlayback(app.state.bridge, app.state.device_manager)
+app.state.bridge.media_playback = app.state.media_playback
+app.state.dlna = DlnaService(
+    app.state.device_manager, app.state.bridge.sessions, app.state.media_playback
+)
+app.state.bridge.dlna_service = app.state.dlna
+app.state.device_manager.sessions = app.state.bridge.sessions
+app.state.bridge.stream_server.sessions = app.state.bridge.sessions
 app.state.bridge.stream_server.media_volume = app.state.dlna.media_volume
+app.state.bridge.stream_server.media_session = app.state.dlna.media_token
 app.state.notifier = Notifier()
 
 
 def _stream_active_for(device_id: str) -> bool:
-    """Watchdog ground truth: is the speaker really pulling its stream right
-    now? The cloud reports "playing" even when the speaker fetches nothing."""
-    url = app.state.device_manager.stream_url_of(device_id) or ""
-    # Only the first path segment is the registered stream id. Per-speaker
-    # routing lives in later segments (``/for/{receiver}/{sink}``); including
-    # those made every healthy pull look inactive and the watchdog repeatedly
-    # restarted both speakers.
-    match = re.search(r"/stream/([^/?]+)", url)
-    if not match:
-        return True  # not one of our streams — don't interfere
-    stream_id = match.group(1)
-    bridge = app.state.bridge
-    server = bridge.stream_server
-    if server.client_count(stream_id) == 0:
-        return False
-    if server.is_flowing(stream_id, window=10.0):
-        return True
-    # Connected but byteless. A paused sender looks exactly the same here, so
-    # only call it dead when the pipeline itself starved mid-session — then the
-    # watchdog's restore re-joins the speaker once the source restart (driven
-    # by the pipeline's own stall watchdog) brings the bytes back.
-    return not bridge.stream_starved(stream_id)
+    from micast.stream_health import stream_active_for
+
+    return stream_active_for(app.state.bridge, app.state.device_manager, device_id)
 
 
 app.state.device_manager.stream_active = _stream_active_for

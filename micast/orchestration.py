@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
@@ -37,6 +37,7 @@ class OrchestratedReceiver:
     pcm_host: str
     pcm_port: int
     error: str = ""
+    epoch: str = ""
 
 
 class OrchestratorClient:
@@ -111,8 +112,18 @@ class OrchestratorClient:
                 name=item["name"],
                 status=item.get("status", "error"),
                 pcm_host=item.get("pcm_host", ""),
-                pcm_port=int(item.get("pcm_port", 9001)),
+                pcm_port=int(item.get("pcm_port", 42800)),
                 error=item.get("error", ""),
+                epoch=item.get("epoch", ""),
             )
             for item in data.get("receivers", [])
         ]
+
+    async def disconnect_receiver(self, key: str) -> None:
+        """Reset only this managed receiver's ingress, leaving it advertised."""
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=False) as client:
+            result = await client.post(
+                f"{self.base_url}/v1/receivers/{quote(key, safe='')}/disconnect",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            result.raise_for_status()

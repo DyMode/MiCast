@@ -282,8 +282,10 @@ class _DlnaRuntime:
 class DlnaTargetManager:
     """Starts/stops playback on DLNA renderers attached to group receivers."""
 
-    def __init__(self, discovery: DlnaDiscovery):
+    def __init__(self, discovery: DlnaDiscovery, sessions=None, stream_content_type=None):
         self._discovery = discovery
+        self.sessions = sessions
+        self.stream_content_type = stream_content_type
         self._targets: dict[str, dict[str, _DlnaRuntime]] = {}  # receiver -> udn -> runtime
         self._last_urls: dict[str, str] = {}
         self._last_channels: dict[str, dict[str, str]] = {}
@@ -352,6 +354,8 @@ class DlnaTargetManager:
         device_ids: list[str],
         url: str,
         channels: dict[str, str] | None = None,
+        *,
+        steal: bool = True,
     ) -> None:
         if not device_ids:
             return
@@ -360,10 +364,13 @@ class DlnaTargetManager:
         targets = self._targets.setdefault(receiver_id, {})
         for udn in list(targets):
             if udn not in device_ids:
+                await self._stop_owned(targets[udn])
                 targets.pop(udn)
         await asyncio.gather(
             *(
-                self._play_one(receiver_id, targets, udn, self._url_for(receiver_id, udn, url))
+                self._play_one(
+                    receiver_id, targets, udn, self._url_for(receiver_id, udn, url), steal
+                )
                 for udn in device_ids
             )
         )
@@ -374,17 +381,30 @@ class DlnaTargetManager:
         from micast.config import settings
 
         side = self._last_channels.get(receiver_id, {}).get(udn)
-        if side not in ("left", "right"):
-            return base_url
-        return base_url + settings.receiver_channel_variant_suffix(receiver_id, side)
+        suffix = (
+            settings.receiver_channel_variant_suffix(receiver_id, side)
+            if side in ("left", "right")
+            else ""
+        )
+        if self.sessions is not None:
+            suffix = settings.stream_suffix(receiver_id, udn)
+        url = base_url + suffix
+        if self.sessions is not None:
+            from urllib.parse import quote
+
+            url += f"/for/{quote(receiver_id, safe='')}/{quote(udn, safe='')}"
+        return url
 
     async def stop_targets(self, receiver_id: str) -> None:
         self._last_urls.pop(receiver_id, None)
         self._last_channels.pop(receiver_id, None)
         targets = self._targets.get(receiver_id, {})
-        await asyncio.gather(
-            *(self._stop_one(runtime) for runtime in targets.values()), return_exceptions=True
+        results = await asyncio.gather(
+            *(self._stop_owned(runtime) for runtime in targets.values()), return_exceptions=True
         )
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            raise ExceptionGroup("DLNA target cleanup failed", failures)
 
     async def stop_all(self) -> None:
         for receiver_id in list(self._targets):
@@ -397,54 +417,114 @@ class DlnaTargetManager:
         this receiver is currently casting, otherwise just prune."""
         url = self._last_urls.get(receiver_id)
         if url:
-            await self.play_targets(receiver_id, device_ids, url, channels)
+            await self.play_targets(receiver_id, device_ids, url, channels, steal=False)
             return
         targets = self._targets.get(receiver_id, {})
         for udn in list(targets):
             if udn not in device_ids:
-                await self._stop_one(targets.pop(udn))
+                await self._stop_owned(targets.pop(udn))
 
     async def _play_one(
-        self, receiver_id: str, targets: dict[str, _DlnaRuntime], udn: str, url: str
+        self, receiver_id: str, targets: dict[str, _DlnaRuntime], udn: str, url: str,
+        steal: bool = True,
     ) -> None:
         device = self._discovery.resolve(udn)
-        runtime = targets.get(udn) or _DlnaRuntime(udn, udn)
+        # Release callbacks capture one generation's object, never a mutable
+        # runtime reused by a replacement session.
+        runtime = _DlnaRuntime(udn, udn)
         targets[udn] = runtime
         if device is None or not device.control_url:
             runtime.status = "error"
             runtime.detail = "设备不在线或不支持 AVTransport"
             return
         runtime.name = device.name
-        try:
-            safe_url = _xml_escape(url)
-            metadata = _DIDL_METADATA.format(title="MiCast", mime="audio/mpeg", url=safe_url)
-            await self._soap(
-                device,
-                "SetAVTransportURI",
-                {
-                    "InstanceID": "0",
-                    "CurrentURI": safe_url,
-                    "CurrentURIMetaData": _xml_escape(metadata),
-                },
+
+        async def start():
+            from micast.audio_encoder import _FORMATS, raw_pcm_format
+            from micast.config import settings
+
+            mime = (
+                _FORMATS[settings.audio.format].content_type
+                if settings.audio.auto_transcode else raw_pcm_format().content_type
             )
+            if self.stream_content_type is not None:
+                from urllib.parse import unquote, urlsplit
+
+                sid = unquote(urlsplit(url).path.partition("/stream/")[2].split("/for/")[0])
+                mime = self.stream_content_type(sid) or mime
+            safe_url = _xml_escape(url)
+            metadata = _DIDL_METADATA.format(title="MiCast", mime=mime, url=safe_url)
+            runtime.status = "connecting"
+            runtime.command_sent = True
+            await self._soap(
+                device, "SetAVTransportURI",
+                {"InstanceID": "0", "CurrentURI": safe_url,
+                 "CurrentURIMetaData": _xml_escape(metadata)},
+            )
+            if self.sessions is not None and not self.sessions.valid(runtime.token):
+                return
             await self._soap(device, "Play", {"InstanceID": "0", "Speed": "1"})
             runtime.status = "playing"
             runtime.detail = ""
             logger.info("DLNA target %s playing %s", device.name, url)
+
+        try:
+            if self.sessions is not None:
+                lease = self.sessions.current(receiver_id)
+                if lease is None or not self.sessions.valid(lease.token):
+                    return
+                runtime.token = lease.token
+                if not await self.sessions.targets.acquire(
+                    f"dlna-target:{udn}",
+                    lease.token,
+                    lambda runtime=runtime: self._stop_one(runtime),
+                    steal=steal,
+                    start=start,
+                ):
+                    runtime.status = "idle"
+                    return
+            else:
+                await start()
         except Exception as exc:
             runtime.status = "error"
             runtime.detail = str(exc)
             logger.warning("DLNA target %s failed: %s", device.name, exc)
 
+    async def _stop_owned(self, runtime: _DlnaRuntime) -> None:
+        if self.sessions is not None and hasattr(runtime, "token"):
+            await self.sessions.targets.execute(
+                f"dlna-target:{runtime.device_id}", runtime.token,
+                lambda: self._stop_one(runtime),
+            )
+        else:
+            await self._stop_one(runtime)
+
     async def _stop_one(self, runtime: _DlnaRuntime) -> None:
+        if (
+            self.sessions is not None
+            and hasattr(runtime, "token")
+            and not self.sessions.targets.owns(f"dlna-target:{runtime.device_id}", runtime.token)
+        ):
+            return
         device = self._discovery.resolve(runtime.device_id)
-        if device and device.control_url and runtime.status == "playing":
+        commanded = runtime.status in ("playing", "connecting") or getattr(
+            runtime, "command_sent", False
+        )
+        if commanded and (not device or not device.control_url):
+            runtime.detail = "停止待重试: 设备暂时不可达"
+            raise RuntimeError(runtime.detail)
+        if device and device.control_url and commanded:
             try:
                 await self._soap(device, "Stop", {"InstanceID": "0"})
             except Exception as exc:
                 logger.info("DLNA stop on %s failed: %s", runtime.name, exc)
+                runtime.detail = f"停止待重试: {exc}"
+                raise
         runtime.status = "idle"
+        runtime.command_sent = False
         runtime.detail = ""
+        if self.sessions is not None and hasattr(runtime, "token"):
+            self.sessions.targets.forget(f"dlna-target:{runtime.device_id}", runtime.token)
 
     async def _soap(self, device: DlnaDevice, action: str, arguments: dict[str, str]) -> None:
         service = f"{AVTRANSPORT_SERVICE_PREFIX}:1"

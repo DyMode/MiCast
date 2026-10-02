@@ -21,9 +21,40 @@ from micast.audio_encoder import (
 )
 from micast.audio_metrics import metrics
 from micast.config import settings
+from micast.ports import reserve_tcp
 from micast.test_tone import test_tone_wav
 
 logger = logging.getLogger(__name__)
+
+
+class SessionStreamingResponse(StreamingResponse):
+    """A streaming request is owned by its lease, including a blocked ASGI send."""
+
+    def __init__(self, content, *, sessions=None, session_token=None, **kwargs):
+        super().__init__(content, **kwargs)
+        self.sessions, self.session_token = sessions, session_token
+
+    async def __call__(self, scope, receive, send):
+        task = asyncio.current_task()
+        key = f"request:{id(task)}"
+
+        async def release_request():
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        if self.sessions is not None and not self.sessions.register(
+            self.session_token, key, release_request, kind="connection"
+        ):
+            await self.body_iterator.aclose()
+            await Response(status_code=410)(scope, receive, send)
+            return
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.body_iterator.aclose()
+            if self.sessions is not None:
+                self.sessions.forget(self.session_token, key)
 
 # Hard ceiling on a client's delay line. Producer (sender clock) and consumer
 # (speaker clock) always drift a little; a speaker that trails accumulates
@@ -114,25 +145,48 @@ def _drop_whole_chunks(buffer: deque[bytes], requested: int) -> int:
 
 
 
-async def _serve_seekable_media(url: str, ss: float, volume_provider=None) -> StreamingResponse:
+async def _serve_seekable_media(
+    url: str, ss: float, volume_provider=None, sessions=None, session_token=None,
+) -> StreamingResponse:
     """In-process transcode of a remote URL streamed back as MP3. Seeking the
     input container is fast when the origin supports Range requests (music
     CDNs do)."""
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="invalid url")
     pump = MediaProxyPump(url, ss, _MEDIA_UA, volume_provider).start()
+    resource_key = f"media:{id(pump)}"
+    if sessions is not None and not sessions.register(
+        session_token, resource_key, pump.close, kind="media"
+    ):
+        pump.abort()
+        raise HTTPException(status_code=410, detail="Playback session ended")
 
     async def generator():
+        completed = False
         try:
             while True:
                 chunk = await pump.read()
                 if not chunk:
+                    completed = True
                     break
                 yield chunk
         finally:
             pump.abort()
+            if sessions is not None:
+                # Keep a still-running worker registered for bounded retries.
+                if pump._done.is_set():
+                    sessions.forget(session_token, resource_key)
+                else:
+                    sessions.release(session_token, resource_key)
+                lease = sessions.current(session_token.owner)
+                if completed and sessions.valid(session_token) and lease and not any(
+                    key.startswith("media:") for key in lease.resources
+                ):
+                    sessions.end(session_token, "media_finished", immediate=True)
 
-    return StreamingResponse(generator(), media_type="audio/mpeg")
+    return SessionStreamingResponse(
+        generator(), media_type="audio/mpeg", sessions=sessions, session_token=session_token,
+    )
 
 
 class StreamServer:
@@ -177,6 +231,9 @@ class StreamServer:
         self._group_recoveries: dict[str, dict[str, Any]] = {}
         self.on_client_disconnected: Callable[[str, str], Awaitable[None]] | None = None
         self.media_volume = None
+        self.media_session = None
+        self.sessions = None
+        self.stream_owner = None
         self._setup_routes()
 
     def _setup_routes(self) -> None:
@@ -308,7 +365,13 @@ class StreamServer:
                 if receiver and self.media_volume
                 else None
             )
-            return await _serve_seekable_media(url, max(0.0, ss), provider)
+            token = self.media_session(receiver, session) if self.media_session else None
+            if self.media_session and token is None:
+                raise HTTPException(status_code=410, detail="Playback session ended")
+            return await _serve_seekable_media(
+                url, max(0.0, ss), provider,
+                self.sessions if token is not None else None, token,
+            )
 
         @self._app.get("/diagnostic/builtin.wav")
         async def diagnostic_builtin():
@@ -362,6 +425,10 @@ class StreamServer:
         self._rate_samples[device_id] = 0
         self._rate_history.pop(device_id, None)
         logger.info("Registered stream /stream/%s (%s)", device_id, stream_format.content_type)
+
+    def stream_content_type(self, stream_id: str) -> str | None:
+        format = self._streams.get(stream_id)
+        return format.content_type if format else None
 
     def register_diagnostic_media(self, token: str, path: Path, media_type: str) -> None:
         """Expose uploaded diagnostic audio on the same port as live streams."""
@@ -575,6 +642,13 @@ class StreamServer:
 
         sink = sink or request.query_params.get("sink") or None
         receiver_id = receiver_id or request.query_params.get("receiver") or None
+        if receiver_id is None and self.stream_owner is not None:
+            receiver_id = self.stream_owner(device_id)
+        lease = self.sessions.current(receiver_id) if self.sessions and receiver_id else None
+        if self.sessions is not None and receiver_id and (
+            lease is None or not self.sessions.valid(lease.token)
+        ):
+            raise HTTPException(status_code=410, detail="Playback session ended")
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
         metrics.note_client_connect(device_id, replacing=bool(self._clients.get(device_id)))
         self._clients.setdefault(device_id, set()).add(queue)
@@ -606,6 +680,17 @@ class StreamServer:
             "bytes_out": 0,
             "last_byte_at": 0.0,
         }
+        resource_key = f"stream:{id(queue)}"
+        if lease is not None:
+            def release_connection():
+                state = self._client_delay.get(queue)
+                if state is not None:
+                    state["intentional_close"] = True
+                while not queue.empty():
+                    queue.get_nowait()
+                queue.put_nowait(None)
+
+            self.sessions.register(lease.token, resource_key, release_connection)
         recovery = self._group_recoveries.get(receiver_id) if receiver_id else None
         recovery_event: asyncio.Event | None = None
         if recovery is not None and sink in recovery["expected"]:
@@ -853,6 +938,7 @@ class StreamServer:
                             yield take_silence()
                             last_yield_at = now
                             if state is not None:
+                                metrics.note_silence_fill(device_id)
                                 state["silence_fills"] = int(state.get("silence_fills") or 0) + 1
                                 if state["silence_fills"] in (1, 20, 100):
                                     logger.info(
@@ -889,6 +975,8 @@ class StreamServer:
                     self.note_sink_bytes(queue, len(head))
                     yield head
             finally:
+                if lease is not None:
+                    self.sessions.forget(lease.token, resource_key)
                 self._clients.get(device_id, set()).discard(queue)
                 state = self._client_delay.pop(queue, None) or {}
                 waiting = self._group_recoveries.get(receiver_id) if receiver_id else None
@@ -907,8 +995,10 @@ class StreamServer:
                 ):
                     await self.on_client_disconnected(receiver_id, sink)
 
-        return StreamingResponse(
+        return SessionStreamingResponse(
             generator(),
+            sessions=self.sessions if lease is not None else None,
+            session_token=lease.token if lease is not None else None,
             media_type=stream_format.content_type,
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -964,7 +1054,12 @@ class StreamServer:
             sink = str(state.get("sink") or "")
             if not receiver or not sink:
                 continue
+            previous = result.get(receiver, {}).get(sink, {})
+            last = float(state.get("last_byte_at") or 0)
             result.setdefault(receiver, {})[sink] = {
+                "clients": int(previous.get("clients", 0)) + 1,
+                "flowing": bool(previous.get("flowing"))
+                or bool(last and time.monotonic() - last < 3),
                 "manual_ms": int(state.get("manual_ms") or 0),
                 "startup_ms": int(state.get("startup_ms") or 0),
                 "effective_ms": int(state.get("target_ms") or 0),
@@ -1075,21 +1170,16 @@ class StreamServer:
         ``self._server`` at a single assignment point so start()'s readiness
         check and stop()'s shutdown signal always target the live instance.
         """
-        for attempt in range(5):
-            try:
-                await server.serve()
-                return
-            except SystemExit:
-                logger.error(
-                    "Stream server failed to bind port %s (attempt %s/5)",
-                    settings.stream_port,
-                    attempt + 1,
-                )
-                if server.should_exit or attempt == 4:
-                    return
-                await asyncio.sleep(1)
-                server = Server(server.config)
-                self._server = server
+        lease = reserve_tcp(settings.preferred_port("stream_port"), settings.host,
+                            strict=settings.port_is_strict("stream_port"))
+        settings.apply_resolved_port("stream_port", lease.port)
+        server.config.port = lease.port
+        try:
+            await server.serve(sockets=[lease.socket])
+        except SystemExit as exc:
+            raise RuntimeError("音频流服务启动失败") from exc
+        finally:
+            lease.close()
 
     async def stop(self) -> None:
         for device_id in list(self._streams.keys()):
@@ -1230,8 +1320,12 @@ class StreamServer:
         HTTP connection open indefinitely, so client count alone lies."""
         if not self._clients.get(device_id):
             return False
+        return self.has_recent_data(device_id, window)
+
+    def has_recent_data(self, device_id: str, window: float = 3.0) -> bool:
+        """Producer activity, including when no HTTP client is pulling yet."""
         last = self._last_broadcast.get(device_id, 0.0)
-        return (time.monotonic() - last) < window
+        return bool(last) and (time.monotonic() - last) < window
 
     def _note_client_read(self, queue: asyncio.Queue) -> None:
         """Record that the HTTP reader took a chunk (ghost-client detector)."""

@@ -1,7 +1,7 @@
 """Per-speaker EQ: config signatures, stream variants, filter chain, topology."""
 
 import pytest
-from test_topology import FakeBridge, FakeDeviceManager, _latency, _raop_diag
+from support.topology import FakeBridge, FakeDeviceManager, _latency, _raop_diag
 
 from micast import topology
 from micast.config import (

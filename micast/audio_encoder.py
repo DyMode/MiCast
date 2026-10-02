@@ -667,3 +667,11 @@ class MediaProxyPump:
 
     def abort(self) -> None:
         self._stop.set()
+
+    async def close(self) -> None:
+        """Abort and account for the worker until its bounded network read exits."""
+        self.abort()
+        if self._thread is not None:
+            await asyncio.to_thread(self._thread.join, 1.0)
+            if self._thread.is_alive():
+                raise TimeoutError("Media proxy worker is still releasing its input")

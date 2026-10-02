@@ -39,9 +39,7 @@ async def test_success_path_snapshots_applies_without_rollback(fake_settings):
     apply_runtime = AsyncMock()
     rollback_runtime = AsyncMock()
 
-    result = await apply_config_transaction(
-        lambda: "mutated", apply_runtime, rollback_runtime
-    )
+    result = await apply_config_transaction(lambda: "mutated", apply_runtime, rollback_runtime)
 
     assert result == "mutated"
     assert fake_settings.snapshots == ["snap-0"]
@@ -145,3 +143,22 @@ async def test_concurrent_transactions_do_not_interleave(fake_settings):
 
     assert order == ["one-mutate", "one-apply", "two-mutate"]
     assert fake_settings.snapshots == ["snap-0", "snap-1"]
+
+
+async def test_cancelled_apply_restores_persisted_and_runtime_state(fake_settings):
+    entered = asyncio.Event()
+
+    async def apply():
+        entered.set()
+        await asyncio.Future()
+
+    rollback = AsyncMock()
+    transaction = asyncio.create_task(
+        apply_config_transaction(lambda: "committed", apply, rollback)
+    )
+    await entered.wait()
+    transaction.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await transaction
+    assert fake_settings.restores == [("snap-0", True)]
+    rollback.assert_awaited_once()

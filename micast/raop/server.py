@@ -9,10 +9,11 @@ import uuid
 
 from zeroconf import ServiceInfo
 
+from micast.config import settings
 from micast.raop.crypto import apple_response, decode_b64, decrypt_session_key
 from micast.raop.identify import identify
 from micast.raop.protocol import RtspRequest, parse_request, response
-from micast.raop.transport import RaopSession
+from micast.raop.transport import RTP_IDLE_TIMEOUT_SECONDS, RaopSession
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 RAOP_CLOSE_TIMEOUT_SECONDS = 2.0
 
 RAOP_HANDSHAKE_TIMEOUT_SECONDS = 30.0
+RAOP_WATCH_INTERVAL_SECONDS = 3.0
+
+# Sender artwork beyond this is discarded (a 20 MP JPEG is ~8 MB and no
+# player UI needs more than a thumbnail's worth of pixels).
+_MAX_ARTWORK_BYTES = 10 * 1024 * 1024
 
 _reserved_rtsp_ports: set[int] = set()
 _reserved_udp_bases: set[int] = set()
@@ -52,6 +58,20 @@ class RaopServer:
         self.daap_meta: dict[str, str] = {}
         self.daap_events: list[tuple[int, dict[str, str]]] = []
         self._daap_seq = 0
+        # Sender-pushed cover art (iTunes-family senders POST it as a raw
+        # image body on SET_PARAMETER). Latest only; the receiver item that
+        # owns this server dies with the session, which scopes the cache.
+        # ``artwork_rev`` bumps monotonically per receipt so consumers can
+        # key caches without hashing bytes.
+        self.artwork_bytes: bytes = b""
+        self.artwork_content_type: str = ""
+        self.artwork_rev: int = 0
+        # Rolling lyric window, maintained incrementally as metadata events
+        # arrive (dedup consecutive, keep the latest 8). now_playing reads
+        # this instead of re-walking the event log on every status tick.
+        self.lyric_lines: list[str] = []
+        self.playback_sessions = None
+        self.receiver_id = name
 
     @property
     def pcm_reader(self) -> asyncio.StreamReader:
@@ -100,7 +120,11 @@ class RaopServer:
     @property
     def recording_sessions(self) -> int:
         """Sessions that reached RECORD and can legitimately produce PCM."""
-        return sum(1 for item in self._sessions_by_writer.values() if item.recording)
+        return sum(
+            1
+            for item in self._sessions_by_writer.values()
+            if item.recording and not item.idle_notified
+        )
 
     async def start(self) -> None:
         self._server, self.port = await _start_rtsp_server(self._client)
@@ -197,6 +221,11 @@ class RaopServer:
             # header (desktop iTunes) still wins if it arrives.
             asyncio.get_running_loop().create_task(self._identify_client(session, peer[0]))
         logger.info("AirPlay client connected to %s from %s", self.name, peer)
+        watchdog = (
+            asyncio.create_task(self._watch_session(session, writer, peer))
+            if self.playback_sessions is None
+            else None
+        )
         try:
             while not reader.at_eof():
                 try:
@@ -250,6 +279,9 @@ class RaopServer:
         except Exception:
             logger.exception("RAOP session failed for %s", self.name)
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
+                await asyncio.gather(watchdog, return_exceptions=True)
             self.decode_errors += session.decode_errors
             self.dropped_packets += session.dropped_packets
             self.resend_requests += session.resend_requests
@@ -268,7 +300,11 @@ class RaopServer:
             ):
                 logger.info("AirPlay %s: %s disconnected without TEARDOWN", self.name, peer)
                 session.stop_notified = True
-                self.on_play_stop()
+                if self.playback_sessions and getattr(session, "playback_token", None):
+                    self.playback_sessions.end(session.playback_token, "disconnected")
+                self.on_play_stop(
+                    **({"token": session.playback_token} if self.playback_sessions else {})
+                )
             logger.info("AirPlay client disconnected from %s: %s", self.name, peer)
             logger.info(
                 "AirPlay %s timing: sent=%s received=%s",
@@ -278,7 +314,25 @@ class RaopServer:
             )
             writer.close()
             with contextlib.suppress(Exception):
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), RAOP_CLOSE_TIMEOUT_SECONDS)
+
+    async def _watch_session(self, session: RaopSession, writer, peer) -> None:
+        """Check RTP independently of timing replies and close abandoned control sockets."""
+        while True:
+            await asyncio.sleep(RAOP_WATCH_INTERVAL_SECONDS)
+            session._check_idle()
+            timeout = float(settings.stale_session_timeout)
+            if (
+                self.playback_sessions is None
+                and session.recording
+                and session.last_rtp_at
+                and timeout > 0
+                and time.monotonic() - session.last_rtp_at >= max(timeout, RTP_IDLE_TIMEOUT_SECONDS)
+            ):
+                logger.info("AirPlay %s: idle sender expired; closing %s", self.name, peer)
+                self._close_session(session)
+                writer.close()
+                return
 
     async def _dispatch(self, request: RtspRequest, session: RaopSession, writer):
         headers = {"Audio-Jack-Status": "connected; type=analog"}
@@ -307,6 +361,9 @@ class RaopServer:
             client_timing_port = _transport_port(transport, "timing_port")
             client_host = writer.get_extra_info("peername")[0]
             logger.info("AirPlay %s requested transport: %s", self.name, transport)
+            # Retrying SETUP on the same TCP connection must release the
+            # previous UDP sockets and reservation before opening replacements.
+            self._close_session(session)
             # A new sender takes over: close the previous client first.
             self._takeover_stale_sessions(writer)
             # Fresh UDP ports per session: rebinding the just-closed sender's
@@ -346,8 +403,31 @@ class RaopServer:
             headers["Audio-Latency"] = "11025"
             session.recording = True
             session.last_rtp_at = time.monotonic()
+            if self.playback_sessions:
+                lease = self.playback_sessions.begin(self.receiver_id, "airplay", writer)
+                session.playback_token = lease.token
+                session.idle_managed = True
+                lease.activity = lambda: session.last_rtp_at
+
+                def source_became_quiet():
+                    session.idle_notified = True
+                    self._session_idle(session, writer.get_extra_info("peername"))
+
+                lease.on_quiet = source_became_quiet
+
+                def release_transport():
+                    session.stop_notified = True
+                    self._close_session(session)
+                    writer.close()
+
+                self.playback_sessions.register(
+                    lease.token, "sender", release_transport, kind="transport"
+                )
             if self.on_play_start:
-                self.on_play_start(resume=False)
+                self.on_play_start(
+                    resume=False,
+                    **({"token": session.playback_token} if self.playback_sessions else {}),
+                )
         elif request.method == "FLUSH":
             session.flush()
         elif request.method == "SET_PARAMETER":
@@ -357,9 +437,21 @@ class RaopServer:
                 self.on_volume(percent)
             if "x-dmap-tagged" in request.headers.get("content-type", ""):
                 self._note_dmap_metadata(request.body)
-        elif request.method == "TEARDOWN" and self.on_play_stop:
+            elif request.body and request.headers.get("content-type", "").startswith("image/"):
+                self._note_artwork(request.body, request.headers.get("content-type", ""))
+        elif (
+            request.method == "TEARDOWN"
+            and session.recording
+            and not session.stop_notified
+            and not self._has_active_recorder(except_session=session)
+            and self.on_play_stop
+        ):
             session.stop_notified = True
-            self.on_play_stop()
+            if self.playback_sessions and getattr(session, "playback_token", None):
+                self.playback_sessions.end(session.playback_token, "teardown")
+            self.on_play_stop(
+                **({"token": session.playback_token} if self.playback_sessions else {})
+            )
         return 200, headers
 
     def _note_dmap_metadata(self, body: bytes) -> None:
@@ -385,11 +477,41 @@ class RaopServer:
                 meta.get("artist", ""),
                 meta.get("album", ""),
             )
+        # Scrolling senders can put the title in derived and lyrics in minm.
+        # Only a change of the canonical song clears its accumulated lines.
+        def song_key(value):
+            return (value.get("derived") or value.get("title", ""), value.get("album", ""))
+
+        if self.daap_meta and song_key(self.daap_meta) != song_key(meta):
+            self.lyric_lines.clear()
         self.daap_meta = meta
         self._daap_seq += 1
         self.daap_events.append((self._daap_seq, meta))
         if len(self.daap_events) > 128:
             del self.daap_events[:64]
+        # Maintain the rolling lyric window in place — the per-tick
+        # now_playing read stays O(1) no matter how long the event log grows.
+        line = meta.get("lyric_line")
+        if line and (not self.lyric_lines or self.lyric_lines[-1] != line):
+            self.lyric_lines.append(line)
+            if len(self.lyric_lines) > 8:
+                del self.lyric_lines[: len(self.lyric_lines) - 8]
+
+    def _note_artwork(self, body: bytes, content_type: str) -> None:
+        """Cache the sender-pushed cover; absurd payloads are dropped outright."""
+        if len(body) > _MAX_ARTWORK_BYTES:
+            logger.info("AirPlay %s: artwork too large (%d bytes), ignored", self.name, len(body))
+            return
+        if body != self.artwork_bytes:
+            logger.info(
+                "AirPlay %s: artwork received (%s, %d bytes)",
+                self.name,
+                content_type,
+                len(body),
+            )
+        self.artwork_bytes = body
+        self.artwork_content_type = content_type
+        self.artwork_rev += 1
 
     async def _identify_client(self, session: RaopSession, host: str) -> None:
         name = await identify(host)
@@ -398,7 +520,7 @@ class RaopServer:
 
     def _has_active_recorder(self, except_session: RaopSession | None = None) -> bool:
         return any(
-            item is not except_session and item.recording
+            item is not except_session and item.recording and not item.idle_notified
             for item in self._sessions_by_writer.values()
         )
 
@@ -408,14 +530,18 @@ class RaopServer:
         session.stop_notified = True
         logger.info("AirPlay %s: no audio from %s, treating sender as gone", self.name, peer)
         if self.on_play_stop:
-            self.on_play_stop()
+            self.on_play_stop(
+                **({"token": session.playback_token} if self.playback_sessions else {})
+            )
 
     def _session_resumed(self, session: RaopSession, peer) -> None:
         session.stop_notified = False
         logger.info("AirPlay %s: audio resumed from %s", self.name, peer)
         if self.on_play_start:
             # A resume blip must not steal speakers another receiver now owns.
-            self.on_play_start(resume=True)
+            self.on_play_start(
+                resume=True, **({"token": session.playback_token} if self.playback_sessions else {})
+            )
 
     def _takeover_stale_sessions(self, current: asyncio.StreamWriter) -> None:
         """Close other connections that already hold streaming resources.
@@ -478,7 +604,8 @@ def _transport_port(value: str, key: str) -> int:
 
 
 async def _start_rtsp_server(handler):
-    last = _rtsp_base + 31
+    # This setting is a receiver pool start, not a single-instance listener.
+    last = min(65535, _rtsp_base + 31)
     for port in range(_rtsp_base, last + 1):
         if port in _reserved_rtsp_ports:
             continue
@@ -492,19 +619,19 @@ async def _start_rtsp_server(handler):
 
 
 # Preferred scan starts; configure() overrides them from Settings at startup.
-_rtsp_base = 5000
-_udp_pool_base = 6000
+_rtsp_base = 42500
+_udp_pool_base = 42600
 _UDP_POOL_WIDTH = 196  # bases step by 3, so the top base is base + 195
 
 
 def configure_ports(rtsp_port: int | None, udp_base: int | None) -> None:
     """Point the RTSP/UDP port scans at user-preferred starting ports.
 
-    None restores the built-in defaults (5000 / 6000).
+    None restores the built-in defaults (42500 / 42600).
     """
     global _rtsp_base, _udp_pool_base, _next_udp_base
-    _rtsp_base = rtsp_port or 5000
-    _udp_pool_base = udp_base or 6000
+    _rtsp_base = rtsp_port or 42500
+    _udp_pool_base = udp_base or 42600
     _next_udp_base = _udp_pool_base
 
 
@@ -514,10 +641,10 @@ def rtsp_base() -> int:
 
 def udp_pool() -> tuple[int, int]:
     """(base, top) of the UDP port pool, for diagnostics."""
-    return _udp_pool_base, _udp_pool_base + _UDP_POOL_WIDTH - 1
+    return _udp_pool_base, min(65535, _udp_pool_base + _UDP_POOL_WIDTH - 1)
 
 
-_next_udp_base = 6000
+_next_udp_base = 42600
 
 
 def _reserve_udp_base() -> int:
@@ -525,8 +652,8 @@ def _reserve_udp_base() -> int:
     only picked again after a full cycle, giving Windows time to actually
     release the sockets."""
     global _next_udp_base
-    top = _udp_pool_base + _UDP_POOL_WIDTH - 1
-    for _ in range(66):
+    top = min(65535, _udp_pool_base + _UDP_POOL_WIDTH - 1)
+    for _ in range((top - _udp_pool_base + 1) // 3):
         base = _next_udp_base
         _next_udp_base += 3
         if _next_udp_base > top - 2:

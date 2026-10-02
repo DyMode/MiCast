@@ -7,13 +7,11 @@ behaviour that makes one occurrence explainable after the fact.
 
 import asyncio
 import time
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
-from micast.audio_bridge import AudioBridge
-from micast.audio_metrics import LOOP_LAG_WARN_MS, AudioMetrics
+from micast.audio_metrics import LOOP_LAG_WARN_MS, WINDOW_SECONDS, AudioMetrics
 from micast.config import settings
 
 
@@ -69,57 +67,8 @@ def test_drop_layers_accumulate():
     assert drops["encoder_out"] == 3
 
 
-@pytest.mark.asyncio
-async def test_retarget_releases_old_speaker(monkeypatch):
-    """A retargeted AirPlay 2 instance must unload the speaker it left behind,
-    otherwise both speakers pull the instance's stream side by side."""
-    bridge = object.__new__(AudioBridge)
-    bridge._stream_server = MagicMock()
-    bridge._stream_server.stream_ids.return_value = ["ap2", "ap2-q1"]
-    # _start_airplay2_pipelines already refreshed the snapshot to the new
-    # target; the previous map is what the rebuild captured beforehand.
-    bridge._airplay2_targets = {"ap2": "new-did"}
-    hook = AsyncMock()
-    bridge.on_airplay2_retarget = hook
-
-    monkeypatch.setattr(
-        "micast.audio_bridge.settings",
-        SimpleNamespace(
-            airplay2_instances=[SimpleNamespace(id="ap2", target_id="new-did")]
-        ),
-    )
-
-    await AudioBridge._release_retargeted_speakers(bridge, {"ap2"}, {"ap2": "old-did"})
-
-    # The leftover speaker's client is dropped on every stream of the instance,
-    # and the orchestrator is asked to stop its playback.
-    assert bridge._stream_server.kick_clients.call_args_list == [
-        call("ap2", sink="old-did"),
-        call("ap2-q1", sink="old-did"),
-    ]
-    assert hook.await_args.args == ("old-did", "ap2")
 
 
-@pytest.mark.asyncio
-async def test_retarget_without_change_keeps_speaker(monkeypatch):
-    bridge = object.__new__(AudioBridge)
-    bridge._stream_server = MagicMock()
-    bridge._stream_server.stream_ids.return_value = ["ap2"]
-    bridge._airplay2_targets = {"ap2": "same-did"}
-    hook = AsyncMock()
-    bridge.on_airplay2_retarget = hook
-
-    monkeypatch.setattr(
-        "micast.audio_bridge.settings",
-        SimpleNamespace(
-            airplay2_instances=[SimpleNamespace(id="ap2", target_id="same-did")]
-        ),
-    )
-
-    await AudioBridge._release_retargeted_speakers(bridge, {"ap2"}, {"ap2": "same-did"})
-
-    bridge._stream_server.kick_clients.assert_not_called()
-    hook.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -211,3 +160,80 @@ async def test_runtime_monitor_samples_the_running_loop():
     runtime = m.snapshot()["runtime"]
     assert runtime["cores"] >= 1
     assert runtime["loop_lag_max_ms"] >= 0.0
+
+
+def test_window_counts_kinds_weights_entries_and_ms():
+    """The 60s fold: per-kind counts (weight = packets/chunks), worst ms,
+    per-entry split — the only numbers the live verdicts may reason from."""
+    m = AudioMetrics()
+    m.note_link_skip(7)
+    m.note_link_skip(3)
+    m.note_link_resend()
+    m.note_lag_skip(1000, 45.0, entry="speaker-1")
+    m.note_lag_skip(500, 12.0, entry="speaker-2")
+    m.note_silence_fill("speaker-1")
+    m.note_tee_drop(4, entry="stream-a")
+    m.note_encoder_drop("in", 2)
+    m.note_queue_drops(3, 900.0)
+
+    win = m.snapshot()["window"]
+    assert win["link_skip"]["count"] == 10  # weights sum, not occurrences
+    assert win["link_resend"]["count"] == 1
+    assert win["lag_skip"]["count"] == 2
+    assert win["lag_skip"]["ms_max"] == 45.0
+    assert win["lag_skip"]["by_entry"] == {"speaker-1": 1, "speaker-2": 1}
+    assert win["silence_fill"]["by_entry"] == {"speaker-1": 1}
+    assert win["tee_drop"]["count"] == 4
+    assert win["encoder_drop"]["count"] == 2
+    assert win["queue_drop"]["count"] == 3
+
+
+def test_window_drops_entries_older_than_sixty_seconds():
+    m = AudioMetrics()
+    now = time.time()
+    m.note_link_skip(5)
+    # A stale entry must not keep the page red after the minute has passed.
+    m._window.append((now - WINDOW_SECONDS - 1, "link_skip", None, None, 100))
+
+    win = m.snapshot()["window"]
+    assert win["link_skip"]["count"] == 5
+
+
+def test_silence_fill_records_event_with_label():
+    m = AudioMetrics()
+    m.note_silence_fill("speaker-1")
+    snap = m.snapshot()
+
+    assert snap["source"]["silence_fills"] == 1
+    assert snap["events"][-1]["kind"] == "silence_fill"
+    assert snap["events"][-1]["label"] == "补静音"
+    assert snap["events"][-1]["entry"] == "speaker-1"
+
+
+def test_stall_padding_counts_but_stays_out_of_the_window():
+    """Source-stall padding is a sender-side symptom: it keeps the cumulative
+    counter (history unchanged) but must not feed the speaker-side verdict."""
+    m = AudioMetrics()
+    m.note_silence_fill(windowed=False)
+    m.note_silence_fill("speaker-1")
+    snap = m.snapshot()
+
+    assert snap["source"]["silence_fills"] == 2
+    assert snap["window"]["silence_fill"]["count"] == 1
+    assert snap["window"]["silence_fill"]["by_entry"] == {"speaker-1": 1}
+
+
+def test_link_health_notes_feed_the_window_only():
+    """RAOP link counters stay connection-scoped; the window is the verdict's view."""
+    m = AudioMetrics()
+    m.note_link_skip(12)
+    m.note_link_resend()
+    m.note_link_decode_error()
+    snap = m.snapshot()
+
+    win = snap["window"]
+    assert win["link_skip"]["count"] == 12
+    assert win["link_resend"]["count"] == 1
+    assert win["link_decode_error"]["count"] == 1
+    # No event-ring noise for burst-prone link counters.
+    assert snap["events"] == []

@@ -28,9 +28,9 @@ class PCMTee:
     stream, and each channel pipeline (L/R) consumes its own copy.
     """
 
-    def __init__(self, source: asyncio.StreamReader, outputs: int = 2):
+    def __init__(self, source: asyncio.StreamReader, outputs: int = 2, sample_rate: int = 48000):
         self._source = source
-        self.outputs = [BoundedPCMReader() for _ in range(outputs)]
+        self.outputs = [BoundedPCMReader(bytes_per_second=sample_rate * 4) for _ in range(outputs)]
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:

@@ -598,6 +598,8 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
         )
         report = await build_report(bridge, device_manager, query=query)
         filename = f"micast-diagnostic-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        from micast.fnos_storage import save_report
+        await asyncio.to_thread(save_report, filename, report)
         return Response(
             json.dumps(report, ensure_ascii=False, indent=2),
             media_type="application/json",
