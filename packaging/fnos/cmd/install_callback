@@ -32,3 +32,9 @@ if [ -d "$runtime" ]; then
   fi
 fi
 rm -f "${TRIM_PKGVAR}/micast.pid" "${TRIM_APPDEST}/app.sock"
+PYTHONPATH="${TRIM_APPDEST}" /var/apps/python312/target/bin/python3 -m micast.installation \
+  --fnos --runtime "$runtime" --username "$TRIM_USERNAME" \
+  --output "${TRIM_PKGVAR}/installation-report.json" \
+  --write-config "${TRIM_PKGVAR}/micast.json" >> "$TRIM_TEMP_LOGFILE" 2>&1 || exit 1
+chown "$TRIM_USERNAME" "${TRIM_PKGVAR}/installation-report.json" "${TRIM_PKGVAR}/micast.json"
+chmod 0600 "${TRIM_PKGVAR}/installation-report.json" "${TRIM_PKGVAR}/micast.json"

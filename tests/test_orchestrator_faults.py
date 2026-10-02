@@ -10,7 +10,7 @@
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -46,9 +46,9 @@ def _make_orchestrator(monkeypatch, active: set[str]):
         play_stream=AsyncMock(return_value=True),
         stop_playback=AsyncMock(),
         stop=AsyncMock(),
-        note_codec_capability=AsyncMock(),
-        note_play_error=AsyncMock(),
-        clear_play_error=AsyncMock(),
+        note_codec_capability=Mock(),
+        note_play_error=Mock(),
+        clear_play_error=Mock(),
         owner_of=lambda did: state["owner"],
         stream_url_of=lambda did: state["url"],
         playing_ids=lambda: [],
@@ -101,7 +101,7 @@ async def _run_verify_via_play(monkeypatch, orch, tasks, owner, current_url):
 
     device_manager.play_stream = AsyncMock(side_effect=fake_play)
     state["owner"] = owner
-    monkeypatch.setattr("micast.main._stream_active_for", lambda did: False)
+    monkeypatch.setattr(device_manager, "stream_active", lambda did: False, raising=False)
     monkeypatch.setattr(orchestrator_module.asyncio, "sleep", AsyncMock())
 
     await orch.play_receiver("r1", "http://h:8080/stream/r1")

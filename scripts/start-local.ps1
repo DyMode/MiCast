@@ -23,6 +23,8 @@ npm --prefix web run build
 if ($LASTEXITCODE -ne 0) { throw "Web build failed" }
 
 $env:MICAST_AIRPLAY_ENGINE = "local"
-Write-Host "[MiCast] 正在启动：http://127.0.0.1:3000/app/micast/"
-& $Python -m uvicorn micast.main:app --host 0.0.0.0 --port 3000
+& $Python -m micast --preflight-if-new
+if ($LASTEXITCODE -ne 0) { throw "核心服务或全部投送方式不可用，请处理预检报告后重试。" }
+Write-Host "[MiCast] 正在启动，实际访问地址见启动日志。"
+& $Python -m micast
 exit $LASTEXITCODE

@@ -6,3 +6,12 @@ if [ ! -x "$PYTHON_BIN" ]; then
   echo "缺少飞牛 Python 3.12 运行时。" > "$TRIM_TEMP_LOGFILE"
   exit 1
 fi
+PREFLIGHT="$(dirname "$0")/port-preflight.py"
+if [ ! -f "$PREFLIGHT" ]; then
+  echo "应用包缺少统一端口预检程序，请重新构建安装包。" > "$TRIM_TEMP_LOGFILE"
+  exit 1
+fi
+if ! "$PYTHON_BIN" "$PREFLIGHT" --fnos > "$TRIM_TEMP_LOGFILE" 2>&1; then
+  echo "核心服务或全部投送协议不可用，请处理上述原因后重新安装。" >> "$TRIM_TEMP_LOGFILE"
+  exit 1
+fi

@@ -1,11 +1,15 @@
 FROM mikebrady/shairport-sync:latest
 
 USER root
-RUN apk add --no-cache socat
+RUN apk add --no-cache socat python3
 
 COPY docker/receiver-entrypoint.sh /app/receiver-entrypoint.sh
-COPY scripts/receiver-session-start.sh scripts/receiver-session-stop.sh scripts/receiver-volume.sh /app/scripts/
+COPY micast/ports.py /app/ports.py
+COPY scripts/receiver-session-start.sh scripts/receiver-session-stop.sh scripts/receiver-volume.sh scripts/receiver-callback.sh /app/scripts/
 RUN chmod +x /app/receiver-entrypoint.sh /app/scripts/*.sh
 
-EXPOSE 9001
+EXPOSE 42800
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+  CMD pidof shairport-sync >/dev/null && pidof socat >/dev/null && \
+      { [ "${MICAST_AIRPLAY_PROTOCOL:-auto}" = classic ] || pidof nqptp >/dev/null; }
 ENTRYPOINT ["/app/receiver-entrypoint.sh"]

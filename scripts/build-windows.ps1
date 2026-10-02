@@ -61,4 +61,4 @@ Assert-ExitCode "PyInstaller"
 
 Write-Host ""
 Write-Host ("Done: dist\MiCast.exe  ({0:N1} MB)" -f ((Get-Item dist\MiCast.exe).Length / 1MB))
-Write-Host "Smoke test: dist\MiCast.exe  (opens http://localhost:3000/app/micast/)"
+Write-Host "Smoke test: dist\MiCast.exe  (opens http://localhost:42300/app/micast/)"

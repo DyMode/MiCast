@@ -18,4 +18,5 @@ fi
 npm --prefix web run build
 
 export MICAST_AIRPLAY_ENGINE=local
-exec .venv/bin/python -m uvicorn micast.main:app --host 0.0.0.0 --port 3000
+.venv/bin/python -m micast --preflight-if-new
+exec .venv/bin/python -m micast

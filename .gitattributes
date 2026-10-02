@@ -1,6 +1,7 @@
 * text=auto
 *.sh text eol=lf
 packaging/fnos/cmd/* text eol=lf
+packaging/fnos/app/airplay2-runtime/run-shairport text eol=lf
 packaging/fnos/manifest text eol=lf
 packaging/fnos/app/ui/config text eol=lf
 packaging/fnos/config/* text eol=lf

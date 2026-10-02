@@ -77,6 +77,18 @@ start_service() {
   export MICAST_DATA_DIR="$TRIM_PKGVAR"
   export MICAST_UNIX_SOCKET="$SOCKET_FILE"
   export MICAST_DEPLOYMENT="fnos"
+  # Resolve the system-managed share without assuming a storage volume.
+  shared="${TRIM_DATA_SHARE_PATHS:-}"
+  shared="${shared%%:*}"
+  unset MICAST_SHARED_DIR MICAST_LOG_DIR
+  if [ -n "$shared" ] && [ -d "$shared" ] && \
+      runuser -u "$TRIM_USERNAME" --preserve-environment -- \
+      "$PYTHON_BIN" -m micast.fnos_storage "$shared"; then
+    export MICAST_SHARED_DIR="$shared"
+    export MICAST_LOG_DIR="$shared/logs"
+  fi
+  LOG_FILE="${MICAST_LOG_DIR:-$TRIM_PKGVAR}/micast.log"
+  OLD_LOG_FILE="${LOG_FILE}.1"
   export PYTHON_BIN
   runtime="${TRIM_APPDEST}/airplay2-runtime"
   token_file="${TRIM_PKGVAR}/callback-token"

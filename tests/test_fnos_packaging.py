@@ -52,7 +52,7 @@ def test_fnos_package_has_every_required_lifecycle_file():
 
     assert required <= {path.name for path in (FNOS / "cmd").iterdir()}
     assert json.loads((FNOS / "config" / "privilege").read_text(encoding="utf-8"))
-    assert json.loads((FNOS / "config" / "resource").read_text(encoding="utf-8")) == {}
+    assert json.loads((FNOS / "config" / "resource").read_text(encoding="utf-8")) == {"data-share": {"shares": [{"name": "micast"}]}}
     uninstall_wizard = json.loads((FNOS / "wizard" / "uninstall").read_text(encoding="utf-8"))
     policy = uninstall_wizard[0]["items"][0]
     assert policy["field"] == "wizard_data_policy"
@@ -88,10 +88,13 @@ def test_fnos_keeps_classic_airplay_and_starts_single_airplay2_on_demand():
     assert '[ -x "${runtime}/bin/shairport-sync" ]' in main
     assert 'MICAST_AIRPLAY2_PCM_SOURCE="local:' in main
     assert "runtime/bin/nqptp" not in main
-    assert "runtime/bin/nqptp" in receiver
-    assert 'service_type = "airplay2"' in receiver
-    # AirPlay 2 首选端口由设置页下发，run-shairport 从该值起扫描空闲端口。
-    assert "MICAST_AIRPLAY2_PORT" in receiver
+    runtime = (ROOT / "micast" / "fnos_receiver.py").read_text(encoding="utf-8")
+    assert "micast.fnos_receiver" in receiver
+    assert "bin/nqptp" in runtime
+    assert 'service_type = "airplay2"' in runtime
+    # Bundled AirPlay 2 uses the fixed native port, without candidate scans.
+    assert "preferred = AIRPLAY2_RECEIVER_PORT" in runtime
+    assert "strict=True" in runtime
 
 
 def test_fnos_setcap_is_arch_aware_and_warns_instead_of_aborting():
@@ -102,7 +105,7 @@ def test_fnos_setcap_is_arch_aware_and_warns_instead_of_aborting():
         assert '*)             loader="$runtime/lib/ld-musl-x86_64.so.1"' in script
         # setcap failure / missing tooling degrades native AirPlay 2 with a
         # visible warning; it must not abort the (un)install.
-        assert "exit 1" not in script.split("setcap", 1)[1]
+        assert "exit 1" not in script.split("setcap", 1)[1].split('rm -f "${TRIM_PKGVAR}/micast.pid"', 1)[0]
         assert "警告" in script
 
 
@@ -156,3 +159,9 @@ def test_fnos_lifecycle_handles_health_upgrade_and_uninstall_policies():
     assert "keep_all)" in uninstall
     assert "remove_all)" in uninstall
     assert "! -name micast.json" in uninstall
+
+
+def test_fnos_launcher_has_linux_shebang_and_line_endings():
+    contents = (FNOS / "app" / "airplay2-runtime" / "run-shairport").read_bytes()
+    assert contents.startswith(b"#!/bin/sh\n")
+    assert b"\r" not in contents

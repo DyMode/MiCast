@@ -58,6 +58,19 @@ Filename: "{app}\MiCast.exe"; Description: "启动 MiCast"; Flags: nowait postin
 var
   RemoveUserData: Boolean;
 
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ExitCode: Integer;
+begin
+  Result := '';
+  ExtractTemporaryFile('MiCast.exe');
+  if not ExecAsOriginalUser(ExpandConstant('{tmp}\MiCast.exe'), '--preflight',
+    ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    Result := '无法执行投送功能与端口预检，请检查系统权限后重试。'
+  else if ExitCode <> 0 then
+    Result := '核心服务或全部投送协议不可用。请检查端口、网络访问权限和组播支持后重新安装。';
+end;
+
 function IsWebView2Installed(): Boolean;
 var
   Version: String;

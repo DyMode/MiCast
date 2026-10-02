@@ -59,6 +59,16 @@ command -v npm >/dev/null 2>&1 || {
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/app/vendor" "$STAGE_DIR/app/web" "$STAGE_DIR/app/ui/images" "$OUTPUT_DIR"
 cp -a "$ROOT_DIR/packaging/fnos/." "$STAGE_DIR/"
+# Normalize executable scripts even when the checkout was made on Windows.
+find "$STAGE_DIR/cmd" -type f -exec sed -i 's/\r$//' {} +
+if [ -f "$STAGE_DIR/app/airplay2-runtime/run-shairport" ]; then
+  sed -i 's/\r$//' "$STAGE_DIR/app/airplay2-runtime/run-shairport"
+  sh -n "$STAGE_DIR/app/airplay2-runtime/run-shairport"
+  chmod 0755 "$STAGE_DIR/app/airplay2-runtime/run-shairport"
+fi
+cp "$ROOT_DIR/micast/installation.py" "$STAGE_DIR/cmd/port-preflight.py"
+cp "$ROOT_DIR/micast/ports.py" "$STAGE_DIR/cmd/ports.py"
+cp "$ROOT_DIR/micast/config_store.py" "$STAGE_DIR/cmd/config_store.py"
 
 # The bundled AirPlay 2 receiver is an x86-64 native runtime. Keep it in the
 # existing x86 package, but never ship unusable x86 binaries in the ARM FPK.

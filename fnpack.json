@@ -1,0 +1,58 @@
+{
+  "schema_version": "2",
+  "source_info": {
+    "name": "MiCast 应用源",
+    "author": "DyMode",
+    "homepage": "https://github.com/DyMode/MiCast",
+    "description": "MiCast 开发者维护的飞牛原生应用源。"
+  },
+  "apps": {
+    "micast": {
+      "display_name": "MiCast",
+      "desc": "通过 AirPlay / DLNA 将手机、电脑音频投放到小米智能音箱，支持跨型号多音箱同步、立体声组合和逐台 EQ。依赖飞牛应用中心 Python 3.12；实验性 AirPlay 2 仅 x86 包提供。",
+      "platform": [
+        "x86",
+        "arm"
+      ],
+      "categories": [
+        "影音娱乐",
+        "智能智控"
+      ],
+      "maintainer": "Dy",
+      "maintainer_url": "https://github.com/DyMode",
+      "bug_report_url": "https://github.com/DyMode/MiCast/issues",
+      "run_as": "root",
+      "install_type": "",
+      "is_docker": false,
+      "releases": {
+        "0.3.2": {
+          "changelog": "## MiCast 0.3.2\n\n修复 0.3.1 引入的两个 AirPlay 2 回归：完全无声与轻微卡顿。\n\n### 🔧 修复\n\n- **AirPlay 2 无声（严重）**：源流停滞自动重建时，任务取消链自我递归导致 RecursionError，管道永久停止。已打断递归并在重建失败时自动重试恢复\n- **AirPlay 2 轻微卡顿**：静音续流触发过于敏感，shairport 管道写入抖动（>170ms）就被误注入数字静音——诊断计数全零但听感规律性断音。改为连续约 0.5 秒无真实数据才注入，抖动场景零误注入（实验：6 秒内误注入从 21-27 段降为 0），真实停滞仍能在音箱断连前保住连接\n\n### 📦 下载\n\n| 平台 | 文件 |\n|---|---|\n| fnOS (x86) | `micast-x86-0.3.2.fpk` |\n| fnOS (ARM) | `micast-arm-0.3.2.fpk` |\n| Windows 安装版 | `MiCast-Setup.exe` |\n| Windows 便携版 | `MiCast-Portable.zip` |\n",
+          "updated_at": "2026-09-24T05:15:55.0000000+00:00",
+          "os_min_version": "1.2.0602",
+          "run_as": "root",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/DyMode/MiCast/releases/download/v0.3.2/micast-x86-0.3.2.fpk",
+              "sha256": "a2752e6b88b048cc5ad6cf9c72c9943b4d7992920f81a4a6080cc3e8bbfed169",
+              "size": 117824800
+            },
+            "arm": {
+              "download_url": "https://github.com/DyMode/MiCast/releases/download/v0.3.2/micast-arm-0.3.2.fpk",
+              "sha256": "cd26536a1ce1f42a35a924e5a1ff0d8522149469455d8d02bda07e2e9d392439",
+              "size": 75245291
+            }
+          }
+        }
+      },
+      "icon_url": "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/assets/icons/web/icon-256.png",
+      "preview_urls": [
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/docs/screenshots/01-player.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/docs/screenshots/02-speakers.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/docs/screenshots/03-eq.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/docs/screenshots/04-links.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/docs/screenshots/05-stereo.png"
+      ],
+      "readme_url": "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.2/README.md"
+    }
+  }
+}

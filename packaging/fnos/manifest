@@ -14,6 +14,7 @@ desc="""<p>把手机、电脑上的音频投放到一台或多台小米智能音
 <p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/03-eq.png"/></p>
 <p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/04-links.png"/></p>
 <p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/05-stereo.png"/></p>
+<p><img width="780" style="max-width:100%;border-radius:8px" src="https://raw.githubusercontent.com/DyMode/MiCast/main/docs/screenshots/06-mobile.png"/></p>
 <p>项目地址：<a href="https://github.com/DyMode/MiCast">DyMode/MiCast</a></p>
 """
 source=thirdparty
@@ -29,4 +30,4 @@ desktop_applaunchname=micast.main
 ctl_stop=true
 checkport=false
 disable_authorization_path=true
-changelog=0.3.2<br>· 修复 AirPlay 2 无声：源流停滞重建时的任务取消递归导致管道永久停止，现可自动重建恢复<br>· 修复 AirPlay 2 轻微卡顿：静音续流触发过于敏感，管道抖动被误判为停滞并注入数字静音<br>· 修复 AirPlay 1 / AirPlay 2 互切后无声：重试不再用过期的投放来源抢占音箱<br>· AirPlay 2 切歌不再无声：shairport 回调弹跳不再重复触发云端重播<br>· 修复丢包计数持续增长：回收重连后残留的幽灵拉流连接<br>· FLAC 流短暂停滞时持续输送静音，音箱不再约 2 秒断连<br>· 诊断面板支持跨格式对比的丢包字节数 / 毫秒数，PCM、编码器、流服务三层计数可对账<br>· 调音多端协同：多标签页同时调音不再互相覆盖，支持撤销上一步调音<br>· 新增音箱编解码能力学习，创建组合时提示不兼容音箱<br>· fnOS 新增 ARM 架构安装包
+changelog=0.3.3<br>· 组合延迟实时生效：调大延迟时该音箱先安静约等于增加量的时长再恢复，MP3 / FLAC / PCM 直通都不再掉线<br>· AirPlay 丢包改为持续重传请求：此前一个空隙只请求一次，回包丢了就只能跳过（真机 100 秒跳过 283 个包），现在会重试到上限并跟着空隙实时描述缺口<br>· 音源短时断供时用延迟缓冲补上，空档不再直接传到音箱；音箱落后超过 4 秒自动跳回实时<br>· 卡顿恢复只重建出问题的入口，其他音箱继续播放；面板暂停不再被自动恢复<br>· 音箱被语音助手或闹钟打断后自动恢复；接了指令却不取流的音箱会被停掉，不再空转<br>· 切换 AirPlay 2 目标后可正常播放；立体声组合不再多跑没人取用的编码<br>· 米家云端不可达时不再显示「已连接」：提示加载失败并提供重试与重新登录，登录凭证不受影响<br>· 播放中不再误报「服务未运行」；音箱命令超时提示具体步骤并建议检查外网<br>· 新增逐台格式自动检测：播放时确认、空闲时静默检测、诊断页实测，结论可悬停查看来源<br>· PCM 直通不再标记为「支持」（无法远程证实，以试听为准），已知不出声的型号标为不支持<br>· 域名解析独立成有上限、有缓存的通道，所有对外请求都有超时与并发上限；云端断线时登录校验每分钟最多一次、后台检测与轮询暂停，恢复后自动回到已连接，运行记录里各记一条开始与恢复<br>· 云端不可达时诊断页不再空白：诊断状态与导出报告不再依赖云端，出问题时仍能看运行记录、下载报告<br>· 扫码登录失败会给出原因并可重试，不再停在空白二维码；连不上小米账号服务器时提示检查外网、DNS 或代理<br>· 诊断日志可按来源、级别、时间范围筛选并导出报告；组合延迟显示实时状态；修复首次点击无响应等交互问题

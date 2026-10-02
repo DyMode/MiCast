@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 
 def main() -> int:
@@ -18,6 +19,8 @@ def main() -> int:
     if action not in routes or not token:
         return 2
     payload: dict[str, object] = {"device_id": receiver_id, "token": token}
+    payload["epoch"] = os.environ.get("MICAST_RECEIVER_EPOCH", "")
+    payload["event_seq"] = time.monotonic_ns()
     if action == "volume":
         try:
             payload["db"] = float(sys.argv[3])

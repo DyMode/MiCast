@@ -1,0 +1,93 @@
+[
+  {
+    "stepTitle": "投送功能与端口",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "可调整端口默认自动分配，也可手动填写 1024–65535。AirPlay 2 接收器固定使用 TCP 7000，并需要 UDP 319/320/9000；不可用时只停用 AirPlay 2，释放端口后可在应用设置中重新启动。至少一种投送方式可用即可安装。"
+      },
+      {
+        "type": "switch",
+        "field": "wizard_airplay_enabled",
+        "label": "启用 AirPlay",
+        "initValue": "true"
+      },
+      {
+        "type": "switch",
+        "field": "wizard_airplay2_enabled",
+        "label": "启用 AirPlay 2",
+        "initValue": "true"
+      },
+      {
+        "type": "switch",
+        "field": "wizard_dlna_enabled",
+        "label": "启用 DLNA",
+        "initValue": "true"
+      },
+      {
+        "type": "text",
+        "field": "wizard_port",
+        "label": "DLNA 控制端口",
+        "initValue": "auto",
+        "rules": [
+          {
+            "required": true,
+            "message": "填写 auto 或端口号"
+          },
+          {
+            "pattern": "^(auto|[0-9]{4,5})$",
+            "message": "填写 auto 或 1024–65535 之间的端口号"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_stream_port",
+        "label": "音频传输端口",
+        "initValue": "auto",
+        "rules": [
+          {
+            "required": true,
+            "message": "填写 auto 或端口号"
+          },
+          {
+            "pattern": "^(auto|[0-9]{4,5})$",
+            "message": "填写 auto 或 1024–65535 之间的端口号"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_airplay_rtsp_port",
+        "label": "AirPlay RTSP 起始端口",
+        "initValue": "auto",
+        "rules": [
+          {
+            "required": true,
+            "message": "填写 auto 或端口号"
+          },
+          {
+            "pattern": "^(auto|[0-9]{4,5})$",
+            "message": "填写 auto 或 1024–65535 之间的端口号"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_airplay_udp_base",
+        "label": "AirPlay UDP 端口池起点",
+        "initValue": "auto",
+        "rules": [
+          {
+            "required": true,
+            "message": "填写 auto 或端口号"
+          },
+          {
+            "pattern": "^(auto|[0-9]{4,5})$",
+            "message": "填写 auto 或 1024–65535 之间的端口号"
+          }
+        ]
+      }
+    ]
+  }
+]

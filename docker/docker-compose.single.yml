@@ -10,16 +10,17 @@ services:
     restart: unless-stopped
     depends_on:
       airplay2:
-        condition: service_started
+        condition: service_healthy
     environment:
       MICAST_DATA_DIR: /data
       MICAST_HOST: 0.0.0.0
-      MICAST_PORT: ${MICAST_PORT:-3000}
+      MICAST_NETWORK_MODE: bridge
+      MICAST_PORT: 42300
       MICAST_STREAM_HOST: ${MICAST_STREAM_HOST:?Set the NAS LAN IP in docker/.env}
-      MICAST_STREAM_PORT: ${MICAST_STREAM_PORT:-8080}
+      MICAST_STREAM_PORT: ${MICAST_STREAM_PORT:-42400}
       MICAST_DEPLOYMENT: single
       MICAST_AIRPLAY2_MODE: single
-      MICAST_AIRPLAY2_PCM_SOURCE: tcp:airplay2:9001
+      MICAST_AIRPLAY2_PCM_SOURCE: tcp:airplay2:42800
       MI_AUDIO_FORMAT: ${MI_AUDIO_FORMAT:-mp3}
       MI_AUDIO_BITRATE: ${MI_AUDIO_BITRATE:-320k}
       MI_AUDIO_SAMPLE_RATE: ${MI_AUDIO_SAMPLE_RATE:-48000}
@@ -29,8 +30,8 @@ services:
     networks:
       - internal
     ports:
-      - "${MICAST_PORT:-3000}:3000"
-      - "${MICAST_STREAM_PORT:-8080}:8080"
+      - "${MICAST_PORT:-42300}:42300"
+      - "${MICAST_STREAM_PORT:-42400}:${MICAST_STREAM_PORT:-42400}"
 
   airplay2:
     build:
@@ -42,8 +43,8 @@ services:
     environment:
       MICAST_AIRPLAY_NAME: ${MICAST_AIRPLAY_NAME:-MiCast}
       MICAST_AIRPLAY_PROTOCOL: airplay2
-      MICAST_PCM_PORT: 9001
-      MICAST_CALLBACK_BASE: http://micast:3000
+      MICAST_PCM_PORT: 42800
+      MICAST_CALLBACK_BASE: http://micast:42300
       MICAST_DEVICE_ID: airplay2
       MICAST_CALLBACK_TOKEN: ${MICAST_CALLBACK_TOKEN:-}
     networks:

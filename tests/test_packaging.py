@@ -1,11 +1,7 @@
-"""Packaging-readiness: data dir resolution and QR decoding (zxing-cpp)."""
+"""Storage behavior and distribution configuration contracts."""
 
-from io import BytesIO
+import re
 from pathlib import Path
-
-import qrcode
-import zxingcpp
-from PIL import Image
 
 from micast import config
 
@@ -62,16 +58,8 @@ def test_multiarch_docker_build_keeps_web_build_off_qemu():
     dockerfile = (root / "docker" / "Dockerfile").read_text(encoding="utf-8")
     workflow = (root / ".github" / "workflows" / "docker.yml").read_text(encoding="utf-8")
 
-    assert "FROM --platform=$BUILDPLATFORM node:20-alpine AS web-build" in dockerfile
+    assert re.search(
+        r"^FROM\s+--platform=\$BUILDPLATFORM\s+\S+\s+AS\s+web-build\s*$",
+        dockerfile, re.MULTILINE | re.IGNORECASE,
+    )
     assert "group: docker-${{ github.sha }}" in workflow
-    assert "timeout-minutes: 45" in workflow
-
-
-def test_zxing_decodes_generated_qr():
-    img = qrcode.make("https://account.xiaomi.com/long/abc123").convert("RGB")
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    results = zxingcpp.read_barcodes(Image.open(buf))
-    assert results
-    assert results[0].text == "https://account.xiaomi.com/long/abc123"

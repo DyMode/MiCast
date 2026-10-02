@@ -31,6 +31,6 @@ RUN chmod +x /app/scripts/*.sh
 # Persist config outside container if mounted
 VOLUME ["/app/config"]
 
-EXPOSE 3000 8080
+EXPOSE 42300 42400
 
 CMD ["/app/scripts/start.sh"]

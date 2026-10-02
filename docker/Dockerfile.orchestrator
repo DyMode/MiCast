@@ -8,5 +8,5 @@ RUN pip install --no-cache-dir \
     'docker>=7.1'
 COPY micast /app/micast
 
-EXPOSE 3100
-CMD ["uvicorn", "micast.orchestrator_app:app", "--host", "0.0.0.0", "--port", "3100"]
+EXPOSE 42900
+CMD ["uvicorn", "micast.orchestrator_app:app", "--host", "0.0.0.0", "--port", "42900"]

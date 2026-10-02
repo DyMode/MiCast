@@ -10,15 +10,16 @@ services:
       orchestrator:
         condition: service_healthy
     ports:
-      - "3000:3000"
-      - "8080:8080"
+      - "${MICAST_PORT:-42300}:42300"
+      - "${MICAST_STREAM_PORT:-42400}:${MICAST_STREAM_PORT:-42400}"
     environment:
       MICAST_HOST: 0.0.0.0
-      MICAST_PORT: 3000
+      MICAST_NETWORK_MODE: bridge
+      MICAST_PORT: 42300
       MICAST_DEPLOYMENT: integrated
       MICAST_STREAM_HOST: ${MICAST_STREAM_HOST:?Set the NAS LAN IP in docker/.env}
-      MICAST_STREAM_PORT: 8080
-      MICAST_ORCHESTRATOR_URL: http://orchestrator:3100
+      MICAST_STREAM_PORT: ${MICAST_STREAM_PORT:-42400}
+      MICAST_ORCHESTRATOR_URL: http://orchestrator:42900
       MICAST_ORCHESTRATOR_TOKEN: ${MICAST_ORCHESTRATOR_TOKEN:?Set a long random token in docker/.env}
       MI_AUDIO_FORMAT: ${MI_AUDIO_FORMAT:-mp3}
       MI_AUDIO_BITRATE: ${MI_AUDIO_BITRATE:-320k}
@@ -44,13 +45,13 @@ services:
       MICAST_RECEIVER_IMAGE: micast-receiver:experimental-multi
       MICAST_RECEIVER_LAN_NETWORK: micast-airplay
       MICAST_INTERNAL_NETWORK: micast-internal
-      MICAST_CALLBACK_BASE: http://micast:3000
+      MICAST_CALLBACK_BASE: http://micast:42300
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - internal
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3100/health"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:42900/health"]
       interval: 5s
       timeout: 3s
       retries: 10

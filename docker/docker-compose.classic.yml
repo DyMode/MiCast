@@ -6,7 +6,7 @@
 #
 # 用法：
 #   docker compose -f docker-compose.classic.yml up -d
-# 然后打开 http://<NAS-IP>:3000/app/micast/ ，扫码登录米家即可。
+# 然后打开 http://<NAS-IP>:42300/app/micast/ ，扫码登录米家即可。
 services:
   micast:
     image: ${MICAST_IMAGE:-micast:0.2.2}
@@ -20,8 +20,9 @@ services:
       # 配置与加密的米家登录态都落在 /data，随卷持久化。
       MICAST_DATA_DIR: /data
       MICAST_HOST: 0.0.0.0
-      MICAST_PORT: ${MICAST_PORT:-3000}
-      MICAST_STREAM_PORT: ${MICAST_STREAM_PORT:-8080}
+      MICAST_NETWORK_MODE: host
+      MICAST_PORT: ${MICAST_PORT:-auto}
+      MICAST_STREAM_PORT: ${MICAST_STREAM_PORT:-auto}
       # 音箱需要回连本机拉流；自动探测默认路由网卡 IP 通常正确，
       # 多网卡/VPN 机器上探测错了再显式指定：
       # MICAST_STREAM_HOST: 192.168.0.12
@@ -32,15 +33,15 @@ services:
     volumes:
       - ${MICAST_DATA:-./data}:/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/app/micast/health"]
+      test: ["CMD", "python", "-m", "micast.healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
 
 # 端口说明（host 网络下直接占用宿主机端口，冲突时改上面的环境变量）：
-#   3000/tcp   Web 控制台 + API
-#   8080/tcp   音箱回连的音频流
-#   5000-5031/tcp  AirPlay RTSP（每个播放入口一个）
+#   42300/tcp   Web 控制台 + API
+#   42400/tcp   音箱回连的音频流
+#   42500-42531/tcp  AirPlay RTSP（每个播放入口一个）
 #   5353/udp   mDNS 广播
 #   1900/udp   SSDP（DLNA）
