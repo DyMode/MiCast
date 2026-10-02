@@ -57,16 +57,23 @@ jobs:
 
       - name: Smoke test the exe
         run: |
-          $p = Start-Process .\dist\MiCast.exe -PassThru
+          $env:MICAST_NO_DESKTOP = '1'
+          $env:MICAST_HOST = '127.0.0.1'
+          $env:MICAST_PORT = '42300'
+          $env:MICAST_DATA_DIR = Join-Path $env:RUNNER_TEMP 'micast-smoke-data'
+          $p = Start-Process .\dist\MiCast.exe -PassThru -WindowStyle Hidden
           $ok = $false
-          for ($i = 0; $i -lt 40; $i++) {
-            Start-Sleep 2
-            try {
-              Invoke-RestMethod http://127.0.0.1:3000/health -TimeoutSec 2 | Out-Null
-              $ok = $true; break
-            } catch {}
+          try {
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep 2
+              try {
+                Invoke-RestMethod http://127.0.0.1:42300/health -TimeoutSec 2 | Out-Null
+                $ok = $true; break
+              } catch {}
+            }
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           if (-not $ok) { throw "MiCast.exe did not answer /health within 80s" }
 
       - uses: actions/upload-artifact@v7
@@ -80,6 +87,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           generate_release_notes: true
           files: |
             dist/MiCast-Portable.zip
