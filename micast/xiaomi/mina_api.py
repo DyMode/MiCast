@@ -83,10 +83,14 @@ class MinaAPI:
         kwargs = {"audio_id": audio_id} if audio_id else {}
         return await self._call(self.service.play_by_music_url(self.device_id, url, **kwargs))
 
-    async def search_audio_id(
+    async def search_track(
         self, title: str, artist: str = "", fuzzy_fallback: bool = True
-    ) -> str:
-        """Search Xiaomi's music library for a matching song's audioID.
+    ) -> dict | None:
+        """Search Xiaomi's music library; returns the match's display fields.
+
+        Hit dict: {audio_id, cover_url, duration} — ``cover_url`` is a remote
+        CDN link (measured: present on every /music/search hit), ``duration``
+        is seconds and may be 0/None for some entries. ``None`` = no hit.
 
         Prefers an exact title + artist-corroborated hit. fuzzy_fallback=False
         is for continuous matching (lyrics watcher): a scrolling-lyrics line
@@ -95,7 +99,7 @@ class MinaAPI:
         """
         title = (title or "").strip()
         if not title:
-            return ""
+            return None
         artist = (artist or "").strip()
         # Senders often glue the title into the artist field
         # ("周杰伦--告白气球"); drop the duplicated half from the query.
@@ -125,10 +129,18 @@ class MinaAPI:
             ))
         except Exception as exc:
             logger.warning("曲库搜索失败 (%s): %s", query, exc)
-            return ""
+            return None
         song_list = (result or {}).get("data", {}).get("songList") or []
         if not song_list:
-            return ""
+            return None
+
+        def pick(song: dict) -> dict:
+            return {
+                "audio_id": str(song.get("audioID") or ""),
+                "cover_url": str(song.get("coverURL") or ""),
+                "duration": song.get("duration") or None,
+            }
+
         # Exact hit: title equal (case-insensitive); artist corroborated by
         # substring in either direction (sender formats vary wildly).
         first_artist = re.split(r"[;；,，&、/·・—]", artist)[0].strip() if artist else ""
@@ -144,21 +156,28 @@ class MinaAPI:
                 and not (song_artist and song_artist.lower() in artist_l)
             ):
                 continue
-            audio_id = str(song.get("audioID") or "")
-            if audio_id:
-                logger.info("曲库精确命中 (%s) audioID=%s", query, audio_id)
-                return audio_id
+            hit = pick(song)
+            if hit["audio_id"]:
+                logger.info("曲库精确命中 (%s) audioID=%s", query, hit["audio_id"])
+                return hit
         if fuzzy_fallback:
-            audio_id = str(song_list[0].get("audioID") or "")
-            if audio_id:
+            hit = pick(song_list[0])
+            if hit["audio_id"]:
                 logger.info(
                     "曲库无精确匹配，回退首条 (%s) %s audioID=%s",
                     query,
                     song_list[0].get("name", ""),
-                    audio_id,
+                    hit["audio_id"],
                 )
-                return audio_id
-        return ""
+                return hit
+        return None
+
+    async def search_audio_id(
+        self, title: str, artist: str = "", fuzzy_fallback: bool = True
+    ) -> str:
+        """audioID-only facade over :meth:`search_track` (lyrics matching)."""
+        hit = await self.search_track(title, artist, fuzzy_fallback=fuzzy_fallback)
+        return hit["audio_id"] if hit else ""
 
     async def pause(self) -> dict:
         return await self._call(self.service.player_pause(self.device_id))

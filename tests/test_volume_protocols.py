@@ -21,6 +21,26 @@ from micast.dlna_client import DlnaDevice, DlnaTargetManager
 from micast.volume import apply_pcm_gain, db_to_percent
 
 
+async def test_dlna_linked_source_volume_applies_to_both_network_outputs():
+    from unittest.mock import Mock
+
+    airplay = SimpleNamespace(set_volume=AsyncMock())
+    dlna = SimpleNamespace(set_volume=AsyncMock())
+    bridge = SimpleNamespace(_airplay_targets=airplay, _dlna_targets=dlna)
+    media = SimpleNamespace(bridge=bridge, set_volume=Mock())
+    manager = SimpleNamespace(owned_targets=lambda receiver, owner: ["s"], set_volume=AsyncMock())
+    service = DlnaService(manager, media=media)
+    state = service.state_for("r")
+    state.volume_mode = "linked"
+    state.state = "PLAYING"
+    await service.set_volume("r", 25)
+    manager.set_volume.assert_awaited_once_with("s", 25)
+    airplay.set_volume.assert_awaited_once_with("dlna:r", 25)
+    dlna.set_volume.assert_awaited_once_with("dlna:r", 25)
+    media.set_volume.assert_called_once_with("r", state)
+    assert state.volume == 25
+
+
 @pytest.mark.parametrize("db,value", [(-144, 0), (-30, 0), (-15, 50), (0, 100)])
 def test_airplay_db_mapping(db, value):
     assert db_to_percent(db) == value
@@ -52,9 +72,7 @@ def test_gain_rounding_matches_python_round_sample_by_sample():
     pcm = struct.pack(f"<{len(samples)}h", *samples)
     for percent in (1, 7, 33, 50, 66, 99):
         gain = 10 ** ((percent * 0.3 - 30) / 20)
-        expected = struct.pack(
-            f"<{len(samples)}h", *[round(sample * gain) for sample in samples]
-        )
+        expected = struct.pack(f"<{len(samples)}h", *[round(sample * gain) for sample in samples])
         assert apply_pcm_gain(pcm, percent) == expected
 
 

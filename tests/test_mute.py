@@ -57,6 +57,30 @@ async def test_device_volume_mute_is_idempotent():
     assert manager.volumes["a"] == 0
 
 
+async def test_failed_mute_and_unmute_remain_retryable():
+    manager = FakeManager({"a": 40})
+    adapter = DeviceVolume(manager, None)
+    original = manager.set_volume
+
+    async def fail(*args):
+        raise OSError("offline")
+
+    manager.set_volume = fail
+    with pytest.raises(OSError):
+        await adapter.set_mute("a", True)
+    assert not adapter.is_muted("a")
+    manager.set_volume = original
+    await adapter.set_mute("a", True)
+    manager.set_volume = fail
+    with pytest.raises(OSError):
+        await adapter.set_mute("a", False)
+    assert adapter.is_muted("a")
+    assert manager._pre_mute_volumes["a"] == 40
+    manager.set_volume = original
+    await adapter.set_mute("a", False)
+    assert manager.volumes["a"] == 40
+
+
 async def test_device_volume_mute_falls_back_to_default(monkeypatch):
     monkeypatch.setattr(settings, "default_volume", 25)
     manager = FakeManager({})

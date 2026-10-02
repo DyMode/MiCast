@@ -116,6 +116,8 @@ class DeviceManager:
         # (see DlnaService._owner), and MANUAL_PLAY_OWNER ("debug") for the
         # manual test-tone/URL player.
         self._owners: dict[str, str] = {}
+        self.sessions = None
+        self._speaker_tokens: dict[str, object] = {}
         self._last_restore: dict[str, float] = {}
         # Speakers that rejected the play command at session start (offline,
         # cloud timeout…). Retried periodically while the session lives.
@@ -331,6 +333,7 @@ class DeviceManager:
         owner: str | None = None,
         force: bool = False,
         audio_id: str | None = None,
+        steal: bool = True,
     ) -> bool:
         """Start a stream on a speaker; serialized per device and idempotent.
 
@@ -344,7 +347,25 @@ class DeviceManager:
         async with self._lock_for(device_id):
             if not await self.refresh_service():
                 return False
+            lease = None
+            if self.sessions is not None and owner is not None:
+                lease = self.sessions.current(owner)
+                if lease is None:
+                    if not steal:
+                        return False
+                    protocol = (
+                        "dlna"
+                        if owner.startswith("dlna:")
+                        else "manual"
+                        if owner == MANUAL_PLAY_OWNER
+                        else "airplay"
+                    )
+                    lease = self.sessions.begin(owner, protocol)
+                if not self.sessions.valid(lease.token):
+                    return False
             current_owner = self._owners.get(device_id)
+            if not steal and current_owner not in (None, owner):
+                return False
             if (
                 not force
                 and owner is not None
@@ -362,22 +383,50 @@ class DeviceManager:
             except Exception:
                 logger.warning("play_music_url failed for %s, falling back to play_url", device_id)
                 await api.play_url(url)
+            if lease is not None and not self.sessions.valid(lease.token):
+                # Stop won while the cloud play was in flight; do not publish a
+                # resurrected speaker or leave its acknowledged URL running.
+                await asyncio.gather(api.pause(), api.stop(), return_exceptions=True)
+                return False
             self._playing.add(device_id)
             self._paused.discard(device_id)
             self._stream_urls[device_id] = url
             if owner is not None:
                 self._owners[device_id] = owner
+            if lease is not None:
+                previous_token = self._speaker_tokens.get(device_id)
+                if previous_token is not None and previous_token != lease.token:
+                    self.sessions.target_taken_over(previous_token, f"speaker:{device_id}")
+                self._speaker_tokens[device_id] = lease.token
+                self.sessions.targets.record(
+                    f"speaker:{device_id}",
+                    lease.token,
+                    lambda: self.stop_playback(device_id, owner=owner, session_token=lease.token),
+                )
+                self.sessions.register(
+                    lease.token,
+                    f"speaker:{device_id}",
+                    lambda: self.stop_playback(device_id, owner=owner, session_token=lease.token),
+                    kind="speaker",
+                )
             self._start_watchdog(device_id)
             return True
+
+    async def search_track(
+        self, title: str, artist: str = "", fuzzy_fallback: bool = True
+    ) -> dict | None:
+        """Search the music library; hit dict {audio_id, cover_url, duration}."""
+        if not await self.refresh_service():
+            return None
+        api = self.cloud_api(next(iter(self._playing), ""))
+        return await api.search_track(title, artist, fuzzy_fallback)
 
     async def search_audio_id(
         self, title: str, artist: str = "", fuzzy_fallback: bool = True
     ) -> str:
         """Search Xiaomi's music library for a song's audioID ("" if no hit)."""
-        if not await self.refresh_service():
-            return ""
-        api = self.cloud_api(next(iter(self._playing), ""))
-        return await api.search_audio_id(title, artist, fuzzy_fallback)
+        hit = await self.search_track(title, artist, fuzzy_fallback)
+        return hit["audio_id"] if hit else ""
 
     async def resume(self, device_id: str) -> bool:
         """Resume a paused speaker by re-pushing its stream URL.
@@ -389,6 +438,17 @@ class DeviceManager:
         async with self._lock_for(device_id):
             if not await self.refresh_service():
                 return False
+            token = self._speaker_tokens.get(device_id)
+            if token is not None and self.sessions is not None:
+                lease = self.sessions.current(token.owner)
+                if (
+                    lease is None
+                    or lease.token != token
+                    or lease.state.value not in ("active", "paused")
+                ):
+                    return False
+                self.sessions.begin(token.owner, lease.protocol, lease.identity)
+                self._owners[device_id] = token.owner
             api = self.cloud_api(device_id)
             url = self._stream_urls.get(device_id)
             try:
@@ -433,7 +493,12 @@ class DeviceManager:
             self._stop_watchdog(device_id)
 
     async def stop_playback(
-        self, device_id: str, owner: str | None = None, *, keep_error: bool = False
+        self,
+        device_id: str,
+        owner: str | None = None,
+        *,
+        keep_error: bool = False,
+        session_token=None,
     ) -> None:
         """Fully stop a speaker (not pause) and forget its stream state.
 
@@ -444,6 +509,8 @@ class DeviceManager:
         ``keep_error`` preserves a recorded session-start error (callers that
         stop the speaker BECAUSE of that error want the error to stay visible)."""
         async with self._lock_for(device_id):
+            if session_token is not None and self._speaker_tokens.get(device_id) != session_token:
+                return
             if owner is not None and self._owners.get(device_id) not in (None, owner):
                 logger.info(
                     "Ignoring stop_playback from %s on %s: owned by %s",
@@ -452,7 +519,10 @@ class DeviceManager:
                     self._owners.get(device_id),
                 )
                 return
-            if await self.refresh_service():
+            service_ready = await self.refresh_service()
+            if session_token is not None and not service_ready:
+                raise RuntimeError("Speaker service unavailable during session cleanup")
+            if service_ready:
                 api = self.cloud_api(device_id)
                 # player_stop alone is ignored by some firmware during
                 # player_play_music playback; pause actually cuts the audio.
@@ -469,9 +539,7 @@ class DeviceManager:
                             await command()
                         except Exception as exc:
                             failed.append(command.__name__)
-                            logger.warning(
-                                "%s failed for %s: %s", command.__name__, device_id, exc
-                            )
+                            logger.warning("%s failed for %s: %s", command.__name__, device_id, exc)
                     if not failed:
                         break
                     if attempt + 1 < STOP_COMMAND_ATTEMPTS:
@@ -483,6 +551,8 @@ class DeviceManager:
                             STOP_COMMAND_ATTEMPTS,
                             ", ".join(failed),
                         )
+                if failed and session_token is not None:
+                    raise RuntimeError("Speaker did not acknowledge session cleanup")
             self._playing.discard(device_id)
             self._paused.discard(device_id)
             if not keep_error:
@@ -490,6 +560,10 @@ class DeviceManager:
                 self._play_error_attempts.pop(device_id, None)
             self._stream_urls.pop(device_id, None)
             self._owners.pop(device_id, None)
+            token = self._speaker_tokens.pop(device_id, None)
+            if token is not None and self.sessions is not None:
+                self.sessions.forget(token, f"speaker:{device_id}")
+                self.sessions.targets.forget(f"speaker:{device_id}", token)
             self._stop_watchdog(device_id)
 
     def playing_ids(self) -> list[str]:
@@ -596,8 +670,7 @@ class DeviceManager:
 
     def codec_capability_details(self, device_id: str) -> dict[str, dict]:
         return {
-            fmt: dict(meta)
-            for fmt, meta in self._codec_capability_meta.get(device_id, {}).items()
+            fmt: dict(meta) for fmt, meta in self._codec_capability_meta.get(device_id, {}).items()
         }
 
     def _load_codec_capabilities(self) -> None:
@@ -722,11 +795,7 @@ class DeviceManager:
             if aged:
                 stale[did] = sorted(aged)
         known = {
-            did: {
-                fmt: value
-                for fmt, value in caps.items()
-                if fmt not in stale.get(did, [])
-            }
+            did: {fmt: value for fmt, value in caps.items() if fmt not in stale.get(did, [])}
             for did, caps in members.items()
         }
         possible = [
@@ -797,9 +866,8 @@ class DeviceManager:
                     self._play_errors.pop(did, None)
                     attempts_map.pop(did, None)
                     continue
-                if (
-                    self._stream_urls.get(did) != url
-                    or self._owners.get(did) != entry.get("receiver")
+                if self._stream_urls.get(did) != url or self._owners.get(did) != entry.get(
+                    "receiver"
                 ):
                     # Stale entry: the speaker has moved on since the failure
                     # (ownership transferred — the phone switched AirPlay 1/2 —
@@ -814,7 +882,9 @@ class DeviceManager:
                     attempts_map.pop(did, None)
                     continue
                 try:
-                    await self.play_stream(did, url, owner=entry.get("receiver"), force=True)
+                    await self.recover_play_stream(
+                        did, url, owner=entry.get("receiver"), force=True
+                    )
                 except Exception as exc:
                     logger.debug("Retry of failed speaker %s: %s", did, exc)
                     attempts_map[did] = attempts_map.get(did, 0) + 1
@@ -904,8 +974,20 @@ class DeviceManager:
                 status = await api.get_status()
                 logger.debug("Speaker %s status: %s", device_id, status)
                 play_status = _find_play_status(status)
+                owner = self._owners.get(device_id, "")
+                finite_media = owner == MANUAL_PLAY_OWNER or owner.startswith("dlna:")
+                media = getattr(getattr(self, "bridge", None), "media_playback", None)
+                if media is not None and owner in media.sources:
+                    # Common media EOF/hold drain belongs to the session registry.
+                    # While decoding, interruptions use the same recovery as live input.
+                    finite_media = False
                 active = play_status is None or play_status == 1
-                if active and play_status == 1 and self.stream_active is not None:
+                if (
+                    active
+                    and play_status == 1
+                    and self.stream_active is not None
+                    and not finite_media
+                ):
                     try:
                         active = self.stream_active(device_id)
                     except Exception:
@@ -927,6 +1009,23 @@ class DeviceManager:
                 inactive_checks += 1
                 if inactive_checks < 3:
                     continue
+                if finite_media:
+                    token = self._speaker_tokens.pop(device_id, None)
+                    self._playing.discard(device_id)
+                    self._owners.pop(device_id, None)
+                    self._stream_urls.pop(device_id, None)
+                    if token is not None and self.sessions is not None:
+                        self.sessions.forget(token, f"speaker:{device_id}")
+                        self.sessions.targets.forget(f"speaker:{device_id}", token)
+                        lease = self.sessions.current(token.owner)
+                        if (
+                            lease is not None
+                            and lease.token == token
+                            and not any(key.startswith(("speaker:", "airplay:", "dlna-target:"))
+                                        for key in lease.resources)
+                        ):
+                            self.sessions.end(token, "media_finished", immediate=True)
+                    break
                 anchor_group = self.anchor_group_of(device_id)
                 if (
                     anchor_group is not None
@@ -961,7 +1060,7 @@ class DeviceManager:
                     device_id,
                     play_status,
                 )
-                await self.play_stream(
+                await self.recover_play_stream(
                     device_id, url, owner=self._owners.get(device_id), force=True
                 )
                 inactive_checks = 0
@@ -969,6 +1068,16 @@ class DeviceManager:
                 break
             except Exception as e:
                 logger.warning("Watchdog error for %s: %s", device_id, e)
+
+    async def recover_play_stream(self, device_id, url, owner=None, force=True):
+        recovery = getattr(self, "recovery", None)
+        if recovery is None:
+            return await self.play_stream(device_id, url, owner=owner, force=force, steal=False)
+        return await recovery.run(
+            owner or device_id,
+            "speaker",
+            lambda: self.play_stream(device_id, url, owner=owner, force=force, steal=False),
+        )
 
     def get_active_targets(self) -> list[dict]:
         """Return devices that should currently output audio.
