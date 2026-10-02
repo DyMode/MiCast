@@ -6,13 +6,13 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
 import time
 from contextlib import suppress
 from pathlib import Path
 
 from micast.config import settings
+from micast.config_store import write_json
 
 COOKIE_NAME = "micast_session"
 SESSION_AGE = 30 * 24 * 60 * 60
@@ -42,10 +42,7 @@ class AccessManager:
         }
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        write_json(self.path, self._data)
 
     def reset(self) -> None:
         """Wipe credentials and setup flags (清空数据 → 回到引导页)."""

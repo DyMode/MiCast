@@ -134,7 +134,15 @@ def run_desktop() -> None:
 
     config = uvicorn.Config(app, host=settings.host, port=settings.port, log_level="info")
     server = uvicorn.Server(config)
-    server_thread = threading.Thread(target=server.run, daemon=True)
+    from micast.ports import reserve_tcp
+
+    lease = reserve_tcp(settings.preferred_port("port"), settings.host,
+                        strict=settings.port_is_strict("port"))
+    settings.apply_resolved_port("port", lease.port)
+    config.port = lease.port
+    server_thread = threading.Thread(
+        target=server.run, kwargs={"sockets": [lease.socket]}, daemon=True
+    )
     server_thread.start()
     for _ in range(100):  # wait until uvicorn accepts connections
         if server.started:

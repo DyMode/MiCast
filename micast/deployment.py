@@ -46,3 +46,13 @@ def airplay2_mode() -> str:
 
 def airplay2_available() -> bool:
     return airplay2_mode() != "disabled"
+
+
+def classic_ingress_available() -> bool:
+    """The bridged controller cannot advertise LAN multicast receivers."""
+    network = os.environ.get("MICAST_NETWORK_MODE", "").strip().lower()
+    if network in {"host", "native"}:
+        return True
+    if network == "bridge":
+        return False
+    return deployment_mode() not in {"single", "integrated"}

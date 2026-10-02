@@ -10,6 +10,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from micast.config import settings
+from micast.config_store import write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +80,9 @@ class TokenStore:
 
     def save(self, tokens: dict) -> None:
         """Encrypt and save tokens."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps(tokens, ensure_ascii=False).encode("utf-8")
         encrypted = self._fernet.encrypt(data)
-        self.path.write_bytes(encrypted)
+        write_bytes(self.path, encrypted)
 
     def load(self) -> dict | None:
         """Load and decrypt tokens."""

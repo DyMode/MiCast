@@ -1,23 +1,59 @@
 """Application configuration with layered loading and hot reload."""
 
-import json
 import os
-import re
 import shutil
 import socket
 import sys
-import tempfile
 import uuid
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from micast.config_models import (
+    EQ_BAND_COUNT as EQ_BAND_COUNT,
+)
+from micast.config_models import (
+    EQ_BANDS_HZ as EQ_BANDS_HZ,
+)
+from micast.config_models import (
+    EQ_PRESET_POINTS as EQ_PRESET_POINTS,
+)
+from micast.config_models import (
+    EQ_PRESETS as EQ_PRESETS,
+)
+from micast.config_models import (
+    AirPlay2InstanceConfig as AirPlay2InstanceConfig,
+)
+from micast.config_models import (
+    AppConfig as AppConfig,
+)
+from micast.config_models import (
+    EqPoint as EqPoint,
+)
+from micast.config_models import (
+    ReceiverConfig as ReceiverConfig,
+)
+from micast.config_models import (
+    SpeakerConfig as SpeakerConfig,
+)
+from micast.config_models import (
+    SpeakerEqUndo as SpeakerEqUndo,
+)
+from micast.config_models import (
+    SpeakerGroupConfig as SpeakerGroupConfig,
+)
+from micast.config_models import (
+    _sanitize_airplay_targets as _sanitize_airplay_targets,
+)
+from micast.config_models import (
+    _sanitize_dlna_targets as _sanitize_dlna_targets,
+)
+from micast.config_store import read_json, write_json
 from micast.curve_fit import (
-    CURVE_FREQ_RANGE,
     CURVE_GAIN_RANGE,
     NIGHT_ATTENUATION,
     TARGET_CURVES,
@@ -38,7 +74,12 @@ CONTENT_PROFILES: tuple[str, ...] = ("music", "movie", "voice")
 # Snapshot the real environment before .env loading: a port set in .env is a
 # config default, not a deliberate pin — only true env vars make a busy port
 # fatal instead of sliding to a free one.
-_ENV_PINNED: frozenset[str] = frozenset(os.environ)
+_ENV_PINNED: frozenset[str] = frozenset(
+    key for key, value in os.environ.items()
+    if not (key in {"MICAST_PORT", "MICAST_STREAM_PORT", "MICAST_AIRPLAY_RTSP_PORT",
+                    "MICAST_AIRPLAY_UDP_BASE", "MICAST_AIRPLAY2_PORT"}
+            and value.strip().lower() in {"", "auto"})
+)
 
 # Make .env values visible to os.environ so file-persistence checks below can
 # respect environment overrides correctly.
@@ -78,18 +119,20 @@ def port_in_use(port: int, host: str = "0.0.0.0") -> bool:
 def resolve_port(preferred: int, env_var: str, attempts: int = 32) -> int:
     """Pick a listen port: the preferred one, or the next free one.
 
-    Users can't be expected to keep 3000/8080 free, so a busy preferred port
+    Users can't be expected to keep 42300/42400 free, so a busy preferred port
     silently slides to the next available one — unless the port was pinned
     via env var, which is a deliberate choice worth failing loudly about.
     """
+    if not 1 <= preferred <= 65535 or attempts < 0:
+        raise ValueError("端口必须为 1-65535，重试次数不能为负数")
     if not port_in_use(preferred):
         return preferred
     if env_var in _ENV_PINNED:
         raise RuntimeError(f"端口 {preferred} 已被占用（{env_var} 显式指定，不会自动更换）")
-    for candidate in range(preferred + 1, preferred + 1 + attempts):
+    for candidate in range(preferred + 1, min(65535, preferred + attempts) + 1):
         if not port_in_use(candidate):
             return candidate
-    raise RuntimeError(f"端口 {preferred}-{preferred + attempts} 全部被占用")
+    raise RuntimeError(f"端口 {preferred}-{min(65535, preferred + attempts)} 全部被占用")
 
 
 def env_pinned(env_var: str) -> bool:
@@ -100,8 +143,8 @@ def env_pinned(env_var: str) -> bool:
 # UI-editable ports: field name -> (env var, default preferred value).
 # A None default means "unset -> the service's built-in default applies".
 EDITABLE_PORTS: dict[str, tuple[str, int | None]] = {
-    "port": ("MICAST_PORT", 3000),
-    "stream_port": ("MICAST_STREAM_PORT", 8080),
+    "port": ("MICAST_PORT", 42300),
+    "stream_port": ("MICAST_STREAM_PORT", 42400),
     "airplay_rtsp_port": ("MICAST_AIRPLAY_RTSP_PORT", None),
     "airplay_udp_base": ("MICAST_AIRPLAY_UDP_BASE", None),
     "airplay2_port": ("MICAST_AIRPLAY2_PORT", None),
@@ -170,6 +213,9 @@ def default_data_dir() -> Path:
 
 def default_log_dir() -> Path:
     """Logs are removable local state for installed builds."""
+    override = os.environ.get("MICAST_LOG_DIR")
+    if override:
+        return Path(override).expanduser()
     mode = storage_mode()
     if mode == "managed":
         return default_data_dir()
@@ -215,246 +261,6 @@ class AudioConfig(BaseSettings):
 # disabled) shares the receiver's base stream; distinct non-flat signatures
 # each get their own split stream (…-q1, …-q2).
 #
-# EQ_BANDS_HZ / EQ_PRESETS are the legacy 10-band layout, kept only to
-# migrate old configs into control points.
-EQ_BANDS_HZ: tuple[int, ...] = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
-EQ_BAND_COUNT = len(EQ_BANDS_HZ)
-
-# Built-in presets, key -> band gains in dB (31/62/125/250/500/1k/2k/4k/8k/16k).
-EQ_PRESETS: dict[str, list[float]] = {
-    "flat": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "bass": [4.0, 5.0, 4.0, 2.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
-    "vocal": [-2.0, -1.0, 0.0, 0.0, 1.0, 3.0, 2.0, 2.0, 1.0, 0.0],
-    "night": [-4.0, -4.0, -3.0, -2.0, -1.0, 0.0, 0.0, -1.0, -2.0, -3.0],
-    "live": [2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 3.0],
-}
-
-# Presets expressed as control points (what new configs and the curve editor
-# actually consume).
-EQ_PRESET_POINTS: dict[str, list[tuple[float, float]]] = {
-    key: [(float(hz), g) for hz, g in zip(EQ_BANDS_HZ, bands, strict=True)]
-    for key, bands in EQ_PRESETS.items()
-}
-# The Harman target doubles as a preset so it is one tap away, not only a
-# reference overlay. It is a real curve, not a 10-band migration artifact.
-EQ_PRESET_POINTS["harman"] = list(TARGET_CURVES["harman"])
-
-
-class EqPoint(BaseModel):
-    """One EQ curve control point."""
-
-    freq: float = Field(ge=CURVE_FREQ_RANGE[0], le=CURVE_FREQ_RANGE[1])
-    gain_db: float = Field(ge=CURVE_GAIN_RANGE[0], le=CURVE_GAIN_RANGE[1])
-
-
-class SpeakerEqUndo(BaseModel):
-    """One server-side undo checkpoint for all audible per-speaker tuning."""
-
-    enabled: bool = False
-    points: list[EqPoint] = Field(default_factory=list)
-    preset: str = ""
-    target: str = ""
-    night_mode: bool = False
-    loudness_comp_enabled: bool = False
-    content_profile: str = ""
-
-
-class AppConfig(BaseModel):
-    """Application-level settings."""
-
-    name: str = Field(default="MiCast", min_length=1, max_length=64)
-
-
-class SpeakerConfig(BaseModel):
-    """Persisted configuration for a single Xiaomi speaker."""
-
-    did: str = Field(min_length=1)
-    alias: str = ""
-    enabled: bool = False
-    # Xiaomi's deviceID may change after an account/device rebind.  miotDID is
-    # persisted separately so discovery can re-associate the same physical
-    # speaker and atomically rewrite every reference to its current deviceID.
-    miot_did: str = ""
-    hardware: str = ""
-    # Per-speaker EQ: a drawn response curve as control points. EQ is a
-    # property of the physical speaker (its room/placement), so it lives here
-    # and follows the speaker into any group.
-    eq_enabled: bool = False
-    eq_points: list[EqPoint] = Field(default_factory=list)
-    eq_preset: str = ""
-    # Named target response the calibration wizard aims for ("" = flat).
-    eq_target: str = ""
-    # Night mode: a fixed bass-attenuation shelf layered onto the active curve.
-    # Independent of eq_enabled so it also works on a flat curve.
-    night_mode: bool = False
-    # Equal-loudness compensation: a low/high shelf that follows the listening
-    # volume (see curve_fit.loudness_curve). It is a stream-splitting dimension
-    # (its level is runtime, not persisted — only the on/off flag is).
-    loudness_comp_enabled: bool = False
-    # Active scene ("" = custom/manual). Saved per-speaker curves live in
-    # eq_profiles; switching a scene copies it into eq_points.
-    content_profile: str = ""
-    eq_profiles: dict[str, list[EqPoint]] = Field(default_factory=dict)
-    # Monotonic persisted revision used for cross-client optimistic locking.
-    eq_revision: int = Field(default=0, ge=0)
-    # A single durable checkpoint (one slot, overwritten by every new
-    # checkpoint): undo still works after leaving the page or opening it on
-    # another device, but only one tuning step can be undone.
-    eq_undo: SpeakerEqUndo | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_legacy_eq_bands(cls, data):
-        """Old configs persist 10-band (or legacy 5-band) slider gains; fold
-        them into control points on first load."""
-        if not isinstance(data, dict) or "eq_bands" not in data:
-            return data
-        bands = data.pop("eq_bands")
-        if data.get("eq_points"):
-            return data
-        if isinstance(bands, list):
-            # 5-band configs (60/250/1k/4k/12k) land on their nearest ISO band
-            # of the 10-band layout, not on the first five positions.
-            if len(bands) == 5:
-                bands = [0.0, bands[0], 0.0, bands[1], 0.0, bands[2], 0.0, bands[3], 0.0, bands[4]]
-            lo, hi = EQ_GAIN_RANGE
-            gains = [max(lo, min(hi, float(b))) for b in bands[:EQ_BAND_COUNT]]
-            gains += [0.0] * (EQ_BAND_COUNT - len(gains))
-            data["eq_points"] = [
-                {"freq": float(hz), "gain_db": g} for hz, g in zip(EQ_BANDS_HZ, gains, strict=True)
-            ]
-        return data
-
-
-class ReceiverConfig(BaseModel):
-    """An AirPlay name and the playback destination bound to it."""
-
-    id: str = Field(min_length=1)
-    name: str = Field(min_length=1, max_length=64)
-    target_type: str = Field(default="selected", pattern=r"^(selected|speaker|group)$")
-    target_id: str | None = None
-    enabled: bool = True
-
-
-class SpeakerGroupConfig(BaseModel):
-    """A playback destination containing multiple physical speakers."""
-
-    id: str = Field(min_length=1)
-    name: str = Field(min_length=1, max_length=64)
-    speaker_ids: list[str] = Field(default_factory=list)
-    # Signed offset (ms) per member, relative to `anchor_did`. Positive = later
-    # (delayed), negative = earlier (ahead). The anchor itself is always 0.
-    delays_ms: dict[str, int] = Field(default_factory=dict)
-    # Reference member every other member's offset is measured against.
-    anchor_did: str | None = None
-    # "mirror": every speaker plays the same stream. "stereo": exactly two
-    # speakers, each plays one channel of the source through its own stream.
-    mode: str = Field(default="mirror", pattern=r"^(mirror|stereo)$")
-    channels: dict[str, str] = Field(default_factory=dict)  # did -> "left" | "right"
-    gains_db: dict[str, float] = Field(default_factory=dict)  # loudness trim per speaker
-    # External AirPlay devices (discovered via mDNS) that play alongside the
-    # Xiaomi speakers; ids are MAC hex from the _raop service name.
-    airplay_targets: list[str] = Field(default_factory=list)
-    # External DLNA renderers (discovered via SSDP); ids are device UDNs.
-    dlna_targets: list[str] = Field(default_factory=list)
-    # Channel assignment per network device id (AirPlay id or DLNA UDN) in a
-    # stereo group; no entry means the full stereo mix.
-    network_channels: dict[str, str] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_group_delays(cls, data: Any) -> Any:
-        """One-step migration: fold the old absolute-lag delay fields
-        (`delays_ms`, `audio_delays_ms`, `airplay_delays_ms`) into signed,
-        anchor-relative `delays_ms`. Runs on the raw dict before Pydantic drops
-        the removed fields, so a legacy JSON and a fresh group both normalize.
-
-        Discriminator: a legacy group has no `anchor_did`; a migrated one does.
-        """
-        if not isinstance(data, dict):
-            return data
-        members = (
-            list(data.get("speaker_ids") or [])
-            + list(data.get("airplay_targets") or [])
-            + list(data.get("dlna_targets") or [])
-        )
-        out = dict(data)
-        out.pop("audio_delays_ms", None)
-        out.pop("airplay_delays_ms", None)
-
-        anchor = data.get("anchor_did")
-        if anchor is None:
-            # Legacy (or fresh): fold the three absolute-lag dicts, whose key
-            # spaces are disjoint, then anchor on the least-delayed member.
-            abs_lag: dict[str, int] = dict.fromkeys(members, 0)
-            for src in (
-                data.get("delays_ms") or {},
-                data.get("audio_delays_ms") or {},
-                data.get("airplay_delays_ms") or {},
-            ):
-                for key, value in src.items():
-                    try:
-                        abs_lag[str(key)] = int(value)
-                    except (TypeError, ValueError):
-                        continue
-            anchor = min(members, key=lambda m: abs_lag.get(m, 0)) if members else None
-            base = abs_lag.get(anchor, 0) if anchor else 0
-            out["delays_ms"] = {m: abs_lag[m] - base for m in members if abs_lag[m] != base}
-            out["anchor_did"] = anchor
-            return out
-
-        # Already migrated: keep signed offsets, force the anchor offset to 0,
-        # and re-anchor (to the earliest member) if the anchor left the group.
-        delays = {k: int(v) for k, v in (data.get("delays_ms") or {}).items()}
-        if anchor not in members:
-            anchor = members[0] if members else None
-        delays.pop(anchor, None)
-        out["delays_ms"] = delays
-        out["anchor_did"] = anchor
-        return out
-
-    @property
-    def member_count(self) -> int:
-        """Total members: Xiaomi speakers + attached network devices."""
-        return len(self.speaker_ids) + len(self.airplay_targets) + len(self.dlna_targets)
-
-    def delay_holds(self) -> dict[str, int]:
-        """Non-negative hold (ms) per delay-capable member — Xiaomi speakers and
-        external AirPlay targets — normalized so the most-ahead member holds 0
-        and the rest pad after it. This is the ONE normalization shared by the
-        pull path (stream server per-client buffer) and the push path (AirPlay
-        pre-buffer), so a mixed group aligns to a single live edge. DLNA
-        renderers have no delay path and are excluded (they play live)."""
-        members = [*self.speaker_ids, *self.airplay_targets]
-        offsets = {m: int(self.delays_ms.get(m, 0)) for m in members}
-        if not offsets:
-            return {}
-        min_off = min(offsets.values())
-        return {m: max(0, offsets[m] - min_off) for m in members}
-
-
-def _sanitize_airplay_targets(items) -> list[str]:
-    return list(
-        dict.fromkeys(
-            str(item).lower() for item in items if re.fullmatch(r"[0-9a-f]{12}", str(item).lower())
-        )
-    )
-
-
-def _sanitize_dlna_targets(items) -> list[str]:
-    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
-
-
-class AirPlay2InstanceConfig(BaseModel):
-    """An AirPlay 2 receiver identity mapped to one MiCast playback target."""
-
-    id: str = Field(min_length=1)
-    name: str = Field(min_length=1, max_length=50)
-    target_type: str = Field(pattern=r"^(speaker|group)$")
-    target_id: str = Field(min_length=1)
-    enabled: bool = True
-
-
 class Settings(BaseSettings):
     """Global application settings.
 
@@ -475,9 +281,9 @@ class Settings(BaseSettings):
     )
 
     host: str = "0.0.0.0"
-    port: int = 3000
+    port: int = 42300
     stream_host: str = ""
-    stream_port: int = 8080
+    stream_port: int = 42400
     # Preferred ports for the AirPlay services; None = use the built-in
     # default. A busy preferred port slides upward (see resolve_port and
     # raop.server), so these are starting points, not strict pins.
@@ -502,6 +308,16 @@ class Settings(BaseSettings):
     sync_groups_enabled: bool = True
     large_delay_enabled: bool = False
     airplay2_enabled: bool = False
+    airplay_enabled: bool = True
+    strict_ports: list[str] = Field(default_factory=list)
+
+    @field_validator("port", "stream_port", "airplay_rtsp_port", "airplay_udp_base",
+                     "airplay2_port", mode="before")
+    @classmethod
+    def _automatic_port(cls, value, info):
+        if isinstance(value, str) and value.strip().lower() in {"", "auto"}:
+            return cls.model_fields[info.field_name].default
+        return value
     # Experimental LAN discovery of external playback targets: AirPlay mDNS
     # browse + DLNA SSDP M-SEARCH. Off by default so an idle MiCast never
     # scans the network.
@@ -574,13 +390,15 @@ class Settings(BaseSettings):
 
     def load_from_file(self) -> None:
         """Load non-env overrides from config file."""
-        path = self.config_path
-        if not path.exists():
+        data = read_json(self.config_path)
+        if data is None:
             return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return
+
+        if "strict_ports" not in data:
+            data["strict_ports"] = [
+                key for key, (_, default) in EDITABLE_PORTS.items()
+                if data.get(key) is not None and data[key] != default
+            ]
 
         # Only load fields not explicitly set by environment
         for key, value in data.items():
@@ -615,7 +433,8 @@ class Settings(BaseSettings):
                 }
             else:
                 env_var = f"MICAST_{key.upper()}"
-                if env_var not in os.environ and hasattr(self, key):
+                if (env_var not in os.environ or
+                    (key in EDITABLE_PORTS and not env_pinned(env_var))) and hasattr(self, key):
                     setattr(self, key, value)
         delay_limit_ms = 15000 if self.large_delay_enabled else 5000
         for group in self.groups:
@@ -624,6 +443,16 @@ class Settings(BaseSettings):
                 for key, value in group.delays_ms.items()
             }
         self._migrate_receivers()
+
+        if os.environ.get("MICAST_DEPLOYMENT", "").strip().lower() == "fnos":
+            from micast.ports import AIRPLAY2_RECEIVER_PORT
+            changed = data.get("airplay2_port") != AIRPLAY2_RECEIVER_PORT or (
+                "airplay2_port" in self.strict_ports
+            )
+            self.airplay2_port = AIRPLAY2_RECEIVER_PORT
+            self.strict_ports = [key for key in self.strict_ports if key != "airplay2_port"]
+            if changed:
+                self.save_to_file()
 
     def reset_runtime(self) -> None:
         """Restore defaults in-memory after the data files were wiped (清空数据).
@@ -648,6 +477,8 @@ class Settings(BaseSettings):
             "airplay_protocol": self.airplay_protocol,
             "airplay_engine": self.airplay_engine,
             "dlna_enabled": self.dlna_enabled,
+            "airplay_enabled": self.airplay_enabled,
+            "strict_ports": self.strict_ports,
             "sync_groups_enabled": self.sync_groups_enabled,
             "large_delay_enabled": self.large_delay_enabled,
             "airplay2_enabled": self.airplay2_enabled,
@@ -669,26 +500,7 @@ class Settings(BaseSettings):
                 name: [p.model_dump() for p in points] for name, points in self.saved_curves.items()
             },
         }
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(data, indent=2, ensure_ascii=False)
-        # Never expose a partially-written JSON file. This matters on NAS
-        # storage where a process/container can disappear halfway through a
-        # write and make the application unbootable on the next start.
-        fd, temporary = tempfile.mkstemp(
-            prefix=f".{self.config_path.name}.",
-            suffix=".tmp",
-            dir=self.config_path.parent,
-            text=True,
-        )
-        temporary_path = Path(temporary)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_path, self.config_path)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+        write_json(self.config_path, data)
         self._config_revision += 1
 
     def snapshot(self) -> dict[str, Any]:
@@ -743,6 +555,13 @@ class Settings(BaseSettings):
         self.dlna_enabled = enabled
         self.save_to_file()
 
+    def port_is_strict(self, key: str) -> bool:
+        return key in self.strict_ports or env_pinned(EDITABLE_PORTS[key][0])
+
+    def set_airplay_enabled(self, enabled: bool) -> None:
+        self.airplay_enabled = enabled
+        self.save_to_file()
+
     def set_ports(self, changes: dict[str, int | None]) -> None:
         """Update preferred ports and persist.
 
@@ -756,8 +575,13 @@ class Settings(BaseSettings):
                 raise ValueError(f"未知端口项: {key}")
             if value is not None and not 1024 <= int(value) <= 65535:
                 raise ValueError(f"端口需在 1024-65535 之间: {key}={value}")
+            if key == "airplay_udp_base" and value is not None and value > 65533:
+                raise ValueError("AirPlay UDP 端口池至少需要三个端口，起点不能超过 65533")
         for key, value in changes.items():
             default = EDITABLE_PORTS[key][1]
+            self.strict_ports = [item for item in self.strict_ports if item != key]
+            if value is not None:
+                self.strict_ports.append(key)
             resolved_value = value if value is not None else default
             if key in ("port", "stream_port"):
                 setattr(self, f"_preferred_{key}", resolved_value)
@@ -928,6 +752,7 @@ class Settings(BaseSettings):
                 receiver.name = group_names[receiver.target_id]
 
     def receiver_targets(self, receiver_id: str) -> list[str]:
+        receiver_id = receiver_id.removeprefix("dlna:")
         receiver = next((item for item in self.receivers if item.id == receiver_id), None)
         if receiver is None:
             instance = next(
@@ -948,6 +773,7 @@ class Settings(BaseSettings):
         return list(group.speaker_ids) if group else []
 
     def receiver_target_delays(self, receiver_id: str) -> dict[str, int]:
+        receiver_id = receiver_id.removeprefix("dlna:")
         receiver = next((item for item in self.receivers if item.id == receiver_id), None)
         if receiver is None or receiver.target_type != "group":
             return {}
@@ -955,6 +781,7 @@ class Settings(BaseSettings):
         return dict(group.delays_ms) if group else {}
 
     def group_for_receiver(self, receiver_id: str) -> SpeakerGroupConfig | None:
+        receiver_id = receiver_id.removeprefix("dlna:")
         receiver = next((item for item in self.receivers if item.id == receiver_id), None)
         if receiver is not None and receiver.target_type == "group":
             return next((item for item in self.groups if item.id == receiver.target_id), None)
@@ -974,7 +801,7 @@ class Settings(BaseSettings):
         the delay control of every other group appear to do nothing.
         """
         group = self.group_for_receiver(receiver_id)
-        if group is None or did not in group.speaker_ids:
+        if group is None or did not in [*group.speaker_ids, *group.dlna_targets]:
             return 0
         return group.delay_holds().get(did, 0)
 
@@ -983,7 +810,7 @@ class Settings(BaseSettings):
         group = self.group_for_receiver(receiver_id)
         if group is None or group.mode != "stereo":
             return None
-        channel = group.channels.get(did)
+        channel = group.channels.get(did) or group.network_channels.get(did)
         return channel if channel in ("left", "right") else None
 
     def receiver_airplay_targets(self, receiver_id: str) -> list[str]:
@@ -1280,11 +1107,12 @@ class Settings(BaseSettings):
         variants: list[dict] = []
         seen: set[tuple[str, tuple[tuple[float, float], ...] | None, bool]] = set()
         eq_counts: dict[str, int] = {}
-        for did in self.receiver_targets(receiver_id):
+        for did in [*self.receiver_targets(receiver_id), *self.receiver_dlna_targets(receiver_id)]:
             channel = self.receiver_channel(receiver_id, did)
             base = {"left": "-L", "right": "-R"}.get(channel, "")
-            curve = self.speaker_eq_curve(did)
-            loudness = self.speaker_loudness(did)
+            tuning_id = f"dlna:{did}" if did in self.receiver_dlna_targets(receiver_id) else did
+            curve = self.speaker_eq_curve(tuning_id)
+            loudness = self.speaker_loudness(tuning_id)
             key = (base, curve, loudness)
             if key in seen:
                 continue
@@ -1343,8 +1171,9 @@ class Settings(BaseSettings):
         channel suffix is the last resort only.
         """
         base = self.channel_suffix(receiver_id, did)
-        curve = self.speaker_eq_curve(did)
-        loudness = self.speaker_loudness(did)
+        tuning_id = f"dlna:{did}" if did in self.receiver_dlna_targets(receiver_id) else did
+        curve = self.speaker_eq_curve(tuning_id)
+        loudness = self.speaker_loudness(tuning_id)
         if curve is None and not loudness:
             return base
         variants = self.receiver_stream_variants(receiver_id)

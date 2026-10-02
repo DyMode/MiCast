@@ -12,6 +12,7 @@ import aiohttp
 from miservice import MiAccount, MiIOService, MiNAService, MiTokenStore
 
 from micast.config import settings
+from micast.config_store import write_json
 from micast.net import new_session
 from micast.xiaomi.token_store import TokenStore
 
@@ -72,14 +73,11 @@ class XiaomiAuth:
             return {}
 
     def _save_account_state(self, status: str, user_id: str | None = None) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
         value = self._account_state()
         value.update({"status": status, "ever_logged_in": True})
         if user_id:
             value["user_id"] = user_id
-        self._state_path.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        write_json(self._state_path, value)
 
     def note_cloud_result(self, ok: bool) -> None:
         """Record whether a real cloud call just worked.

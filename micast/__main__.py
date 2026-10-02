@@ -6,7 +6,6 @@ Frozen Windows builds get the desktop shell (WebView2 window + tray);
 MICAST_NO_DESKTOP=1 forces plain server mode (useful for debugging).
 """
 
-import asyncio
 import os
 import sys
 import threading
@@ -15,16 +14,32 @@ from pathlib import Path
 
 import uvicorn
 
-from micast.config import resolve_port, settings
+from micast.config import EDITABLE_PORTS, env_pinned, settings
+from micast.ports import reserve_tcp
 
 
 def main() -> None:
-    unix_socket = os.environ.get("MICAST_UNIX_SOCKET", "").strip()
-    # A normal user's machine may already have something on 3000 — slide to a
-    # free port instead of failing. Explicit MICAST_PORT stays strict.
-    if not unix_socket:
-        settings.apply_resolved_port("port", resolve_port(settings.port, "MICAST_PORT"))
+    if "--preflight-if-new" in sys.argv:
+        if settings.config_path.exists():
+            # An installed app must keep its management UI available when
+            # optional protocols fail or the user has disabled all inputs.
+            raise SystemExit(0)
+        sys.argv[sys.argv.index("--preflight-if-new")] = "--preflight"
+    if "--preflight" in sys.argv:
+        from micast.installation import main as preflight
 
+        sys.argv.remove("--preflight")
+        if "--profile" not in sys.argv:
+            sys.argv.extend(["--profile", str(settings.config_path)])
+        if "--automatic-env-ports" not in sys.argv:
+            sys.argv.extend(["--automatic-env-ports", ",".join(
+                key for key, (env_var, _) in EDITABLE_PORTS.items()
+                if env_var in os.environ and not env_pinned(env_var)
+            )])
+        raise SystemExit(preflight())
+    unix_socket = os.environ.get("MICAST_UNIX_SOCKET", "").strip()
+    # A normal user's machine may already have something on 42300 — slide to a
+    # free port instead of failing. Explicit MICAST_PORT stays strict.
     frozen = getattr(sys, "frozen", False)
     if frozen and sys.platform == "win32" and os.environ.get("MICAST_NO_DESKTOP") != "1":
         from micast.desktop import run_desktop  # noqa: PLC0415 — desktop-only deps
@@ -34,41 +49,28 @@ def main() -> None:
 
     from micast.main import app  # noqa: PLC0415 — deferred until settings load
 
+    lease = None
+    if not unix_socket:
+        lease = reserve_tcp(settings.preferred_port("port"), settings.host,
+                            strict=settings.port_is_strict("port"))
+        settings.apply_resolved_port("port", lease.port)
+
     if frozen and not unix_socket:
         # Packaged non-Windows app: take the user straight to the UI.
         url = f"http://127.0.0.1:{settings.port}"
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     if unix_socket:
-        # fnOS gateway mode: the admin UI stays on the Unix socket, but DLNA
-        # discovery advertises http://<host>:<port>/dlna/... — bind a minimal
-        # TCP app exposing only the DLNA routes so that URL actually answers.
-        settings.apply_resolved_port("port", resolve_port(settings.port, "MICAST_PORT"))
-        _run_with_unix_socket(app, Path(unix_socket))
+        socket_path = Path(unix_socket)
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        socket_path.unlink(missing_ok=True)
+        uvicorn.run(app, uds=str(socket_path), log_level="info")
     else:
-        uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
-
-
-def _run_with_unix_socket(app, socket_path: Path) -> None:
-    from fastapi import FastAPI
-
-    from micast.routes import dlna as dlna_routes
-
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    socket_path.unlink(missing_ok=True)
-    dlna_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    dlna_app.include_router(dlna_routes.router)
-
-    async def _serve() -> None:
-        servers = [
-            uvicorn.Server(uvicorn.Config(app, uds=str(socket_path), log_level="info")),
-            uvicorn.Server(
-                uvicorn.Config(dlna_app, host=settings.host, port=settings.port, log_level="info")
-            ),
-        ]
-        await asyncio.gather(*(server.serve() for server in servers))
-
-    asyncio.run(_serve())
+        try:
+            uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port,
+                                         log_level="info")).run(sockets=[lease.socket])
+        finally:
+            lease.close()
 
 
 if __name__ == "__main__":
