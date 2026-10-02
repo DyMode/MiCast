@@ -5,6 +5,14 @@
 import { appUrl } from "./paths";
 import { safeUserMessage } from "./errors";
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public code?: string) {
+    super(safeUserMessage(message));
+    this.name = 'ApiError';
+  }
+  get retryable() { return this.status === 408 || this.status === 429 || this.status >= 500; }
+}
+
 /** The failure path shared by every request, JSON or not: the log endpoints
  *  answer with a file body, so they cannot go through apiFetch's `res.json()`. */
 async function apiError(res: Response): Promise<Error> {
@@ -19,13 +27,39 @@ async function apiError(res: Response): Promise<Error> {
   } catch {
     detail = text;
   }
-  return new Error(safeUserMessage(detail));
+  return new ApiError(detail, res.status);
 }
 
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(appUrl(path), init);
-  if (!res.ok) throw await apiError(res);
-  return res.json();
+const pendingReads = new Map<string, Promise<unknown>>();
+
+async function apiFetch(path: string, init?: RequestInit): Promise<any> {
+  const read = !init?.method || init.method === 'GET';
+  if (read && !init?.signal && pendingReads.has(path)) return pendingReads.get(path);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), read ? 20000 : 60000);
+  const externalAbort = () => controller.abort(init?.signal?.reason);
+  init?.signal?.addEventListener('abort', externalAbort, { once: true });
+  if (init?.signal?.aborted) externalAbort();
+  const core = path === '/api/status' || path === '/api/config' || path === '/api/access/status';
+  const request = (async () => {
+    try {
+      const res = await fetch(appUrl(path), { ...init, signal: controller.signal });
+      if (!res.ok) throw await apiError(res);
+      const data = await res.json();
+      if (core) window.dispatchEvent(new CustomEvent('micast:connection', { detail: { ok: true } }));
+      return data;
+    } catch (error) {
+      if (core) window.dispatchEvent(new CustomEvent('micast:connection', { detail: { ok: false } }));
+      if (controller.signal.aborted && !init?.signal?.aborted) throw new Error('连接超时，请检查 MiCast 服务或网络后重试');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      init?.signal?.removeEventListener('abort', externalAbort);
+      if (read && !init?.signal) pendingReads.delete(path);
+    }
+  })();
+  if (read && !init?.signal) pendingReads.set(path, request);
+  return request;
 }
 
 /** Count of records the server put in the body, for a toast that does not have
@@ -58,6 +92,10 @@ export type AirPlayProtocol = "auto" | "classic" | "airplay2";
 export type AirPlayEngine = "local" | "airplay2";
 
 export interface FullConfig {
+  airplay_enabled?: boolean;
+  protocol_status?: Record<string, { status: string; detail: string }>;
+  config_revision?: number;
+  runtime_epoch?: string | null;
   deployment: string;
   audio: AudioConfig;
   app: AppConfig;
@@ -82,6 +120,7 @@ export interface FullConfig {
     mode: "managed" | "portable" | "installed" | "development";
     data_dir: string;
     log_dir: string;
+    shared_dir?: string | null;
   };
   dlna_status: { status: string; detail: string };
   selected_device_id: string | null;
@@ -212,6 +251,7 @@ export interface NetworkDevice {
 }
 
 export interface Status {
+  runtime?: RuntimeState;
   status: string;
   pcm_source: string;
   audio: AudioConfig;
@@ -220,6 +260,8 @@ export interface Status {
   receivers: ReceiverInfo[];
   airplay_protocol: AirPlayProtocol;
   airplay_engine: AirPlayEngine;
+  /** Per-receiver now-playing track; empty when nothing is casting. */
+  now_playing: Record<string, NowPlayingTrack>;
   orchestration: {
     configured: boolean;
     status: string;
@@ -230,6 +272,47 @@ export interface Status {
     streams: Record<string, { clients: number; bytes_sent: number; dropped_chunks: number; flowing: boolean; latency: LatencyMetrics }>;
     sinks: Record<string, Record<string, SinkLatencyMetrics>>;
   };
+}
+
+export interface RuntimeState {
+  epoch?: string;
+  revision: number;
+  sequence?: number;
+  sessions: Array<{ owner: string; generation: number; protocol: string; state: string; reason: string; resources: string[]; capabilities: { eq: boolean; channels: boolean; delay: boolean; seek: boolean; pause_output: boolean } }>;
+  targets: Array<{ target: string; owner: string; generation: number; output?: string; capabilities?: PlaybackCapabilities }>;
+}
+
+export interface PlaybackCapabilities {
+  volume_control?: boolean;
+  finite: boolean;
+  seek: boolean;
+  source_pause: boolean;
+  pause_output: boolean;
+  eq: boolean;
+  channels: boolean;
+  delay: boolean;
+  metadata?: 'sender' | 'didl' | 'unavailable';
+  transport?: 'http' | 'rtp';
+  volume_readback?: boolean;
+}
+
+/** What one receiver is playing, composed from sender-pushed metadata
+ *  (title/artist/album/recent lyric lines/artwork) plus the Xiaomi library
+ *  match (audioID/cover URL/duration). Every field is null/empty when
+ *  unknown so the UI can hide a slot instead of showing a placeholder. */
+export interface NowPlayingTrack {
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  /** Recent sender-pushed lyric lines (≤8, deduplicated); the LAST entry
+   *  is the current line. Null when the sender pushes no lyrics. */
+  lyric_lines: string[] | null;
+  audio_id: string | null;
+  duration: number | null;
+  /** One shape for the cover: the endpoint URL plus an opaque cache
+   *  revision (library audioID, or a monotonic counter for sender art).
+   *  Null when no cover source exists — the UI hides the slot. */
+  cover: { url: string; rev: string } | null;
 }
 
 export interface XiaomiStatus {
@@ -307,6 +390,7 @@ export interface ReceiverInfo {
 }
 
 export interface PlaybackState {
+  runtime?: RuntimeState;
   playing: boolean;
   paused: boolean;
   volume: number | null;
@@ -370,6 +454,12 @@ export interface AudioPathMetrics {
     entry?: string | null;
     label?: string | null;
   }>;
+  /**
+   * The trailing 60-second fold of the same events: per-kind counts, worst
+   * single ms, and the per-entry split. The diagnostics page draws its live
+   * conclusions from this alone — the cumulative sections are history.
+   */
+  window?: Record<string, { count: number; ms_max: number; by_entry: Record<string, number> }>;
 }
 
 /** One entry's health as the audio supervisor sees it. */
@@ -547,6 +637,7 @@ export interface TopologyEdge {
 }
 
 export interface Topology {
+  runtime?: RuntimeState;
   ts: number;
   status: string;
   nodes: TopologyNode[];
@@ -631,6 +722,20 @@ export const api = {
     return apiFetch("/api/config/dlna", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
+    });
+  },
+
+  setAirplayEnabled(enabled: boolean): Promise<{ airplay_enabled: boolean }> {
+    return apiFetch("/api/config/airplay", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
+  retryProtocol(protocol: string): Promise<{ protocol_status: NonNullable<FullConfig["protocol_status"]> }> {
+    return apiFetch("/api/config/protocols/retry", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ protocol }),
     });
   },
 

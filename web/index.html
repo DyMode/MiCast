@@ -2,9 +2,9 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="rgb(255, 255, 255)" />
+    <meta name="theme-color" content="rgb(243, 239, 233)" />
     <base href="/app/micast/" />
     <link rel="icon" href="icons/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="icon" href="icons/favicon.svg" type="image/svg+xml" sizes="any" />
@@ -13,6 +13,19 @@
     <title>MiCast</title>
   </head>
   <body>
+    <!-- Edge refraction uses an authored normal field with a neutral centre.
+         CSS provides an explicit plain-blur capability fallback. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <filter id="micast-lens" x="0" y="0" width="100%" height="100%">
+        <feImage href="assets/glass/lens-map.svg" preserveAspectRatio="none" result="normal" />
+        <feDisplacementMap in="SourceGraphic" in2="normal" scale="18" xChannelSelector="R" yChannelSelector="G" />
+      </filter>
+      <!-- Pressed-state refraction: stronger wobble while the tab bar is held. -->
+      <filter id="micast-lens-strong" x="0" y="0" width="100%" height="100%">
+        <feImage href="assets/glass/lens-map.svg" preserveAspectRatio="none" result="normal" />
+        <feDisplacementMap in="SourceGraphic" in2="normal" scale="28" xChannelSelector="R" yChannelSelector="G" />
+      </filter>
+    </svg>
     <div id="app"></div>
     <script type="module" src="src/main.ts"></script>
   </body>

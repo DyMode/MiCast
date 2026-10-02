@@ -50,6 +50,7 @@ export function bindGroupToggles(container: HTMLElement) {
       groupExpansion.set(groupId, expand);
       body.hidden = !expand;
       button.classList.toggle("expanded", expand);
+      button.setAttribute("aria-expanded", String(expand));
     });
   });
 

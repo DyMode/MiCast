@@ -1,0 +1,62 @@
+/* ===== Player geometry — single source of truth =========================
+   The rules above carry the player's material, three-row shape and
+   animations; this block owns its POSITION and the minimized state, in one
+   place, so partial overrides elsewhere cannot drift apart.
+
+   Compact (<1024): floats above the tab-bar clearance. Wide (>=1024): a
+   sidebar controller docked to the BOTTOM of the left lane, floating like
+   the header and tab-bar capsules — a top-of-lane dock leaves a dead zone
+   under the nav card that grows with viewport height. */
+
+@media (max-width: 1023px) {
+  .now-playing {
+    left: var(--chrome-float);
+    right: var(--chrome-float);
+    top: auto;
+    bottom: calc(var(--tab-bar-clearance) + var(--space-sm));
+    max-height: calc(100dvh - var(--header-clearance) - var(--tab-bar-clearance) - var(--space-lg));
+    overflow-y: auto;
+  }
+}
+
+@media (min-width: 1024px) {
+  /* Wide: the player lives in the left lane's flow — alignment by
+     construction. Only the mobile slide-in transform is neutralized. */
+  .now-playing,
+  .now-playing.visible {
+    position: relative;
+    left: auto;
+    right: auto;
+    top: auto;
+    bottom: auto;
+    width: auto;
+    max-height: none;
+    overflow: visible;
+    transform: none;
+    /* The ::before refract lens sits at z-index -1; without a stacking
+       context of our own (the fixed/mobile era had `transform`) it escapes
+       behind the wallpaper and eats the card. The chrome recipe requires
+       this on every chrome surface — see .sidebar. */
+    isolation: isolate;
+  }
+
+  .has-playback .main-content {
+    padding-bottom: 0;
+  }
+
+  /* Minimized: the same card reduced to the identity row — the cover (or
+     speaker glyph), the title, and a state dot's worth of text. The whole
+     card is the expand hit area; the chevron states it explicitly. */
+  .now-playing.is-minimized .now-playing-master,
+  .now-playing.is-minimized .now-playing-controls,
+  .now-playing.is-minimized .now-playing-details {
+    display: none;
+  }
+  .now-playing-minimize { display: grid; }
+  .now-playing.is-minimized { cursor: pointer; }
+  .now-playing.is-minimized .now-playing-main {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "icon copy restore";
+  }
+  .now-playing-restore { grid-area: restore; }
+}

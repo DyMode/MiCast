@@ -1,6 +1,6 @@
 import {
-  Airplay, AudioWaveform, Cast, Check, ChevronRight, Download, FileText, Link2, Moon,
-  Projector, RadioTower, Server, Smartphone, Trash2,
+  Airplay, AudioWaveform, Cast, Check, ChevronDown, ChevronRight, ChevronUp, Download, FileText, Link2, Moon,
+  Maximize2, Projector, RadioTower, Server, SlidersHorizontal, Smartphone, Square, Trash2,
   Clock3, FolderOpen, LockKeyhole, Minimize2, Monitor, Pause, Play, Settings, Share2, Speaker, SquareTerminal, Sun, Tv, Undo2, User, Volume2, VolumeX, X,
 } from "lucide";
 import { siXiaomi } from "simple-icons";
@@ -8,8 +8,8 @@ import { siXiaomi } from "simple-icons";
 export type IconName = "airplay" | "antenna" | "speaker" | "settings" |
   "person" | "terminal" | "sun" | "moon" | "appearance" | "wave" | "check" |
   "play" | "pause" | "close" | "cast" | "link" | "clock" | "topology" |
-  "tv" | "loudspeaker" | "projector" | "chevron" | "minimize" | "mute" | "lock" | "folder" |
-  "download" | "undo" | "file" | "trash" | "phone" | "server";
+  "tv" | "loudspeaker" | "projector" | "chevron" | "chevron-up" | "chevron-down" | "minimize" | "maximize" | "mute" | "lock" | "folder" |
+  "download" | "undo" | "file" | "trash" | "phone" | "server" | "square" | "sliders";
 
 const lucideIcons: Record<IconName, unknown> = {
   airplay: Airplay, antenna: RadioTower, speaker: Volume2,
@@ -18,7 +18,10 @@ const lucideIcons: Record<IconName, unknown> = {
   wave: AudioWaveform, check: Check, play: Play, pause: Pause, close: X,
   cast: Cast, link: Link2, clock: Clock3, topology: Share2,
   tv: Tv, loudspeaker: Speaker, projector: Projector, chevron: ChevronRight,
-  minimize: Minimize2,
+  "chevron-up": ChevronUp, "chevron-down": ChevronDown,
+  minimize: Minimize2, maximize: Maximize2,
+  square: Square,
+  sliders: SlidersHorizontal,
   mute: VolumeX,
   lock: LockKeyhole,
   folder: FolderOpen,

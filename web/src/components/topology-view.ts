@@ -1,12 +1,13 @@
 /**
  * Live link-topology view: a dark "flight map" canvas where audio paths are
  * drawn as glowing arcs with particles flowing along them. Data arrives over
- * SSE (/api/topology/stream) with a polling fallback; layout is a small
+ * the application's shared business connection and HTTP fallback; layout is a small
  * hand-rolled force simulation keyed by node id so frames stay stable.
  */
 
 import { api, type Topology, type TopologyEdge, type TopologyNode } from "../api";
 import { appUrl } from "../paths";
+import { store } from '../state';
 
 const KIND_COLORS: Record<string, string> = {
   source: "#a78bfa",
@@ -54,6 +55,7 @@ export function renderTopologyView(): string {
   return `
     <div class="topology-stage" data-topology-stage>
       <canvas class="topology-canvas" data-topology-canvas></canvas>
+      <details class="topology-node-list"><summary>链路设备与状态</summary><div data-topology-nodes></div></details>
       <div class="topology-hud topology-hud-left">
         <span class="topology-pill" data-topology-status>连接中…</span>
       </div>
@@ -95,6 +97,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
   // Default view: only flows that are actually moving. The HUD toggle reveals
   // the full configured topology for troubleshooting.
   let showAll = false;
+  const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   function isEdgeVisible(edge: RenderEdge): boolean {
     // Stalled edges (connected but no data) stay visible as a warning.
@@ -148,6 +151,9 @@ export function bindTopologyView(container: HTMLElement): () => void {
   // ---------- data ----------
 
   function applySnapshot(next: Topology) {
+    const epoch = store.runtimeGeneration;
+    if (!store.acceptRuntime(next.runtime, 'topology')) return;
+    if (epoch !== store.runtimeGeneration) document.dispatchEvent(new Event('micast:render-playback'));
     snapshot = next;
     const now = performance.now();
     const seen = new Set<string>();
@@ -181,13 +187,18 @@ export function bindTopologyView(container: HTMLElement): () => void {
         Array.from({ length: 3 }, (_, i) => i / 3),
     }));
     updateHud();
+    const list = container.querySelector<HTMLElement>('[data-topology-nodes]');
+    if (list) {
+      const markup = next.nodes.map(node => `<button type="button" data-topology-node="${escapeHtml(node.id)}"><span>${escapeHtml(node.label)}</span><span>${escapeHtml(node.status === 'running' || node.status === 'playing' ? '运行中' : node.status === 'error' ? '出错' : node.status === 'paused' ? '暂停' : '空闲')}</span></button>`).join('');
+      if (list.innerHTML !== markup) list.innerHTML = markup;
+    }
   }
 
   function updateHud() {
     if (!snapshot) return;
     const status = snapshot.status || "idle";
     const label =
-      status === "running" ? "运行中" : status === "error" ? "出错" : status === "idle" ? "空闲" : status;
+      status === "running" ? "运行中" : status === "error" ? "出错" : status === "idle" ? "空闲" : status === "degraded" ? "部分功能不可用" : status === "starting" ? "启动中" : "状态未知";
     statusPill.textContent = label;
     statusPill.dataset.state = status;
     tsEl.textContent = new Date(snapshot.ts * 1000).toLocaleTimeString();
@@ -195,43 +206,14 @@ export function bindTopologyView(container: HTMLElement): () => void {
     emptyEl.hidden = snapshot.nodes.length > 0 && anyActive;
   }
 
-  const es = new EventSource(appUrl("api/topology/stream"));
-  es.onmessage = (event) => {
-    stopPolling();
-    try {
-      applySnapshot(JSON.parse(event.data) as Topology);
-    } catch {
-      // ignore malformed frame
-    }
+  const onTopology = (event: Event) => {
+    try { applySnapshot((event as CustomEvent<Topology>).detail); } catch { /* Invalid snapshot. */ }
   };
-  es.onerror = () => {
-    statusPill.textContent = "连接中断，重试中…";
-    statusPill.dataset.state = "error";
-    startPolling();
-  };
-
-  let pollTimer: number | null = null;
-  function startPolling() {
-    if (pollTimer !== null) return;
-    pollTimer = window.setInterval(async () => {
-      try {
-        applySnapshot(await api.getTopology());
-      } catch (e) {
-        // A 404 here means the backend predates the topology API entirely.
-        if (e instanceof Error && e.message.includes("HTTP 404")) {
-          statusPill.textContent = "后端版本过旧，请重启 MiCast 服务";
-          statusPill.dataset.state = "error";
-        }
-        // otherwise keep last frame
-      }
-    }, 3000);
-  }
-  function stopPolling() {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
+  window.addEventListener('micast:topology', onTopology);
+  let disposed = false;
+  void api.getTopology().then(next => { if (!disposed) applySnapshot(next); }).catch(() => {
+    if (!disposed) { statusPill.textContent = "连接中断，重试中…"; statusPill.dataset.state = "error"; }
+  });
 
   // ---------- layout ----------
 
@@ -285,7 +267,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     return [lanes[kind] ?? 0.5, y];
   }
 
-  function tickLayout() {
+  function tickLayout(now: number) {
     const w = canvas.clientWidth || 1;
     const h = canvas.clientHeight || 1;
     const compact = w < 640;
@@ -294,8 +276,9 @@ export function bindTopologyView(container: HTMLElement): () => void {
       // spring toward the dynamic anchor (weak, keeps lanes loosely ordered)
       const [ax, ay] = anchorFor(a, all);
       const anchorStrength = compact ? 0.006 : 0.002;
-      a.vx += (ax * w - a.x) * anchorStrength;
-      a.vy += (ay * h - a.y) * anchorStrength;
+      const drift = compact || motionQuery.matches ? 0 : 6;
+      a.vx += (ax * w + Math.sin(now / 2600 + hashCode(a.data.id)) * drift - a.x) * anchorStrength;
+      a.vy += (ay * h + Math.cos(now / 3100 + hashCode(a.data.id)) * drift - a.y) * anchorStrength;
       // pairwise repulsion
       for (const b of all) {
         if (a === b) continue;
@@ -341,22 +324,28 @@ export function bindTopologyView(container: HTMLElement): () => void {
   // Glow is a pre-rendered sprite, the grid backdrop is cached offscreen, and
   // the loop is capped at ~30fps.
 
+  let lastLayout = 0;
   let lastFrame = 0;
   let backdropCache: { w: number; h: number; dpr: number; canvas: HTMLCanvasElement } | null = null;
 
   function draw(now: number) {
     if (destroyed) return;
     raf = requestAnimationFrame(draw);
-    if (now - lastFrame < 33) return;
+    if (document.hidden || now - lastFrame < 33) return;
     lastFrame = now;
-    tickLayout();
+    // Simulation is fixed-rate; visual flow follows the display refresh rate.
+    if (!motionQuery.matches && now - lastLayout >= 33) {
+      tickLayout(now);
+      lastLayout = now;
+    }
 
-    const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
-    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-      canvas.width = w * dpr;
-      canvas.height = h * dpr;
+    // Bound raster cost independently of desktop resolution and display scaling.
+    const dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(2_000_000 / Math.max(1, w * h)));
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -457,7 +446,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     if (active && !dimmed) {
       // Particles flow in the data direction: "pull" edges stream toward the
       // speaker, which is also the edge's `to` node in our model.
-      const speed = control ? 0.00012 : 0.00045;
+      const speed = (control ? 0.00012 : 0.00045) * (motionQuery.matches ? .4 : 1);
       const size = control ? 4 : 8;
       for (const p of edge.particles) {
         const t = (p + now * speed) % 1;
@@ -553,7 +542,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     ctx.arc(node.x, node.y, radius * 0.28, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.font = "11px system-ui, sans-serif";
+    ctx.font = "13px system-ui, sans-serif";
     ctx.textAlign = "center";
     const backdropIdle = !active && (data.kind === "speaker" || data.kind === "cloud");
     ctx.fillStyle = dimmed
@@ -563,7 +552,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
         : "rgba(226, 232, 240, 0.92)";
     ctx.fillText(nodeLabel(data), node.x, node.y + radius + 15);
     if (data.kind === "speaker" && data.delay_ms) {
-      ctx.font = "9px ui-monospace, monospace";
+      ctx.font = "11px ui-monospace, monospace";
       ctx.fillStyle = "rgba(148, 163, 184, 0.8)";
       ctx.fillText(`+${data.delay_ms}ms 补偿`, node.x, node.y + radius + 28);
     }
@@ -612,7 +601,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
   function hitTest(x: number, y: number): { kind: "node" | "edge"; id: string } | null {
     for (const node of nodes.values()) {
       if (!isNodeVisible(node)) continue;
-      if (Math.hypot(node.x - x, node.y - y) < 14) return { kind: "node", id: node.data.id };
+      if (Math.hypot(node.x - x, node.y - y) < 24) return { kind: "node", id: node.data.id };
     }
     let best: { key: string; dist: number } | null = null;
     for (const edge of edges) {
@@ -676,7 +665,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     });
   }
 
-  canvas.addEventListener("mousemove", (event) => {
+  canvas.addEventListener("pointermove", (event) => {
     const rect = canvas.getBoundingClientRect();
     mouse = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     hover = hitTest(mouse.x, mouse.y);
@@ -685,8 +674,15 @@ export function bindTopologyView(container: HTMLElement): () => void {
   canvas.addEventListener("mouseleave", () => {
     hover = null;
   });
-  canvas.addEventListener("click", () => {
-    selected = hover;
+  canvas.addEventListener("click", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    selected = hitTest(event.clientX - rect.left, event.clientY - rect.top);
+    renderDetail();
+  });
+  container.querySelector('[data-topology-nodes]')?.addEventListener('click', event => {
+    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-topology-node]');
+    if (!button?.dataset.topologyNode) return;
+    selected = { kind: 'node', id: button.dataset.topologyNode };
     renderDetail();
   });
 
@@ -706,8 +702,9 @@ export function bindTopologyView(container: HTMLElement): () => void {
   return () => {
     destroyed = true;
     cancelAnimationFrame(raf);
-    es.close();
-    stopPolling();
+    disposed = true;
+    window.removeEventListener('micast:topology', onTopology);
+
   };
 }
 

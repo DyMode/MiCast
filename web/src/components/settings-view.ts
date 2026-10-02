@@ -1,8 +1,18 @@
+import { renderProtocolRow, bindProtocolRecovery } from './protocol-settings';
 import type { AccessStatus, AirPlayProtocol, AudioConfig, FullConfig, PortStatus } from "../api";
 import { api } from "../api";
 import { store, type Theme } from "../state";
 import { icon } from "../icons";
 import { renderThemeControl } from "./app-shell";
+import { SurfaceScope } from '../ui/lifecycle';
+
+let settingsScope: SurfaceScope | null = null;
+export function disposeSettingsView() {
+  settingsScope?.dispose(true);
+  settingsScope = null;
+  if (updatePollTimer) clearInterval(updatePollTimer);
+  updatePollTimer = null;
+}
 
 interface SettingsProps {
   audio: AudioConfig | null;
@@ -86,7 +96,7 @@ export function renderSettingsView(props: SettingsProps): string {
     </div>
 
     <div class="group-header">音频编码</div>
-    <p class="group-header-hint">编码、EQ、组合延迟与左右声道只作用于 AirPlay 实时输出；DLNA 直投媒体原样转发。</p>
+    <p class="group-header-hint">AirPlay、AirPlay 2 和 DLNA 共用音频处理；编码、EQ、组合延迟与左右声道按输出目标应用。</p>
     <div class="group">
       <div class="cell">
         <div class="cell-content">
@@ -138,12 +148,6 @@ export function renderSettingsView(props: SettingsProps): string {
       </button>
     </div>
 
-    ${config?.ports?.length ? `
-    <div class="group-header">服务端口</div>
-    <div class="group">
-      ${config.ports.map(renderPortRow).join("")}
-    </div>
-    ` : ""}
 
     <div class="group-header">管理访问</div>
     <div class="group">
@@ -177,62 +181,10 @@ export function renderSettingsView(props: SettingsProps): string {
       ` : ""}
     </div>
 
-    <div class="group-header">数据与版本</div>
-    <div class="group">
-      <div class="cell">
-        <div class="cell-icon gray">${icon("folder")}</div>
-        <div class="cell-content">
-          <span class="cell-title">${storageModeLabel(config?.storage?.mode)}</span>
-          <span class="cell-subtitle" title="${escapeHtml(config?.storage?.data_dir ?? "")}">${escapeHtml(config?.storage?.data_dir ?? "正在读取数据目录…")}</span>
-        </div>
-      </div>
-      <div class="cell">
-        <div class="cell-icon gray">${icon("file")}</div>
-        <div class="cell-content">
-          <span class="cell-title">日志目录</span>
-          <span class="cell-subtitle" title="${escapeHtml(config?.storage?.log_dir ?? "")}">${escapeHtml(config?.storage?.log_dir ?? "正在读取日志目录…")}</span>
-        </div>
-      </div>
-      <div class="cell">
-        <div class="cell-icon blue">${icon("download")}</div>
-        <div class="cell-content">
-          <span class="cell-title">软件更新</span>
-          <span class="cell-subtitle" data-update-status>当前版本读取中…</span>
-        </div>
-        <div class="update-actions">
-          <button class="button compact primary" type="button" data-update-download hidden>下载更新</button>
-          <button class="button compact primary" type="button" data-update-apply hidden>安装并重启</button>
-          <button class="button compact secondary" type="button" data-update-check>检查更新</button>
-        </div>
-      </div>
-      <div class="cell">
-        <div class="cell-icon red">${icon("trash")}</div>
-        <div class="cell-content">
-          <span class="cell-title danger-text">清空数据</span>
-          <span class="cell-subtitle">删除全部配置、米家登录与管理账号，回到初始引导页</span>
-        </div>
-        <button class="button compact secondary danger-text" type="button" data-reset-all>清空数据</button>
-      </div>
-    </div>
-
     <div class="group-header">播放方式</div>
     <div class="group">
-      <div class="cell">
-        <div class="cell-icon blue">${icon("airplay")}</div>
-        <div class="cell-content">
-          <span class="cell-title">AirPlay</span>
-          <span class="cell-subtitle">让音箱显示在 AirPlay 播放列表中</span>
-        </div>
-        <span class="plain-state success">已开启</span>
-      </div>
-      <div class="cell">
-        <div class="cell-icon blue">${icon("cast")}</div>
-        <div class="cell-content">
-          <span class="cell-title">DLNA</span>
-          <span class="cell-subtitle">让音箱显示在支持 DLNA 的应用中</span>
-        </div>
-        <input type="checkbox" class="switch" id="dlna-enabled" ${dlnaEnabled ? "checked" : ""} aria-label="开启 DLNA">
-      </div>
+      ${renderProtocolRow(config, 'airplay')}
+      ${renderProtocolRow(config, 'dlna')}
     </div>
     ${dlnaEnabled && dlnaStatus?.status === "error" ? `<div class="inline-notice error"><strong>DLNA 暂不可用</strong><span>请检查 MiCast 的网络访问权限后重试。</span></div>` : ""}
     ${dlnaEnabled && dlnaStatus?.status !== "error" ? `<div class="inline-notice"><strong>DLNA 生效方式</strong><span>开关立即生效；投放音量控制会在下次投放媒体时生效。若正在播放，请先在播放器中停止，再重新选择音箱并投放。</span></div>` : ""}
@@ -299,13 +251,7 @@ export function renderSettingsView(props: SettingsProps): string {
         </div>
         <input type="checkbox" class="switch" id="large-delay-enabled" ${config?.large_delay_enabled ? "checked" : ""} aria-label="开启大延迟范围">
       </div>
-      <div class="cell">
-        <div class="cell-content">
-          <span class="cell-title">AirPlay 2 <span class="feature-badge">实验性</span></span>
-          <span class="cell-subtitle">${airplay2Available ? (config?.airplay2_mode === "single" ? "启用一个独立的 AirPlay 2 播放入口" : "为音箱创建独立的 AirPlay 2 播放入口") : "当前安装方式不支持此功能"}</span>
-        </div>
-        <input type="checkbox" class="switch" id="airplay2-enabled" ${airplay2Enabled ? "checked" : ""} ${airplay2Available ? "" : "disabled"} aria-label="开启 AirPlay 2">
-      </div>
+      ${renderProtocolRow(config, 'airplay2')}
       ${airplay2Available && airplay2Enabled ? `<button class="cell settings-link" type="button" data-open-airplay2>
         <div class="cell-icon blue">${icon("airplay")}</div>
         <div class="cell-content">
@@ -325,6 +271,62 @@ export function renderSettingsView(props: SettingsProps): string {
     ${config && !config.network_discovery_enabled
       ? `<div class="inline-notice"><strong>网络发现已关闭</strong><span>不会扫描局域网播放设备，也无法把音频投放到外部设备。</span></div>`
       : ""}
+    ${config?.ports?.length ? `
+    <div class="group-header">高级设置 · 服务端口</div>
+    <div class="group">
+      ${config.ports.map(renderPortRow).join("")}
+    </div>
+    ` : ""}
+
+    <div class="group-header">数据与版本</div>
+    <div class="group">
+      ${config?.storage?.shared_dir ? `<div class="cell">
+        <div class="cell-icon gray">${icon("folder")}</div>
+        <div class="cell-content">
+          <span class="cell-title">应用文件 · micast</span>
+          <span class="cell-subtitle">日志、诊断导出与脱敏配置副本</span>
+          <span class="cell-subtitle">${escapeHtml(config.storage.shared_dir)}</span>
+        </div>
+      </div>` : ""}
+
+      <div class="cell">
+        <div class="cell-icon gray">${icon("folder")}</div>
+        <div class="cell-content">
+          <span class="cell-title">${storageModeLabel(config?.storage?.mode)}</span>
+          <span class="cell-subtitle" title="${escapeHtml(config?.storage?.data_dir ?? "")}">${escapeHtml(config?.storage?.data_dir ?? "正在读取数据目录…")}</span>
+        </div>
+      </div>
+      <div class="cell">
+        <div class="cell-icon gray">${icon("file")}</div>
+        <div class="cell-content">
+          <span class="cell-title">日志目录</span>
+          <span class="cell-subtitle" title="${escapeHtml(config?.storage?.log_dir ?? "")}">${escapeHtml(config?.storage?.log_dir ?? "正在读取日志目录…")}</span>
+        </div>
+      </div>
+      <div class="cell">
+        <div class="cell-icon blue">${icon("download")}</div>
+        <div class="cell-content">
+          <span class="cell-title">软件更新</span>
+          <span class="cell-subtitle" data-update-status>当前版本读取中…</span>
+          <a class="cell-subtitle update-releases" href="https://github.com/DyMode/MiCast/releases" target="_blank" rel="noopener noreferrer">GitHub 发布页 ↗</a>
+        </div>
+        <div class="update-actions">
+          <button class="button compact primary" type="button" data-update-download hidden>下载更新</button>
+          <button class="button compact primary" type="button" data-update-apply hidden>安装并重启</button>
+          <button class="button compact secondary" type="button" data-update-check>检查更新</button>
+        </div>
+      </div>
+      <div class="cell">
+        <div class="cell-icon red">${icon("trash")}</div>
+        <div class="cell-content">
+          <span class="cell-title danger-text">清空数据</span>
+          <span class="cell-subtitle">删除全部配置、米家登录与管理账号，回到初始引导页</span>
+        </div>
+        <button class="button compact secondary danger-text" type="button" data-reset-all>清空数据</button>
+      </div>
+    </div>
+
+
   `;
 }
 
@@ -332,7 +334,7 @@ const portModeLabels: Record<PortStatus["mode"], string> = {
   auto: "自动",
   custom: "自定义",
   env: "环境固定",
-  fixed: "协议固定",
+  fixed: "固定端口",
 };
 
 function portActualText(p: PortStatus): string {
@@ -358,7 +360,7 @@ function portActualTitle(p: PortStatus): string {
 function renderPortRow(p: PortStatus): string {
   const actual = portActualText(p);
   const stateClass = p.status === "error" ? "error" : p.status === "listening" ? "success" : "";
-  const stateText = p.status === "error" ? "异常" : p.status === "listening" ? "监听中" : p.status === "hosted" ? "已托管" : "未启用";
+  const stateText = p.status === "error" ? "异常" : p.status === "listening" ? "监听中" : p.status === "hosted" ? "已托管" : "未监听";
   // Only render the slots this row actually needs: non-editable rows are a
   // plain right-aligned status (like the toggle rows above); editable rows
   // add a wide-enough input; 恢复 appears only for custom ports.
@@ -420,7 +422,7 @@ function renderSegments(
           (item) => `
             <button class="segment ${item.active ? "active" : ""}"
                     data-${group}="${item.value}"
-                    ${disabled ? "disabled" : ""}>${item.label}</button>
+                    aria-pressed="${item.active}" ${disabled ? "disabled" : ""}>${item.label}</button>
           `
         )
         .join("")}
@@ -435,6 +437,10 @@ export function bindSettingsView(
   onOpenAirPlay2: () => void,
   onOpenAccount: () => void
 ) {
+  disposeSettingsView();
+  const scope = settingsScope = new SurfaceScope();
+  bindFeatureSwitch(container, "#airplay-enabled", "airplay_enabled", api.setAirplayEnabled, onStateChange);
+  bindProtocolRecovery(container, scope, onStateChange);
   container.querySelector("[data-open-airplay2]")?.addEventListener("click", onOpenAirPlay2);
   container.querySelector("[data-open-account]")?.addEventListener("click", onOpenAccount);
   const accessForm = container.querySelector<HTMLFormElement>("[data-access-settings]");
@@ -614,10 +620,8 @@ export function bindSettingsView(
     }
   });
   if (defaultVolumeInput) {
-    let debounce: ReturnType<typeof setTimeout> | null = null;
     defaultVolumeInput.addEventListener("input", () => {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(async () => {
+      scope.debounce('volume', async () => {
         const volume = Math.max(0, Math.min(100, parseInt(defaultVolumeInput.value || "0", 10) || 0));
         try {
           await api.setDefaultVolume(volume, defaultVolumeEnabled?.checked ?? false);
@@ -633,10 +637,8 @@ export function bindSettingsView(
 
   const staleTimeoutInput = container.querySelector<HTMLInputElement>("#stale-session-timeout");
   if (staleTimeoutInput) {
-    let debounce: ReturnType<typeof setTimeout> | null = null;
     staleTimeoutInput.addEventListener("input", () => {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(async () => {
+      scope.debounce('timeout', async () => {
         const seconds = Math.max(0, Math.min(3600, parseInt(staleTimeoutInput.value || "0", 10) || 0));
         try {
           await api.setStaleSessionTimeout(seconds);
@@ -652,10 +654,8 @@ export function bindSettingsView(
 
   const webhookInput = container.querySelector<HTMLInputElement>("#notify-webhook");
   if (webhookInput) {
-    let debounce: ReturnType<typeof setTimeout> | null = null;
     webhookInput.addEventListener("input", () => {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(async () => {
+      scope.debounce('webhook', async () => {
         const url = webhookInput.value.trim();
         try {
           await api.setNotifyWebhook(url);
@@ -738,10 +738,8 @@ export function bindSettingsView(
 
   const appNameInput = container.querySelector("#app-name-input") as HTMLInputElement | null;
   if (appNameInput) {
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     appNameInput.addEventListener("input", () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(async () => {
+      scope.debounce('name', async () => {
         const name = appNameInput.value.trim();
         if (!name) return;
         try {
@@ -756,7 +754,7 @@ export function bindSettingsView(
     });
   }
 
-  bindUpdateSection(container);
+  bindUpdateSection(container, scope);
   bindResetAll(container);
 }
 
@@ -792,7 +790,7 @@ function bindResetAll(container: HTMLElement) {
 
 let updatePollTimer: ReturnType<typeof setInterval> | null = null;
 
-function bindUpdateSection(container: HTMLElement) {
+function bindUpdateSection(container: HTMLElement, scope: SurfaceScope) {
   // A settings section can be rebound after a shell render. Stop any polling
   // owned by the previous DOM before attaching handlers to the new section.
   if (updatePollTimer) {
@@ -811,6 +809,7 @@ function bindUpdateSection(container: HTMLElement) {
 
   const showDownloadResult = async () => {
     const dl = await api.getUpdateDownloadStatus();
+    if (!scope.active) return;
     if (dl.state === "downloading") {
       statusEl.textContent = dl.total > 0
         ? `正在下载更新… ${Math.min(100, Math.round((dl.progress / dl.total) * 100))}%（${formatBytes(dl.progress)} / ${formatBytes(dl.total)}）`
@@ -833,8 +832,9 @@ function bindUpdateSection(container: HTMLElement) {
     checkBtn.textContent = "检查中…";
     try {
       const info = await api.checkUpdate(force);
+      if (!scope.active) return;
       if (info.update_available) {
-        // exe 版提供应用内下载；飞牛/Docker 版只提示，不显示任何跳转或下载按钮。
+        // exe 版提供应用内下载；其他部署通过常驻的 GitHub 发布页链接更新。
         statusEl.textContent = info.can_download
           ? `发现新版本 v${info.latest_version}（当前 v${info.current_version}）`
           : `发现新版本 v${info.latest_version}（当前 v${info.current_version}），请前往 GitHub 发布页更新`;
@@ -861,9 +861,13 @@ function bindUpdateSection(container: HTMLElement) {
     downloadBtn.textContent = "正在下载…";
     try {
       await api.startUpdateDownload();
+      if (!scope.active) return;
       stopPolling();
+      let busy = false;
       updatePollTimer = setInterval(() => {
-        showDownloadResult().catch(() => stopPolling());
+        if (busy || document.hidden) return;
+        busy = true;
+        showDownloadResult().catch(() => stopPolling()).finally(() => { busy = false; });
       }, 800);
     } catch (e) {
       downloadBtn.disabled = false;
@@ -904,7 +908,7 @@ function escapeHtml(text: string): string {
 function bindFeatureSwitch(
   container: HTMLElement,
   selector: string,
-  key: "dlna_enabled" | "sync_groups_enabled" | "large_delay_enabled" | "airplay2_enabled" | "touchscreen_lyrics" | "network_discovery_enabled",
+  key: "airplay_enabled" | "dlna_enabled" | "sync_groups_enabled" | "large_delay_enabled" | "airplay2_enabled" | "touchscreen_lyrics" | "network_discovery_enabled",
   save: (enabled: boolean) => Promise<unknown>,
   rerender: () => void
 ) {
@@ -920,7 +924,7 @@ function bindFeatureSwitch(
       const [fullConfig, status] = await Promise.all([api.getConfig(), api.getStatus()]);
       store.set({ fullConfig, status, receivers: status.receivers, saving: false });
       rerender();
-      const label = key === "dlna_enabled" ? "DLNA" : key === "sync_groups_enabled" ? "音箱组合" : key === "large_delay_enabled" ? "大延迟" : key === "touchscreen_lyrics" ? "触屏歌词与封面" : key === "network_discovery_enabled" ? "网络发现" : "AirPlay 2";
+      const label = key === "airplay_enabled" ? "AirPlay" : key === "dlna_enabled" ? "DLNA" : key === "sync_groups_enabled" ? "音箱组合" : key === "large_delay_enabled" ? "大延迟" : key === "touchscreen_lyrics" ? "触屏歌词与封面" : key === "network_discovery_enabled" ? "网络发现" : "AirPlay 2";
       store.showToast(`${label}已${enabled ? "开启" : "关闭"}`);
     } catch (error) {
       store.set({ fullConfig: previous, saving: false });

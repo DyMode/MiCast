@@ -1,0 +1,278 @@
+/* MiCast — quiet, responsive system utility */
+
+:root {
+  color-scheme: light dark;
+
+  --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, "PingFang SC", sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, "PingFang SC", sans-serif;
+
+  /* Spring curves (iOS) */
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+
+  /* Spacing scale */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.25rem;
+  --space-xl: 1.5rem;
+  --space-2xl: 2rem;
+  --space-3xl: 2.5rem;
+
+  /* Radius */
+  --radius-xs: 0.4375rem;
+  --radius-sm: 0.625rem;
+  --radius-md: 0.875rem;
+  --radius-lg: 1.25rem;
+  --radius-xl: 1.5rem;
+  --radius-full: 9999px;
+
+  /* Light palette — Liquid Glass world: a warm porcelain base and sunlight
+     blooms (amber, coral, terracotta, champagne); chrome and cards are
+     translucent tints meant to float over it. */
+  --bg: rgb(243, 239, 233);
+  --bg-secondary: rgba(120, 120, 128, 0.12);
+  --grouped-bg: rgba(255, 255, 255, 0.4);
+  --elevated: rgb(252, 253, 255);
+  --surface: rgba(255, 255, 255, 0.58);
+  --surface-solid: rgb(255, 255, 255);
+  --surface-hover: rgba(120, 120, 128, 0.08);
+  --surface-active: rgba(120, 120, 128, 0.16);
+  --player-surface: rgba(255, 255, 255, 0.6);
+  --overlay: rgba(20, 28, 46, 0.42);
+
+  --text: rgb(0, 0, 0);
+  --text-secondary: rgba(60, 60, 67, 0.75);
+  --text-tertiary: rgba(60, 60, 67, 0.52);
+  --separator: rgba(60, 60, 67, 0.1);
+  --separator-strong: rgba(60, 60, 67, 0.22);
+  /* Filled but borderless surfaces (segmented tracks, chips, quiet buttons). */
+  --fill-secondary: rgba(120, 120, 128, 0.12);
+  --fill-tertiary: rgba(120, 120, 128, 0.08);
+  --secondary-label: rgba(60, 60, 67, 0.75);
+
+  --accent: rgb(0, 122, 255);
+  --accent-foreground: #0062cc;
+  --accent-hover: rgb(0, 105, 220);
+  --accent-text: rgb(255, 255, 255);
+  --accent-soft: rgba(0, 122, 255, 0.12);
+  --accent-soft-hover: rgba(0, 122, 255, 0.18);
+
+  --success: rgb(34, 174, 69);
+  --success-soft: rgba(34, 174, 69, 0.12);
+  --warning: rgb(255, 149, 0);
+  --warning-soft: rgba(255, 149, 0, 0.12);
+  --danger: rgb(255, 59, 48);
+  --danger-soft: rgba(255, 59, 48, 0.12);
+  --control-knob: rgb(255, 255, 255);
+
+  --shadow-sm: 0 1px 2px rgba(30, 40, 70, 0.05), 0 1px 3px rgba(30, 40, 70, 0.03);
+  --shadow-md: 0 6px 18px rgba(30, 40, 70, 0.09), 0 2px 5px rgba(30, 40, 70, 0.05);
+  --shadow-lg: 0 18px 44px rgba(30, 40, 70, 0.14), 0 4px 10px rgba(30, 40, 70, 0.06);
+
+  /* One card recipe for every grouped surface (settings groups, device cards,
+     receiver cards, diagnostics). Liquid Glass edition: translucent tint +
+     hairline rim layered on the border box, blur on the element, soft cool
+     shadow carrying the specular top edge. */
+  --card-radius: 1.375rem;
+  --card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0.34));
+  --card-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.18) 32%, rgba(255, 255, 255, 0.04) 58%, rgba(255, 255, 255, 0.45));
+  --card-border: 1px solid transparent;
+  --card-shadow: 0 10px 30px rgba(40, 55, 95, 0.1), 0 2px 8px rgba(40, 55, 95, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  --card-shadow-raised: 0 18px 44px rgba(40, 55, 95, 0.14), 0 4px 12px rgba(40, 55, 95, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --card-blur: blur(20px) saturate(180%);
+
+  /* Chrome glass (header, sidebar, tab bar, player, sheets, toasts): a deeper
+     tint and stronger blur than cards — navigation is the floating layer. */
+  --chrome-tint: linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.36));
+  --chrome-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.22) 30%, rgba(255, 255, 255, 0.04) 55%, rgba(74, 88, 122, 0.14));
+  --chrome-shadow: 0 12px 36px rgba(30, 42, 75, 0.14), 0 2px 8px rgba(30, 42, 75, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.65), inset 0 -1px 0 rgba(255, 255, 255, 0.1);
+  --chrome-blur: blur(26px) saturate(185%);
+  /* Refraction stack lives on the ::before lens layer: SVG displacement for
+     the lens wobble (Chromium), plain blur+saturate as the Safari fallback. */
+  --glass-refract: url(#micast-lens) blur(22px) saturate(185%);
+  /* Gloss painted over the surface's own content — the top specular sweep and
+     a pointer-tracked highlight (--spec-x/--spec-y), so icons and labels read
+     as embedded in the glass rather than floating on it. */
+  --chrome-gloss: linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 40%), radial-gradient(11rem 5.5rem at var(--spec-x, 50%) -35%, rgba(255, 255, 255, 0.38), transparent 65%);
+  /* Active tab lens: a white glass disc that refracts the page content
+     scrolling beneath the floating bar (the 酷安/iOS 26 reference look). */
+  --tab-lens: rgba(255, 255, 255, 0.68);
+  --tab-lens-rim: rgba(255, 255, 255, 0.85);
+
+  /* Row rhythm: one dense step for desktop, one finger-sized step for touch. */
+  --row-padding-block: 0.6875rem;
+  --row-padding-inline: 1rem;
+  --control-height: 2.25rem;
+
+  /* Liquid-glass material shared by the floating player surfaces — the expanded
+     panel and the collapsed pill are the same surface at two sizes, so both use
+     one background/blur/border/shadow recipe instead of two ad-hoc ones. */
+  --glass-bg: var(--chrome-tint);
+  --glass-border: color-mix(in srgb, var(--text) 16%, transparent);
+  --glass-blur: var(--chrome-blur);
+  --glass-shadow: var(--chrome-shadow);
+
+  /* Ambient wallpaper: slow aurora blooms the glass layers refract. */
+  --wallpaper:
+    radial-gradient(42rem 32rem at 10% 6%, rgba(255, 178, 102, 0.32), transparent 62%),
+    radial-gradient(36rem 30rem at 90% 10%, rgba(255, 140, 118, 0.26), transparent 62%),
+    radial-gradient(44rem 36rem at 82% 90%, rgba(226, 166, 126, 0.24), transparent 62%),
+    radial-gradient(32rem 28rem at 14% 88%, rgba(255, 214, 148, 0.22), transparent 62%);
+
+  /* Floating chrome clearance: the header and tab bar are capsules with a gap
+     all around, so layout reserves height + both float gaps. */
+  --chrome-float: 0.75rem;
+  /* Clearances are the FULL vertical space the floating chrome occupies —
+   * safe-area included, here and only here. Call sites must not add their
+   * own env() or the spacing double-counts.
+   */
+  --header-clearance: calc(var(--header-height) + 2 * var(--chrome-float) + env(safe-area-inset-top));
+  --tab-bar-clearance: calc(var(--tab-bar-height) + 2 * var(--chrome-float) + env(safe-area-inset-bottom));
+
+  /* Stacking order, one vocabulary. No bare z-index numbers on chrome. */
+  --z-modal: 60;
+  --z-bar: 90;
+  --z-chrome: 100;
+  --z-player: 111;
+  --z-overlay: 200;
+  --z-sheet: 201;
+  --z-toast: 300;
+
+  --header-height: 3.75rem;
+  --tab-bar-height: 4rem;
+  --sidebar-width: 13.5rem;
+}
+
+/* Manual theme wins over system. Scoped to :root on purpose: an unscoped
+   [data-theme="dark"] also matched the 外观 segmented buttons, which carry
+   data-theme themselves — the unselected 深色 button inherited the dark
+   palette's white text while sitting on a light track, and vanished. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: rgb(8, 10, 16);
+  --bg-secondary: rgba(120, 120, 128, 0.24);
+  --grouped-bg: rgba(20, 23, 32, 0.5);
+  --elevated: rgb(30, 33, 42);
+  --surface: rgba(24, 27, 36, 0.62);
+  --surface-solid: rgb(20, 23, 31);
+  --surface-hover: rgba(255, 255, 255, 0.1);
+  --surface-active: rgba(255, 255, 255, 0.16);
+  --player-surface: rgba(28, 31, 42, 0.6);
+  --overlay: rgba(2, 4, 10, 0.62);
+
+  --text: rgb(255, 255, 255);
+  --text-secondary: rgba(245, 245, 247, 0.76);
+  --text-tertiary: rgba(245, 245, 247, 0.58);
+  --separator: rgba(255, 255, 255, 0.12);
+  --separator-strong: rgba(255, 255, 255, 0.28);
+  --fill-secondary: rgba(120, 120, 128, 0.32);
+  --fill-tertiary: rgba(120, 120, 128, 0.2);
+  --secondary-label: rgba(245, 245, 247, 0.6);
+
+  --accent: rgb(10, 132, 255);
+  --accent-foreground: #d6ebff;
+  --accent-hover: rgb(25, 145, 255);
+  --accent-text: rgb(255, 255, 255);
+  --accent-soft: rgba(10, 132, 255, 0.16);
+  --accent-soft-hover: rgba(10, 132, 255, 0.24);
+
+  --success: rgb(48, 209, 88);
+  --warning: rgb(255, 159, 10);
+  --danger: rgb(255, 69, 58);
+  --control-knob: rgb(255, 255, 255);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24), 0 1px 3px rgba(0, 0, 0, 0.12);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3), 0 2px 5px rgba(0, 0, 0, 0.16);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.42), 0 4px 10px rgba(0, 0, 0, 0.2);
+
+  --card-bg: linear-gradient(180deg, rgba(46, 51, 66, 0.62), rgba(28, 31, 42, 0.48));
+  --card-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08) 32%, rgba(255, 255, 255, 0.02) 58%, rgba(255, 255, 255, 0.18));
+  --card-shadow: 0 12px 34px rgba(0, 0, 0, 0.36), 0 2px 8px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --card-shadow-raised: 0 20px 50px rgba(0, 0, 0, 0.44), 0 4px 12px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  --card-blur: blur(20px) saturate(160%);
+
+  --chrome-tint: linear-gradient(180deg, rgba(40, 45, 60, 0.66), rgba(24, 27, 38, 0.52));
+  --chrome-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.1) 30%, rgba(255, 255, 255, 0.02) 55%, rgba(255, 255, 255, 0.22));
+  --chrome-shadow: 0 14px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+  --chrome-blur: blur(28px) saturate(170%);
+  --glass-refract: url(#micast-lens) blur(24px) saturate(170%);
+  --chrome-gloss: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0) 40%), radial-gradient(11rem 5.5rem at var(--spec-x, 50%) -35%, rgba(255, 255, 255, 0.22), transparent 65%);
+  --tab-lens: rgba(255, 255, 255, 0.24);
+  --tab-lens-rim: rgba(255, 255, 255, 0.35);
+
+  --wallpaper:
+    radial-gradient(42rem 32rem at 12% 8%, rgba(148, 178, 228, 0.22), transparent 62%),
+    radial-gradient(36rem 30rem at 88% 12%, rgba(196, 206, 224, 0.14), transparent 62%),
+    radial-gradient(44rem 36rem at 80% 92%, rgba(96, 136, 168, 0.18), transparent 62%),
+    radial-gradient(32rem 28rem at 16% 86%, rgba(255, 192, 142, 0.08), transparent 62%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: rgb(8, 10, 16);
+    --bg-secondary: rgba(120, 120, 128, 0.24);
+    --grouped-bg: rgba(20, 23, 32, 0.5);
+    --elevated: rgb(30, 33, 42);
+    --surface: rgba(24, 27, 36, 0.62);
+    --surface-solid: rgb(20, 23, 31);
+    --surface-hover: rgba(255, 255, 255, 0.1);
+    --surface-active: rgba(255, 255, 255, 0.16);
+    --player-surface: rgba(28, 31, 42, 0.6);
+    --overlay: rgba(2, 4, 10, 0.62);
+
+    --text: rgb(255, 255, 255);
+    --text-secondary: rgba(245, 245, 247, 0.76);
+    --text-tertiary: rgba(245, 245, 247, 0.58);
+    --separator: rgba(255, 255, 255, 0.12);
+    --separator-strong: rgba(255, 255, 255, 0.28);
+    --fill-secondary: rgba(120, 120, 128, 0.32);
+    --fill-tertiary: rgba(120, 120, 128, 0.2);
+    --secondary-label: rgba(245, 245, 247, 0.6);
+
+    --accent: rgb(10, 132, 255);
+  --accent-foreground: #d6ebff;
+    --accent-hover: rgb(25, 145, 255);
+    --accent-text: rgb(255, 255, 255);
+    --accent-soft: rgba(10, 132, 255, 0.16);
+    --accent-soft-hover: rgba(10, 132, 255, 0.24);
+
+    --success: rgb(48, 209, 88);
+    --warning: rgb(255, 159, 10);
+    --danger: rgb(255, 69, 58);
+    --control-knob: rgb(255, 255, 255);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24), 0 1px 3px rgba(0, 0, 0, 0.12);
+    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3), 0 2px 5px rgba(0, 0, 0, 0.16);
+    --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.42), 0 4px 10px rgba(0, 0, 0, 0.2);
+
+    --card-bg: linear-gradient(180deg, rgba(46, 51, 66, 0.62), rgba(28, 31, 42, 0.48));
+    --card-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08) 32%, rgba(255, 255, 255, 0.02) 58%, rgba(255, 255, 255, 0.18));
+    --card-shadow: 0 12px 34px rgba(0, 0, 0, 0.36), 0 2px 8px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    --card-shadow-raised: 0 20px 50px rgba(0, 0, 0, 0.44), 0 4px 12px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    --card-blur: blur(20px) saturate(160%);
+
+    --chrome-tint: linear-gradient(180deg, rgba(40, 45, 60, 0.66), rgba(24, 27, 38, 0.52));
+    --chrome-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.1) 30%, rgba(255, 255, 255, 0.02) 55%, rgba(255, 255, 255, 0.22));
+    --chrome-shadow: 0 14px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+    --chrome-blur: blur(28px) saturate(170%);
+    --glass-refract: url(#micast-lens) blur(24px) saturate(170%);
+  --chrome-gloss: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0) 40%), radial-gradient(11rem 5.5rem at var(--spec-x, 50%) -35%, rgba(255, 255, 255, 0.22), transparent 65%);
+  --tab-lens: rgba(255, 255, 255, 0.24);
+  --tab-lens-rim: rgba(255, 255, 255, 0.35);
+
+    --wallpaper:
+      radial-gradient(42rem 32rem at 12% 8%, rgba(148, 178, 228, 0.22), transparent 62%),
+      radial-gradient(36rem 30rem at 88% 12%, rgba(196, 206, 224, 0.14), transparent 62%),
+      radial-gradient(44rem 36rem at 80% 92%, rgba(96, 136, 168, 0.18), transparent 62%),
+      radial-gradient(32rem 28rem at 16% 86%, rgba(255, 192, 142, 0.08), transparent 62%);
+  }
+}

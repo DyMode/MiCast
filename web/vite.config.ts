@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  server: { port: 42380, strictPort: false },
+  preview: { port: 42390, strictPort: false },
   base: "/app/micast/",
   build: {
     outDir: "dist",

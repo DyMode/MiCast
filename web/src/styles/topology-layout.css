@@ -1,0 +1,334 @@
+/* ---- Topology link map (dark monitor view, theme-independent) ---- */
+.topology-stage {
+  position: relative;
+  flex: 1 0 24rem;
+  min-height: 24rem;
+  border-radius: var(--radius-lg, 1rem);
+  overflow: hidden;
+  background: radial-gradient(ellipse at 30% 20%, #0a1622 0%, #060d14 60%, #04080d 100%);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+}
+
+.receiver-protocols {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3xs);
+}
+
+.protocol-badge.protocol-dlna {
+  background: color-mix(in srgb, #8b5cf6 15%, transparent);
+  color: light-dark(#6d28d9, #c4b5fd);
+}
+
+.protocol-badge.protocol-airplay2 {
+  background: color-mix(in srgb, #06b6d4 15%, transparent);
+  color: light-dark(#0e7490, #67e8f9);
+}
+.topology-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.topology-hud {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 0.75rem);
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.9);
+  pointer-events: none;
+}
+.topology-hud-left { top: 0.75rem; left: 0.75rem; }
+.topology-hud-right { bottom: 0.75rem; right: 0.75rem; }
+.topology-note { opacity: 0.7; }
+.topology-pill {
+  padding: 0.2rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(100, 116, 139, 0.4);
+  color: #94a3b8;
+}
+.topology-pill[data-state="running"] { border-color: rgba(52, 211, 153, 0.5); color: #34d399; }
+.topology-pill[data-state="error"] { border-color: rgba(248, 113, 113, 0.5); color: #f87171; }
+.topology-legend {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  display: flex;
+  gap: var(--space-sm, 0.75rem);
+  font-size: 0.7rem;
+  color: rgba(148, 163, 184, 0.85);
+  background: rgba(15, 23, 42, 0.6);
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.12);
+}
+.topology-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+.topology-legend i { width: 0.5rem; height: 0.5rem; border-radius: 50%; display: inline-block; }
+.topology-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+.topology-empty-title { color: #e2e8f0; font-size: 1.05rem; font-weight: 600; }
+.topology-empty-hint { color: rgba(148, 163, 184, 0.8); font-size: 0.8125rem; }
+.topology-detail {
+  position: absolute;
+  top: 3rem;
+  right: 0.75rem;
+  width: 16rem;
+  max-width: calc(100% - 1.5rem);
+  background: rgba(10, 18, 28, 0.92);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  color: #e2e8f0;
+  backdrop-filter: blur(8px);
+  max-height: calc(100% - 5rem);
+  overflow-y: auto;
+}
+.topology-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+.topology-detail-head .icon-button { color: #94a3b8; }
+.topology-detail dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.75rem;
+}
+.topology-detail dt { color: rgba(148, 163, 184, 0.85); }
+.topology-detail dd { margin: 0; text-align: right; font-family: ui-monospace, monospace; word-break: break-all; }
+.topology-empty[hidden], .topology-detail[hidden] { display: none; }
+.topology-toggle {
+  background: transparent;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 999px;
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 0.7rem;
+  padding: 0.1rem 0.55rem;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.topology-toggle:hover { color: #e2e8f0; border-color: rgba(56, 189, 248, 0.5); }
+.topology-toggle[aria-pressed="true"] { color: #38bdf8; border-color: #38bdf8; }
+
+/* Mobile information density and control flow. Keep the same hierarchy on desktop,
+   but stop forcing desktop rows into narrow columns. */
+.device-expand-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
+  background: var(--fill-secondary);
+  color: var(--text-secondary);
+  transition: transform 180ms var(--ease-spring);
+}
+.device-expand-icon svg { width: 0.875rem; height: 0.875rem; }
+.device-expand-icon.expanded { transform: rotate(90deg); }
+
+@media (max-width: 639px) {
+  /* Slim header: 60px for a logo + theme toggle wastes a full row on phones. */
+  :root { --header-height: 2.75rem; }
+  .app-logo { width: 1.375rem; height: 1.375rem; }
+  .app-title { font-size: 1rem; }
+
+  .page-container { padding-inline: 1rem; }
+  .group-header { margin-top: var(--space-lg); }
+  .group > .cell { padding: 0.875rem 1rem; }
+  .cell-title { line-height: 1.3; }
+  .cell-subtitle { margin-top: 0.125rem; line-height: 1.35; }
+
+  /* Access settings */
+  .access-settings-form { padding: 1rem; gap: 0.75rem; }
+  .access-settings-fields { gap: 0.75rem; padding: 0 0.75rem; }
+  .access-settings-form .choice-row { padding: 0.75rem; }
+  .access-settings-form .group-form-actions { gap: 0.5rem; }
+
+  /* Settings rows: text gets a full line; controls remain comfortably tappable. */
+  .settings-inline-control { margin-left: auto; }
+  .settings-input-cell > .input,
+  .settings-input-cell > .settings-save-row { width: 100%; max-width: none; }
+  #sender-volume-mode { width: 9rem; max-width: 9rem !important; }
+
+  /* Port rows carry status + number input + buttons — too wide to share a
+     line with the title; let the text claim the full row, controls wrap
+     underneath with the same column structure. */
+  .group > .cell.port-row {
+    flex-wrap: wrap;
+    row-gap: var(--space-sm);
+  }
+  .group > .cell.port-row .cell-content {
+    flex: 1 1 100%;
+  }
+  .group > .cell.port-row .port-control {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .group > .cell.port-row .port-control .plain-state { text-align: left; flex: 1; }
+
+  /* Device-card EQ row: keep labels on one line, wrap controls as a unit. */
+  .eq-title-row { flex-wrap: wrap; }
+  .eq-entry { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+  .eq-entry .cell-value { white-space: nowrap; }
+
+  /* Receiver rows no longer repeat long protocol copy beside a switch. */
+  .receiver-entry-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+  .receiver-entry-row .cell-content { grid-column: 1; grid-row: 1; }
+  .receiver-entry-row .receiver-visibility > span { display: none; }
+  .receiver-entry-row .receiver-visibility { grid-column: 2; grid-row: 1; }
+  .receiver-form .cell-content,
+  .receiver-form .input,
+  .receiver-form .button { width: 100%; }
+
+  /* Device cards */
+  .device-card { padding: 1rem; }
+  .device-card-header { gap: 0.75rem; }
+  .device-actions { grid-template-columns: minmax(0, 1fr) 2.5rem 1.75rem; gap: 0.5rem; }
+  .device-volume-inline .volume-icon { display: none; }
+  .device-detail-row .cell-value { max-width: 60%; font-size: 0.75rem; }
+  .device-detail-row .alias-input { width: min(100%, 12rem); }
+  .device-detail-row:first-child {
+    grid-template-columns: minmax(0, 1fr) minmax(8rem, 10rem);
+  }
+  .device-detail-row .alias-input {
+    width: 100%;
+    min-height: 2.5rem;
+    padding: var(--space-xs) var(--space-sm);
+    font-size: 0.9375rem;
+  }
+  .eq-title-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .eq-entry { display: grid; grid-template-columns: auto auto; gap: var(--space-xs); }
+  .eq-entry .cell-value { grid-column: 1 / -1; text-align: right; }
+  .eq-entry .button { white-space: nowrap; padding-inline: var(--space-sm); }
+
+  .group > .cell:has([data-master-control]) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) 2.75rem;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+  }
+  .group > .cell:has([data-master-control]) .cell-content { grid-column: 2 / -1; }
+  .group > .cell:has([data-master-control]) [data-master-control] {
+    grid-column: 1 / 3;
+    grid-row: 2;
+    width: 100%;
+    min-width: 0;
+  }
+  .group > .cell:has([data-master-control]) [data-mute] {
+    grid-column: 3;
+    grid-row: 2;
+  }
+  .group > .cell:has([data-volume-step]) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  /* Group header actions own a full row under the identity, so nothing wraps
+     unpredictably and the destructive action stays away from 辅助校准. */
+  .sync-group-header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .sync-group-header .cell-content { grid-column: 2; }
+  .sync-group-header > .segmented-control { grid-column: 1 / -1; width: 100%; }
+  .sync-group-header > .group-header-actions {
+    grid-column: 1 / -1;
+    justify-content: space-between;
+    width: 100%;
+  }
+  .sync-group-header > .group-header-actions .button { padding-inline: 0.5rem; }
+  .sync-delay-list { padding: 0 1rem 0.75rem; }
+  .stereo-speaker { padding-block: 0.375rem; }
+  .stereo-head { display: grid; grid-template-columns: minmax(5.5rem, auto) minmax(10rem, 1fr); gap: 0.5rem; }
+  .stereo-head > .segmented-control { width: 100%; }
+  .stereo-head > .time-reference,
+  .stereo-head > .reference-action,
+  .stereo-head > .net-remove {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+  .stereo-tuning { padding-left: 0; }
+  .stereo-tuning .sync-control { display: grid; grid-template-columns: 4rem minmax(0, 1fr) 4.5rem; gap: 0.5rem; width: 100%; }
+  .stereo-tuning .sync-control-label { width: auto; }
+  .stereo-tuning .sync-control output { width: auto; white-space: nowrap; }
+  .speaker-checks { gap: 0.75rem 0.5rem; }
+  .airplay-checks { grid-template-columns: 1fr; }
+  .group-form { padding: 1rem; gap: 0.875rem; }
+  .group-form-heading .cell-subtitle { margin-top: 0.25rem; }
+
+  /* Dialogs */
+  .confirm-dialog { width: calc(100vw - 2rem); max-height: calc(100dvh - 2rem); }
+  .confirm-dialog form,
+  .calibration-dialog form { padding: 1.25rem; }
+  .confirm-dialog-copy h3 { font-size: 1.125rem; }
+  .confirm-dialog-copy p { line-height: 1.45; }
+  .confirm-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  .confirm-dialog-actions .button { min-width: 0; padding-inline: 0.5rem; }
+  .calibration-guide-list { margin-top: 1rem; }
+  .calibration-guide-row { padding: 0.875rem; }
+  .calibration-hint { margin-top: 0.75rem; }
+
+  /* Link map: the empty state must not compete with inactive nodes and the legend. */
+  .main-content[data-active-section="topology"] {
+    min-height: calc(100dvh - var(--header-height));
+  }
+  .topology-stage {
+    min-height: 20rem;
+    border-radius: 0.875rem;
+  }
+  .topology-legend {
+    left: auto;
+    right: 0.75rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+  .topology-legend span { display: none; }
+  .topology-toggle {
+    min-height: 2.25rem;
+    padding-inline: 0.75rem;
+    background: rgba(15, 23, 42, 0.82);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .topology-empty { padding: 4rem 1.5rem; z-index: 2; }
+  .topology-empty-hint { max-width: 14rem; margin-inline: auto; line-height: 1.4; }
+  .topology-stage:has(.topology-empty:not([hidden])) .topology-canvas { opacity: 0.18; }
+  .topology-hud-right { left: 0.75rem; right: auto; max-width: calc(100% - 1.5rem); }
+  .topology-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .is-embedded .main-content { padding-top: var(--space-sm); }
+}
+
+@media (min-width: 1024px) {
+  .main-content[data-active-section="topology"] { align-self: stretch; }
+}
+
+/* display rules on .cell/.button would otherwise beat the UA [hidden] style */
+[hidden] { display: none !important; }
+
+.update-actions { display: flex; align-items: center; gap: var(--space-xs); flex-shrink: 0; }
+
+.button.compact {
+  min-height: 1.875rem;
+  padding: 0 var(--space-md);
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+}

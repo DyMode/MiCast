@@ -165,13 +165,13 @@ function renderDeviceCard(device: Device, expanded: boolean, playback: PlaybackS
   const visual = deviceVisual(device);
 
   return `
-    <div class="device-card ${expanded ? "expanded" : ""}" data-did="${device.did}">
+    <div class="device-card ${expanded ? "expanded" : ""}" data-did="${escapeHtml(device.did)}">
       <div class="device-card-header" data-device-header role="button" tabindex="0"
            aria-expanded="${expanded}" aria-label="${escapeHtml(displayName)}详情，${expanded ? "已展开" : "已收起"}">
         <div class="cell-icon device-brand ${isOnline ? visual.className : "gray"}">${visual.html}</div>
         <div class="device-info">
           <span class="device-name">${escapeHtml(displayName)}</span>
-          <span class="device-meta">${escapeHtml(device.name)} · ${device.model} · ${isOnline ? "在线" : "离线"}</span>
+          <span class="device-meta">${escapeHtml(device.name)} · ${escapeHtml(device.model)} · ${isOnline ? "在线" : "离线"}</span>
         </div>
         <div class="device-actions">
           <label class="volume-control device-volume-inline" title="${escapeHtml(displayName)}音量">

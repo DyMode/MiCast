@@ -50,24 +50,6 @@ async function toggleMute(button: HTMLButtonElement, dids: string[]) {
   button.disabled = true;
   try {
     await setMute(nextMuted, dids);
-    const stateNow = store.get();
-    const playbackDevices = (stateNow.playback?.devices ?? []).map((device) =>
-      dids.includes(device.did) ? { ...device, muted: nextMuted } : device
-    );
-    store.set({
-      devices: stateNow.devices.map((device) =>
-        dids.includes(device.did) ? { ...device, muted: nextMuted } : device
-      ),
-      playback: stateNow.playback
-        ? {
-            ...stateNow.playback,
-            muted: playbackDevices.length > 0 && playbackDevices.every((device) => device.muted),
-            devices: playbackDevices,
-          }
-        : null,
-    });
-    document.dispatchEvent(new CustomEvent("micast:render-playback"));
-    document.dispatchEvent(new CustomEvent("micast:render-devices"));
     store.showToast(allMuted ? "已取消静音" : "已静音");
   } catch (error) {
     button.setAttribute("aria-pressed", String(allMuted));

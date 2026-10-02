@@ -6,9 +6,9 @@ export function renderQRSheet(state: State): string {
   if (!qr.open) return "";
   return `
     <div class="sheet-overlay ${qr.open ? "open" : ""}" data-close-qr></div>
-    <div class="sheet ${qr.open ? "open" : ""}" role="dialog" aria-modal="true">
+    <div class="sheet ${qr.open ? "open" : ""}" role="dialog" aria-modal="true" aria-labelledby="qr-title">
       <div class="sheet-handle"></div>
-      <h2 class="title-2" style="text-align: center; margin-bottom: var(--space-xs);">连接米家</h2>
+      <h2 class="title-2" id="qr-title" style="text-align: center; margin-bottom: var(--space-xs);">连接米家</h2>
       <p class="caption" style="text-align: center; margin-bottom: var(--space-xl);">
         使用米家 App 扫描下方二维码
       </p>

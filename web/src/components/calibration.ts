@@ -59,9 +59,16 @@ export function liveCalibration(group: SpeakerGroup, state: State): Promise<bool
       <div class="confirm-dialog-actions"><button class="button plain" type="button" data-live-cancel>取消并还原</button><button class="button primary" type="submit">完成并保存</button></div>
     </form>`;
     let saved = false;
+    let closed = false;
+    let writes = Promise.resolve();
+    let writeError: unknown = null;
     const apply = async (did: string, value: number) => {
       if (value) delays[did] = value; else delete delays[did];
-      const updated = await api.updateGroup(group.id, { delays_ms: delays });
+      const requested = { ...delays };
+      const operation = writes.catch(() => undefined).then(() => api.updateGroup(group.id, { delays_ms: requested }));
+      writes = operation.then(() => { writeError = null; }, error => { writeError = error; });
+      const updated = await operation;
+      if (closed) return;
       const config = store.get().fullConfig;
       if (config) store.set({ fullConfig: replaceGroup(config, updated) });
     };
@@ -77,7 +84,15 @@ export function liveCalibration(group: SpeakerGroup, state: State): Promise<bool
         apply(did, Number(slider.value)).catch((e) => store.showToast(`调整失败: ${message(e)}`));
       }));
     });
-    dialog.querySelector("form")?.addEventListener("submit", (event) => { event.preventDefault(); saved = true; dialog.close(); });
+    dialog.querySelector("form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await writes;
+        if (writeError) throw writeError;
+        if (!closed) { saved = true; dialog.close(); }
+      }
+      catch (error) { store.showToast(`保存失败: ${message(error)}`); }
+    });
     dialog.querySelector("[data-live-cancel]")?.addEventListener("click", () => dialog.close());
     // The slider shows what was requested; this shows whether the delay line has
     // actually taken it. A raise only takes effect once the reserve has filled
@@ -97,9 +112,15 @@ export function liveCalibration(group: SpeakerGroup, state: State): Promise<bool
       });
     });
     dialog.addEventListener("close", async () => {
+      closed = true;
       unsubscribe();
+      await writes.catch(() => undefined);
       if (!saved) {
-        try { await api.updateGroup(group.id, { delays_ms: original }); }
+        try {
+          const updated = await api.updateGroup(group.id, { delays_ms: original });
+          const config = store.get().fullConfig;
+          if (config) store.set({ fullConfig: replaceGroup(config, updated) });
+        }
         catch (e) { store.showToast(`还原延迟失败: ${message(e)}`); }
       }
       resolve(saved);

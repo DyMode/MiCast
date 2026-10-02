@@ -1,0 +1,1034 @@
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  font-family: var(--font-stack);
+  font-size: 17px;
+  line-height: 1.47059;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* The page never scrolls as a whole — .app-body is the only scroller.
+     Locking html too: 100dvh glitches on WebView2 window resizes and used
+     to leave a second scrollbar at the window edge. */
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  /* The app scrolls inside .app-body, not the window — keeps the native
+     window edge clean (packaged desktop shell) and the header stable. */
+  overflow: hidden;
+}
+
+/* Form controls do not inherit type from their context by default — the UA
+   gives them its own small control font. Only font-family was reset, so any
+   control without an explicit size silently fell back to it: on iOS that made
+   the 单项检查 title (inherited by <strong>) render ~28% smaller than the
+   description beside it. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+.confirm-dialog {
+  width: min(28rem, calc(100vw - 2rem));
+  padding: 0;
+  color: var(--text);
+  background: var(--elevated);
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.confirm-dialog::backdrop {
+  background: var(--overlay);
+}
+
+.confirm-dialog form {
+  padding: var(--space-xl);
+}
+
+.confirm-dialog-copy h3 {
+  margin: 0 0 var(--space-xs);
+  font-size: 1.125rem;
+  line-height: 1.25;
+}
+
+.confirm-dialog-copy p {
+  margin: 0;
+  max-width: 65ch;
+  color: var(--text-secondary);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  margin-top: var(--space-xl);
+}
+
+/* Log scope picker: one row per window, the count on the right. Rows are radio
+   labels rather than a list box so the selected window and its size read as one
+   line, and a 375px dialog can wrap the count instead of clipping a select. */
+.log-scope-options {
+  display: grid;
+  gap: 0.5px;
+  margin-top: var(--space-lg);
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--separator);
+}
+.log-scope-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--control-height);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--elevated);
+  cursor: pointer;
+}
+.log-scope-option:hover { background: var(--surface-hover); }
+.log-scope-option input { flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
+.log-scope-option span { flex: 1 1 auto; min-width: 0; }
+.log-scope-option em {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+.log-scope-custom {
+  display: grid;
+  gap: var(--space-xs);
+  margin-top: var(--space-md);
+  padding: var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+.log-scope-custom label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.log-scope-custom label span { flex: 0 0 2.5rem; color: var(--text-secondary); font-size: 0.8125rem; }
+.log-scope-custom input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 2rem;
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-xs);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+.log-scope-hint { margin: 0; color: var(--text-secondary); font-size: 0.75rem; }
+
+.symbol,
+.brand-symbol {
+  width: 1.2em;
+  height: 1.2em;
+  display: block;
+}
+.brand-device-symbol { width: 1.15rem; height: 1.15rem; display: block; }
+.cell-icon.device-brand.xiaomi {
+  color: white;
+  background: #ff6900;
+}
+.cell-icon.device-brand.mijia,
+.cell-icon.device-brand.device-product {
+  overflow: hidden;
+  background: #fff;
+}
+.mijia-brand-icon {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.device-product-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  padding: 0.0625rem;
+  box-sizing: border-box;
+}
+.provider-row { min-height: 4.5rem; }
+.provider-disconnect { margin-left: auto; white-space: nowrap; }
+.advanced-login-toggle { margin: var(--space-sm) var(--space-md); }
+
+/* Typography */
+.title-1 {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.title-2 {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.title-3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.body {
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.caption {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.footnote {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  line-height: 1.35;
+}
+
+/* App shell */
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+#app {
+  height: 100%;
+  /* This SPA owns one scroll container (.app-body). File inputs can make
+     WebKit programmatically scroll an otherwise overflow-hidden document;
+     fixing the app to the viewport prevents that hidden second scroll layer. */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  overflow: clip;
+}
+
+/* Host shells such as fnOS already provide the app title and window actions. */
+html.is-embedded {
+  --header-height: 0rem;
+}
+
+.is-embedded .app-header {
+  display: none;
+}
+
+.app-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--z-chrome);
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 max(var(--space-md), env(safe-area-inset-right))
+    0 max(var(--space-md), env(safe-area-inset-left));
+  padding-top: env(safe-area-inset-top);
+  background: var(--surface);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 0.5px 0 var(--separator);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.app-logo {
+  width: 1.875rem;
+  height: 1.875rem;
+  flex: 0 0 auto;
+}
+
+.brand-symbol {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.app-title {
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.icon-button {
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-full);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 160ms var(--ease-out), transform 100ms var(--ease-out), color 160ms var(--ease-out);
+}
+
+.icon-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.icon-button:active {
+  transform: scale(0.94);
+  background: var(--surface-active);
+}
+
+[data-mute][aria-pressed="true"] {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+[data-mute][aria-pressed="true"]:hover {
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Keep scrolling, hide the scrollbar — the page reads as one clean sheet. */
+  scrollbar-width: none;
+  padding-top: var(--header-height);
+  /* The page content owns the mobile navigation clearance. Keeping a second
+     reserve here created an extra tab-bar-sized blank strip on every page. */
+  padding-bottom: 0;}
+.app-body::-webkit-scrollbar { display: none; }
+
+/* The player is chrome, not a viewport: it only scrolls when its drawer is
+   open in a short window, and a scrollbar drifting through the card is
+   noise. Hidden like the page scroller, on the same reasoning. */
+.now-playing {
+  scrollbar-width: none;
+}
+.now-playing::-webkit-scrollbar { display: none; }
+
+@media (min-width: 1024px) {
+  .app-body {
+    flex-direction: row;
+    align-items: flex-start;
+    max-width: 1180px;
+    margin: 0 auto;
+    width: 100%;
+    padding: var(--header-height) var(--space-2xl) 0;
+    gap: var(--space-2xl);
+  }
+}
+
+/* Sidebar (desktop) */
+.sidebar {
+  display: none;
+}
+
+/* The left lane owns BOTH the nav card and the wide player: they stack in
+   normal flow, so their alignment is guaranteed by construction — no fixed
+   positions, no left-edge formulas, no measured nav-height constants. */
+@media (max-width: 1023px) {
+  .app-lane { display: contents; }
+}
+
+@media (min-width: 1024px) {
+  .app-lane {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    width: var(--sidebar-width);
+    flex-shrink: 0;
+    position: sticky;
+    top: calc(var(--header-clearance) + var(--space-lg));
+    align-self: flex-start;
+    max-height: calc(100dvh - var(--header-clearance) - var(--space-lg));
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+
+  .app-lane::-webkit-scrollbar { display: none; }
+}
+
+@media (min-width: 1024px) {
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    flex-shrink: 0;
+    gap: var(--space-xs);
+    padding: var(--space-sm);
+    margin-top: var(--space-lg);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    box-shadow: 0 0.5px 0 var(--separator);
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.9375rem;
+    font-weight: 500;
+    transition: background 160ms var(--ease-out), transform 100ms var(--ease-out), color 160ms var(--ease-out);
+    cursor: pointer;
+    user-select: none;
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    text-align: left;
+  }
+
+  .nav-item:hover {
+    background: var(--surface-hover);
+  }
+
+  .nav-item:active {
+    background: var(--surface-active);
+    transform: scale(0.97);
+  }
+
+  .nav-item.active {
+    background: var(--accent-soft);
+    color: var(--accent-foreground);
+  }
+
+  .nav-icon {
+    width: 1.5rem;
+    height: 1.5rem;
+    display: grid;
+    place-items: center;
+    font-size: 1rem;
+  }
+}
+
+/* Mobile tab bar */
+.tab-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-chrome);
+  height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom));
+  padding: 0 max(var(--space-md), env(safe-area-inset-right))
+    env(safe-area-inset-bottom)
+    max(var(--space-md), env(safe-area-inset-left));
+  background: var(--surface);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: 0 -0.5px 0 var(--separator);
+  display: flex;
+  align-items: stretch;
+  justify-content: space-around;
+}
+
+.tab-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3xs);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.625rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 160ms var(--ease-out), transform 100ms var(--ease-out);
+  user-select: none;
+  padding: var(--space-xs) 0;
+}
+
+.tab-item:active {
+  transform: scale(0.92);
+}
+
+.tab-item.active {
+  color: var(--accent-foreground);
+}
+
+.tab-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  font-size: 1.125rem;
+  transition: transform 180ms var(--ease-out);
+}
+
+.tab-item.active .tab-icon {
+  transform: translateY(-1px);
+}
+
+@media (min-width: 1024px) {
+  .tab-bar {
+    display: none;
+  }
+}
+
+/* One scrollbar recipe for the app's viewports — surfaces you scroll a lot and
+   where the position indicator earns its keep. The platform default ships
+   stepper arrows and a ~15px track, which looks alien next to the rounded
+   surfaces. Chrome surfaces keep no scrollbar at all (see .app-body and the
+   sidebar player). */
+.runtime-log {
+  --scrollbar-thumb: var(--separator-strong);
+}
+/* The link map is theme-independent dark, so it needs a fixed light thumb
+   rather than the light theme's near-invisible dark one. */
+.topology-detail {
+  --scrollbar-thumb: rgba(148, 163, 184, 0.45);
+}
+
+.runtime-log,
+.topology-detail {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.runtime-log::-webkit-scrollbar,
+.topology-detail::-webkit-scrollbar {
+  width: 0.375rem;
+  height: 0.375rem;
+}
+.runtime-log::-webkit-scrollbar-track,
+.topology-detail::-webkit-scrollbar-track {
+  background: transparent;
+}
+.runtime-log::-webkit-scrollbar-thumb,
+.topology-detail::-webkit-scrollbar-thumb {
+  border: 0.125rem solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+.runtime-log::-webkit-scrollbar-thumb:hover,
+.topology-detail::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-tertiary);
+}
+
+/* Main content */
+.main-content {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-md) max(var(--space-md), env(safe-area-inset-right))
+    max(var(--space-xl), env(safe-area-inset-bottom))
+    max(var(--space-md), env(safe-area-inset-left));
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+}
+
+@media (min-width: 1024px) {
+  .main-content {
+    align-self: flex-start;
+    padding: var(--space-lg) 0 var(--space-2xl);
+  }
+}
+
+.page-title {
+  margin: 0 0 var(--space-md);
+  font-family: var(--font-display);
+  font-size: 1.875rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.page-heading {
+  margin-bottom: var(--space-xl);
+}
+
+.page-heading .page-title {
+  margin-bottom: var(--space-2xs);
+}
+
+.page-heading p {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+@media (min-width: 1024px) {
+  .page-title {
+    font-size: 2rem;
+    margin-bottom: var(--space-lg);
+  }
+}
+
+/* Grouped settings surfaces */
+.group {
+  background: var(--elevated);
+  border-radius: var(--card-radius);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+  margin-bottom: var(--space-lg);
+}
+
+.group-header {
+  padding: var(--space-md) var(--space-sm) var(--space-2xs);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-secondary);
+}
+
+.group-header + .group {
+  margin-top: 0;
+}
+
+.cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--row-padding-block) var(--row-padding-inline);
+  min-height: 3rem;
+  border-bottom: 0.5px solid var(--separator);
+  transition: background 160ms var(--ease-out);
+}
+
+.cell:last-child {
+  border-bottom: none;
+}
+
+.cell.clickable {
+  cursor: pointer;
+}
+
+.cell.clickable:hover {
+  background: var(--surface-hover);
+}
+
+.cell.clickable:active {
+  background: var(--surface-active);
+}
+
+.cell-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  flex: 1;
+  min-width: 0;
+}
+
+.cell-title {
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+.cell-subtitle {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.cell-value {
+  font-size: 1rem;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.cell-icon {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.cell-icon.blue { background: var(--accent-soft); color: var(--accent-foreground); }
+.cell-icon.green { background: rgba(34, 174, 69, 0.12); color: var(--success); }
+.cell-icon.orange { background: rgba(255, 149, 0, 0.12); color: var(--warning); }
+.cell-icon.red { background: rgba(255, 59, 48, 0.12); color: var(--danger); }
+.cell-icon.gray { background: var(--surface-hover); color: var(--text-secondary); }
+
+/* Segmented control */
+.segmented-control {
+  display: inline-flex;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2xs);
+  gap: var(--space-2xs);
+  flex-shrink: 0;
+}
+
+.segment {
+  position: relative;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 160ms var(--ease-out), transform 100ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+  min-width: 3rem;
+  text-align: center;
+}
+
+.segment:disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+.segment:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+[data-theme="dark"] .segment:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .segment:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+}
+
+.segment:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+.segment.active {
+  background: var(--elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Switch */
+.switch {
+  appearance: none;
+  width: 3.125rem;
+  height: 1.875rem;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-full);
+  position: relative;
+  cursor: pointer;
+  transition: background 180ms var(--ease-out);
+  flex-shrink: 0;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 1.625rem;
+  height: 1.625rem;
+  background: var(--elevated);
+  border-radius: 50%;
+  box-shadow: var(--shadow-sm);
+  transition: transform 220ms var(--ease-out);
+}
+
+.switch:checked {
+  background: var(--accent);
+}
+
+.switch:checked::after {
+  transform: translateX(1.25rem);
+}
+
+.switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Radio */
+.radio {
+  appearance: none;
+  width: 1.375rem;
+  height: 1.375rem;
+  border-radius: 50%;
+  border: 2px solid var(--separator-strong);
+  background: var(--elevated);
+  position: relative;
+  cursor: pointer;
+  transition: border-color 150ms var(--ease-standard);
+  flex-shrink: 0;
+}
+
+.radio:checked {
+  border-color: var(--accent);
+}
+
+.radio:checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Buttons */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: 0 var(--space-md);
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 100ms var(--ease-out), background 160ms var(--ease-out), opacity 160ms var(--ease-out);
+  user-select: none;
+  min-height: var(--control-height);
+}
+
+/* Pointer-coarse (phones, tablets, trackpads on touch screens) gets the full
+   44px target; a mouse does not need one and the extra 8px per row added up
+   across a settings page. */
+@media (pointer: coarse) {
+  :root { --control-height: 2.75rem; }
+}
+
+.button:active {
+  transform: scale(0.97);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button.large {
+  padding: var(--space-md) var(--space-lg);
+  min-height: 3.25rem;
+  font-size: 1.0625rem;
+}
+
+.button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.button.secondary {
+  background: var(--bg-secondary);
+  color: var(--accent-foreground);
+}
+
+.button.secondary:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.button.plain {
+  background: transparent;
+  color: var(--accent-foreground);
+  padding: 0 var(--space-sm);
+}
+
+/* Paired −/+ steppers (relative volume). One track and two hit targets, so the
+   control reads as a single instrument instead of two loose buttons. */
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.125rem;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--fill-secondary);
+}
+
+.stepper button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 2.5rem;
+  min-height: 1.75rem;
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: background 140ms var(--ease-out), transform 100ms var(--ease-out), opacity 140ms var(--ease-out);
+}
+
+.stepper button:hover:not(:disabled) { background: var(--surface-hover); }
+.stepper button:active:not(:disabled) { transform: scale(0.94); }
+.stepper button:disabled { opacity: 0.45; cursor: not-allowed; }
+.stepper .stepper-divider {
+  width: 0.5px;
+  height: 1rem;
+  background: var(--separator-strong);
+}
+
+@media (pointer: coarse) {
+  .stepper button { min-height: 2.25rem; min-width: 2.75rem; }
+}
+
+.danger-text { color: var(--danger) !important; }
+.receiver-remove {
+  min-width: 6rem;
+  white-space: nowrap;
+}
+.receiver-remove.confirming {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.section-note {
+  margin: calc(var(--space-md) * -1) var(--space-sm) var(--space-xl);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+.default-device-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.device-presence {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+.device-presence.online { color: var(--success); }
+.debug-target-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding-bottom: var(--space-md);
+  border-bottom: 0.5px solid var(--separator);
+}
+.debug-target-row > span {
+  display: flex;
+  flex-direction: column;
+}
+.debug-target-row small { color: var(--text-secondary); }
+.debug-target-row .input { width: min(18rem, 50%); }
+.diagnostic-workbench > .debug-target-row { padding: var(--space-lg); }
+.test-source-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-xs);
+  margin: var(--space-lg) var(--space-lg) 0;
+  padding: var(--space-2xs);
+  border-radius: var(--radius-sm);
+  background: var(--fill-secondary);
+}
+.test-source-tabs input { position: absolute; opacity: 0; pointer-events: none; }
+.test-source-tabs span {
+  display: grid;
+  place-items: center;
+  min-height: 2.75rem;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--text-secondary);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+}
+.test-source-tabs input:checked + span { background: var(--elevated); color: var(--text); box-shadow: var(--shadow-sm); }
+.test-source-tabs input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+.test-source-panel { min-height: 6.5rem; padding: var(--space-lg); }
+.test-source-panel p { margin: var(--space-xs) 0 0; color: var(--text-secondary); }
+.test-file-picker {
+  display: grid;
+  place-items: center;
+  gap: var(--space-xs);
+  min-height: 7rem;
+  border: 1px dashed var(--separator-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.test-file-picker:hover { background: var(--surface-hover); }
+.test-file-picker input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
+.test-file-picker strong { color: var(--accent-foreground); }
+.test-media-file, .test-session-bar, .test-volume-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-lg);
+}
+.test-media-file > div, .test-session-bar > div, .test-volume-row > span { display: grid; gap: 0.125rem; }
+.test-media-file span, .test-session-bar span, .test-volume-row small { color: var(--text-secondary); font-size: 0.8125rem; }
+.test-url-field { display: grid; gap: var(--space-sm); }
+.test-session-bar { padding: var(--space-md) var(--space-lg); border-top: 0.5px solid var(--separator); border-bottom: 0.5px solid var(--separator); }
+.diagnostic-utilities { display: grid; gap: var(--space-sm); padding: var(--space-lg); }
+.diagnostic-step-label {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-lg) var(--space-lg) 0;
+}
+.diagnostic-step-label span { color: var(--text-secondary); font-size: 0.8125rem; }
+.diagnostic-tools-label { padding-top: var(--space-md); border-top: 0.5px solid var(--separator); }
+.test-volume-row { padding: 0 var(--space-lg) var(--space-lg); }
+.test-volume-row input[type="range"] { flex: 1; min-width: 5rem; }
+.plain-state {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.plain-state.success { color: var(--success); }
+.plain-state.warn { color: var(--warning); }
+.plain-state.error { color: var(--danger); }

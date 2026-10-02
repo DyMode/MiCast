@@ -1,3 +1,4 @@
+import { TuningEditMode } from './tuning-edit-mode';
 /**
  * Full-screen tuning page: drawable EQ curve editor for one speaker.
  *
@@ -8,10 +9,14 @@
 
 import { api, type Device, type EqPresetsResponse, type SpeakerEq } from "../api";
 import { icon } from "../icons";
-import { appUrl, appWebSocketUrl } from "../paths";
+import { appUrl } from "../paths";
 import { store } from "../state";
 import { CalibrationWizard } from "./calibration-wizard";
 import { EqCurveCanvas, type CurvePoint } from "./eq-curve-canvas";
+import { SpectrumFeed } from "./spectrum-feed";
+import { syncModal } from '../ui/modal';
+import { SurfaceScope } from '../ui/lifecycle';
+import { deviceTuning } from '../selectors';
 
 const PRESET_LABELS: Record<string, string> = {
   flat: "平直",
@@ -39,77 +44,21 @@ interface TuningState {
 
 let presetsCache: EqPresetsResponse | null = null;
 let editor: EqCurveCanvas | null = null;
-let spectrumSocket: WebSocket | null = null;
-let spectrumTimer: number | null = null; // reconnect delay or poll interval
-let spectrumGen = 0; // guards stale callbacks after a rebind
+// Live spectrum, shared machinery with the fullscreen player (see
+// spectrum-feed.ts) — one implementation of WS push + poll fallback.
+const spectrumFeed = new SpectrumFeed((bands) => editor?.setSpectrum(bands));
 let commitTimer: number | null = null;
 let tuningSyncCleanup: (() => void) | null = null;
 let activeWizard: CalibrationWizard | null = null;
 
 /** Stop the spectrum feed: socket, pending reconnect, and poll fallback. */
 function closeSpectrumSocket() {
-  spectrumGen += 1;
-  spectrumSocket?.close();
-  spectrumSocket = null;
-  if (spectrumTimer != null) {
-    window.clearTimeout(spectrumTimer);
-    window.clearInterval(spectrumTimer);
-    spectrumTimer = null;
-  }
+  spectrumFeed.attach(null);
 }
 
-/** Live spectrum: WebSocket push preferred; some webviews (WeChat) kill the
- *  WS handshake, so after a couple of failed attempts fall back to polling
- *  the GET twin. Any close triggers a retry, so a stale page loaded before a
- *  backend restart recovers by itself. */
+/** Live spectrum for the editor's device; see SpectrumFeed.attach. */
 function openSpectrumSocket(did: string) {
-  closeSpectrumSocket();
-  const gen = spectrumGen;
-  let attempts = 0;
-
-  const applyBands = (bands: number[] | null) => {
-    if (gen === spectrumGen) editor?.setSpectrum(bands);
-  };
-
-  const startPolling = () => {
-    const tick = () => {
-      if (document.hidden) return;  // background tab: the server tap idles too
-      api
-        .getSpectrum(did)
-        .then((r) => applyBands(r.bands ?? null))
-        .catch(() => undefined);
-    };
-    tick();
-    spectrumTimer = window.setInterval(tick, 500);
-  };
-
-  const connect = () => {
-    if (gen !== spectrumGen) return;
-    const socket = new WebSocket(appWebSocketUrl(`api/tuning/${encodeURIComponent(did)}/spectrum`));
-    spectrumSocket = socket;
-    socket.onopen = () => {
-      attempts = 0;
-    };
-    socket.onmessage = (ev) => {
-      try {
-        applyBands((JSON.parse(String(ev.data)) as { bands?: number[] | null }).bands ?? null);
-      } catch {
-        // Malformed frame — ignore.
-      }
-    };
-    socket.onclose = () => {
-      if (spectrumSocket === socket) spectrumSocket = null;
-      if (gen !== spectrumGen) return;
-      applyBands(null);
-      attempts += 1;
-      if (attempts <= 3) {
-        spectrumTimer = window.setTimeout(connect, 2000);
-      } else {
-        startPolling();
-      }
-    };
-  };
-  connect();
+  spectrumFeed.attach(did);
 }
 
 export function tuningViewActive(): boolean {
@@ -126,6 +75,7 @@ export function closeTuning() {
 }
 
 export function disposeTuningView() {
+  if (document.querySelector('[data-ab-modal]:not([hidden])')) syncModal(null);
   activeWizard?.destroy();
   activeWizard = null;
   tuningSyncCleanup?.();
@@ -148,20 +98,28 @@ export function renderTuningView(device: Device | undefined): string {
       <button type="button" class="icon-button" data-tuning-back aria-label="返回">${"<"}</button>
       <div>
         <h2 class="page-title">调音台 · ${escapeHtml(name)}</h2>
-        <p>拖动圆点调整，点击空白添加控制点；松手后应用到 AirPlay 实时输出。DLNA 媒体暂不经过 EQ。</p>
+        <p>拖动控制点调整，点击空白添加；松手后自动应用。</p>
       </div>
+    </div>
+    <div class="tuning-edit-mode" data-tuning-edit-mode>
+      <button type="button" class="button secondary" data-tuning-edit-toggle aria-pressed="false">启用编辑</button>
+      <span data-tuning-undo-slot></span>
     </div>
     <div class="tuning-canvas-wrap">
       <canvas class="tuning-canvas" data-tuning-canvas aria-label="EQ 曲线编辑器"></canvas>
       <button type="button" class="point-delete-chip" data-point-delete hidden>删除控制点</button>
     </div>
+    <section class="eq-point-editor" data-eq-point-editor hidden aria-label="编辑选中的控制点">
+      <div class="eq-point-editor-header"><strong>编辑控制点</strong><button type="button" class="icon-button" data-eq-point-close aria-label="关闭控制点编辑">${icon('close')}</button></div>
+      <div data-eq-point-fields></div>
+    </section>
     <div class="tuning-toolbar">
       <button type="button" class="icon-button compact" data-tuning-undo ${eq?.undo_available ? "" : "disabled"} aria-label="撤销上一次调整" title="撤销上一次调整">${icon("undo")}</button>
       <label class="tuning-target">
         <span class="caption">曲线</span>
         <select data-tuning-curve aria-label="曲线库"></select>
       </label>
-      <button type="button" class="button secondary" data-tuning-curve-save>存为曲线</button>
+      <button type="button" class="button secondary" data-tuning-curve-save>保存</button>
       <button type="button" class="button secondary" data-tuning-curve-rename disabled>重命名</button>
       <button type="button" class="button secondary" data-tuning-curve-delete disabled>删除</button>
       <span class="tuning-divider-v"></span>
@@ -192,9 +150,10 @@ export function renderTuningView(device: Device | undefined): string {
             <select data-tuning-target aria-label="参考曲线"></select>
           </label>
           <span class="caption tuning-hint">仅叠加显示作参考，不改变声音</span>
-          <button type="button" class="button secondary" data-tuning-calibrate>自动校准<span class="tuning-badge">实验性</span></button>
+
         </div>
         <div class="tuning-toolbar">
+          <button type="button" class="button secondary" data-tuning-calibrate>自动校准<span class="tuning-badge">实验性</span></button>
           <button type="button" class="button secondary" data-tuning-ab-toggle>盲听对比</button>
         </div>
         <div class="tuning-wizard" data-tuning-wizard hidden></div>
@@ -239,6 +198,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
   if (!did) return;
   const device = store.get().devices.find((d) => d.did === did);
   const eq = device?.eq;
+  const scope = new SurfaceScope();
 
   const state: TuningState = {
     did,
@@ -276,6 +236,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     onClose();
   });
 
+  let selectedPoint: number | null = null;
   const canvas = container.querySelector<HTMLCanvasElement>("[data-tuning-canvas]");
   const nightToggle = container.querySelector<HTMLInputElement>("[data-tuning-night]");
   const loudnessToggle = container.querySelector<HTMLInputElement>("[data-tuning-loudness]");
@@ -285,6 +246,11 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
   const curveRenameBtn = container.querySelector<HTMLButtonElement>("[data-tuning-curve-rename]");
   const curveDeleteBtn = container.querySelector<HTMLButtonElement>("[data-tuning-curve-delete]");
   const undoBtn = container.querySelector<HTMLButtonElement>("[data-tuning-undo]");
+  const editMode = new TuningEditMode(container, scope, () => editor, () => ({
+    pointCount: state.points.length, undoAvailable: state.undoAvailable,
+  }));
+  const canEdit = () => editMode.enabled;
+  const updateEditMode = () => editMode.update();
 
   // ---- curve library (global): presets + user-saved curves ----
 
@@ -331,6 +297,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
 
   /** Selecting a library entry replaces the canvas and commits. */
   const applyCurveKey = (key: string) => {
+    if (!canEdit()) return;
     if (key === "current") return;
     const [kind, name] = [key.split(":")[0], key.slice(key.indexOf(":") + 1)];
     const gains =
@@ -343,7 +310,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     save();
   };
 
-  const markCurve = () => refreshCurveSelect();
+  const markCurve = () => { refreshCurveSelect(); refreshPointEditor(); };
 
   /** Reference overlay: built-in targets, or any curve from the library. */
   const resolveReference = (key: string): CurvePoint[] | null => {
@@ -402,13 +369,13 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
   // ---- backend sync (never a full re-render, so an open drag survives) ----
 
   const syncLocal = (resp: SpeakerEq) => {
-    const dev = store.get().devices.find((d) => d.did === state.did);
-    if (dev) dev.eq = resp;
+    if (!scope.active) return;
+    store.updateDeviceTuning(state.did, resp);
     if (nightToggle) nightToggle.checked = Boolean(resp.night_mode);
     if (loudnessToggle) loudnessToggle.checked = Boolean(resp.loudness_comp_enabled);
     state.revision = resp.revision ?? state.revision;
     state.undoAvailable = Boolean(resp.undo_available);
-    if (undoBtn) undoBtn.disabled = !state.undoAvailable;
+    if (undoBtn) undoBtn.disabled = !canEdit() || !state.undoAvailable;
   };
 
   const syncFull = (resp: SpeakerEq) => {
@@ -431,9 +398,11 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
   };
   const refreshRemote = async (force = false) => {
     if (remoteSyncBusy || ((commitTimer != null || localWrites > 0) && !force)) return;
+    if (!force && container.querySelector('[data-eq-point-fields]')?.contains(document.activeElement)) return;
     remoteSyncBusy = true;
     try {
       const latest = await api.getDeviceTuning(state.did);
+      if (!scope.active) return;
       const revision = latest.revision ?? 0;
       const changed = revision > state.revision;
       if (force || changed) {
@@ -456,6 +425,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     if (!document.hidden) void refreshRemote();
   }, 2500);
   tuningSyncCleanup = () => {
+    scope.dispose();
     window.removeEventListener("micast:tuning-change", onTuningChange);
     window.clearInterval(tuningPoll);
   };
@@ -492,6 +462,75 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     }, 300);
   };
 
+  function refreshPointEditor() {
+    const host = container.querySelector<HTMLElement>('[data-eq-point-fields]');
+    if (!host) return;
+    const panel = container.querySelector<HTMLElement>('[data-eq-point-editor]');
+    if (panel) panel.hidden = selectedPoint === null || !canEdit();
+    // A single persistent editor owns focus and button presses across commits.
+    const point = selectedPoint === null ? null : state.points[selectedPoint];
+    if (point) {
+      if (!host.firstElementChild) host.innerHTML = `<div class="eq-point-row">
+        <label>频率 <span class="caption">Hz</span><input class="input" type="number" min="20" max="20000" step="1" data-eq-field="freq"></label>
+        <label>增益 <span class="caption">dB</span><input class="input" type="number" min="-12" max="12" step="0.1" data-eq-field="gain"></label>
+        <button type="button" class="icon-button" data-eq-remove aria-label="删除控制点">${icon('trash')}</button>
+      </div>`;
+      (host.firstElementChild as HTMLElement).dataset.eqPoint = String(selectedPoint);
+      for (const key of ['freq', 'gain'] as const) {
+        const input = host.querySelector<HTMLInputElement>(`[data-eq-field="${key}"]`)!;
+        if (document.activeElement !== input) input.value = key === 'freq' ? String(Math.round(point.freq)) : point.gain.toFixed(1);
+        input.setAttribute('aria-label', key === 'freq' ? '控制点频率' : '控制点增益');
+      }
+      const remove = host.querySelector<HTMLButtonElement>('[data-eq-remove]')!;
+      remove.dataset.eqRemove = String(selectedPoint);
+      remove.disabled = false;
+    }
+    updateEditMode();
+  }
+  const numericFields = container.querySelector<HTMLElement>('[data-eq-point-fields]');
+  const commitPoints = () => {
+    const selected = selectedPoint !== null ? state.points[selectedPoint] : null;
+    state.points.sort((a, b) => a.freq - b.freq);
+    selectedPoint = selected ? state.points.indexOf(selected) : null;
+    state.preset = '';
+    editor?.setPoints(state.points);
+    selectedPoint = selected ? state.points.indexOf(selected) : null;
+    markCurve();
+    save();
+  };
+  numericFields?.addEventListener('change', event => {
+    if (!canEdit()) return;
+    const field = event.target as HTMLInputElement;
+    if (!field.matches('[data-eq-field]') || !field.reportValidity()) return;
+    const index = Number(field.closest<HTMLElement>('[data-eq-point]')?.dataset.eqPoint);
+    const key = field.dataset.eqField as 'freq' | 'gain';
+    const value = Number(field.value);
+    if (!state.points[index] || !Number.isFinite(value)) return;
+    if (key === 'freq' && state.points.some((p, i) => i !== index && p.freq === value)) {
+      field.setCustomValidity('这个频率已有控制点'); field.reportValidity(); field.setCustomValidity(''); return;
+    }
+    state.points[index][key] = value;
+    commitPoints();
+  });
+  numericFields?.addEventListener('click', event => {
+    if (!canEdit()) return;
+    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-eq-remove]');
+    if (!button) return;
+    state.points.splice(Number(button.dataset.eqRemove), 1);
+    selectedPoint = null;
+    commitPoints();
+  });
+  container.querySelector('[data-eq-add-point]')?.addEventListener('click', () => {
+    if (!canEdit()) return;
+    let freq = 1000;
+    while (state.points.some(p => p.freq === freq) && freq < 20000) freq += 100;
+    if (freq > 20000 || state.points.some(p => p.freq === freq)) return;
+    state.points.push({ freq, gain: 0 });
+    commitPoints();
+  });
+  container.querySelector('[data-eq-point-close]')?.addEventListener('click', () => { selectedPoint = null; editor?.clearPointSelection(); refreshPointEditor(); });
+  refreshPointEditor();
+
   // Immediate commit (A/B switching) — flush any pending debounce first.
   // Awaitable so the blind test can sequence "apply curve → resume playback".
   const commitNow = () => {
@@ -518,9 +557,11 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     const deleteChip = container.querySelector<HTMLButtonElement>("[data-point-delete]");
     editor = new EqCurveCanvas(canvas, {
       points: state.points,
+      readOnly: !canEdit(),
       freqRange: [20, 20000],
       gainRange: [-12, 12],
       onCommit: (points) => {
+        if (!canEdit()) return;
         state.points = points;
         // A hand edit detaches the curve from whichever preset it started
         // as — clear the tag BEFORE marking, or the select keeps showing
@@ -530,19 +571,8 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
         save();
       },
       onSelect: (index) => {
-        if (!deleteChip || !editor) return;
-        const pos = index !== null ? editor.pointPosition(index) : null;
-        if (index === null || !pos) {
-          deleteChip.hidden = true;
-          return;
-        }
-        deleteChip.hidden = false;
-        deleteChip.dataset.index = String(index);
-        // Float above the point, clamped into the canvas frame.
-        const w = deleteChip.offsetWidth || 88;
-        const x = Math.max(4, Math.min(pos.x - w / 2, canvas.clientWidth - w - 4));
-        deleteChip.style.left = `${x}px`;
-        deleteChip.style.top = `${Math.max(4, pos.y - 44)}px`;
+        selectedPoint = canEdit() ? index : null;
+        refreshPointEditor();
       },
     });
     deleteChip?.addEventListener("click", () => {
@@ -556,6 +586,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
         .getEqPresets()
         .then((r) => {
           presetsCache = r;
+          if (!scope.active) return;
           applyTarget(state.target);
           refreshCurveSelect();
           refreshTargetSelect();
@@ -568,6 +599,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
   }
   refreshCurveSelect();
   refreshTargetSelect();
+  updateEditMode();
 
   // ---- primary controls ----
 
@@ -817,6 +849,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
       pausedByUs: Boolean(playback?.playing && !playback.paused),
     };
     if (abModal) abModal.hidden = false;
+    syncModal(abModal?.querySelector<HTMLElement>('[role="dialog"]') ?? null, () => abClose());
     abSync();
     // Pause first, then cut the stream over to slot A's curve while silent.
     if (ab.pausedByUs) void api.pause().catch(() => undefined);
@@ -828,6 +861,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     const { original, started, pausedByUs } = ab;
     ab = null;
     if (abModal) abModal.hidden = true;
+    syncModal(null);
     // Slot A was applied on open, so restore even if the test never started —
     // but skip the rebuild when nothing actually changed.
     if (JSON.stringify(state.points) !== JSON.stringify(original)) {
@@ -893,7 +927,7 @@ export function bindTuningView(container: HTMLElement, onClose: () => void) {
     } catch {
       // The apply() toast already confirmed success; keep local state on error.
     }
-    const resp = store.get().devices.find((d) => d.did === did)?.eq;
+    const resp = deviceTuning(store.get(), did);
     if (resp) syncFull(resp);
   };
 

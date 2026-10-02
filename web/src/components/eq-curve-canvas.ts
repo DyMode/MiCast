@@ -19,6 +19,9 @@ export interface CurveCanvasOptions {
   freqRange?: [number, number];
   gainRange?: [number, number];
   readOnly?: boolean;
+  /** Display-only mode for ambient layers: no grid, no axes, no labels —
+   * just the curve, its soft fill, and the live spectrum. */
+  minimal?: boolean;
   onCommit?: (points: CurvePoint[]) => void;
   /** Tap on an existing point toggles selection (the mobile path to deletion,
    *  since preventDefault on touchstart suppresses the synthetic dblclick).
@@ -30,7 +33,7 @@ const GRID_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const GRID_FREQ_LABELS = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
 const GRID_FREQS_NARROW = [31, 125, 500, 2000, 16000];
 const GRID_GAINS = [-12, -6, 0, 6, 12];
-const HIT_RADIUS = 14; // px, pointer hit area around a control point
+const HIT_RADIUS = 22; // Keep the visible dot small, the interaction area generous.
 const PAD = { top: 24, right: 16, bottom: 30, left: 44 };
 const PAD_NARROW = { top: 22, right: 10, bottom: 26, left: 36 };
 const NARROW_WIDTH = 520; // px plot-area breakpoint for reduced labels
@@ -158,6 +161,16 @@ export class EqCurveCanvas {
     return this.opts.freqRange ?? [20, 20000];
   }
 
+  setReadOnly(readOnly: boolean) {
+    if (this.opts.readOnly === readOnly) return;
+    this.opts.readOnly = readOnly;
+    this.dragIndex = -1;
+    this.hoverIndex = -1;
+    this.clearSelection();
+    this.canvas.setAttribute('aria-readonly', String(readOnly));
+    this.repaint();
+  }
+
   /** Replace the curve (e.g. preset applied); repaints without committing. */
   setPoints(points: CurvePoint[]) {
     this.points = normalize(points, this.gainRange);
@@ -179,6 +192,11 @@ export class EqCurveCanvas {
     this.clearSelection();
     this.repaint();
     this.opts.onCommit?.(this.points.map((p) => ({ ...p })));
+  }
+
+  clearPointSelection() {
+    this.clearSelection();
+    this.repaint();
   }
 
   private clearSelection(notify = true) {
@@ -396,6 +414,24 @@ export class EqCurveCanvas {
     return grad;
   }
 
+  private curvePaths = new Map<string, Path2D>();
+  private curvePath(points: CurvePoint[]): Path2D {
+    const key = JSON.stringify([this.canvas.clientWidth, this.canvas.clientHeight, this.freqRange, this.gainRange, points]);
+    const cached = this.curvePaths.get(key);
+    if (cached) return cached;
+    const path = new Path2D();
+    const rect = this.plotRect();
+    const steps = Math.max(64, Math.floor(rect.w / 2));
+    for (let step = 0; step <= steps; step++) {
+      const px = rect.x + step / steps * rect.w;
+      const py = this.yOf(evalCurve(points, this.freqAt(px)));
+      if (!step) path.moveTo(px, py); else path.lineTo(px, py);
+    }
+    if (this.curvePaths.size >= 8) this.curvePaths.clear();
+    this.curvePaths.set(key, path);
+    return path;
+  }
+
   private drawCurve(ctx: CanvasRenderingContext2D, points: CurvePoint[], color: string | CanvasGradient, width: number, dashed = false) {
     if (points.length === 0) return;
     const rect = this.plotRect();
@@ -405,16 +441,7 @@ export class EqCurveCanvas {
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     if (dashed) ctx.setLineDash([5, 4]);
-    ctx.beginPath();
-    const steps = Math.max(64, Math.floor(rect.w / 2));
-    for (let s = 0; s <= steps; s++) {
-      const px = rect.x + (s / steps) * rect.w;
-      const gain = evalCurve(points, this.freqAt(px));
-      const py = this.yOf(gain);
-      if (s === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.stroke();
+    ctx.stroke(this.curvePath(points));
     ctx.restore();
   }
 
@@ -456,18 +483,11 @@ export class EqCurveCanvas {
     const zeroY = this.yOf(0);
     ctx.save();
     ctx.fillStyle = this.freqGradient(ctx, 0.13);
-    ctx.beginPath();
-    const steps = Math.max(64, Math.floor(rect.w / 2));
-    for (let s = 0; s <= steps; s++) {
-      const px = rect.x + (s / steps) * rect.w;
-      const py = this.yOf(evalCurve(this.points, this.freqAt(px)));
-      if (s === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.lineTo(rect.x + rect.w, zeroY);
-    ctx.lineTo(rect.x, zeroY);
-    ctx.closePath();
-    ctx.fill();
+    const fill = new Path2D(this.curvePath(this.points));
+    fill.lineTo(rect.x + rect.w, zeroY);
+    fill.lineTo(rect.x, zeroY);
+    fill.closePath();
+    ctx.fill(fill);
     ctx.restore();
   }
 
@@ -513,12 +533,12 @@ export class EqCurveCanvas {
     const w = c.clientWidth;
     const h = c.clientHeight;
     if (w === 0 || h === 0) return;
-    if (c.width !== w * dpr || c.height !== h * dpr) {
-      c.width = w * dpr;
-      c.height = h * dpr;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(h * dpr);
       this.gridLayer = null;
     }
-    if (!this.gridLayer) this.renderGrid();
+    if (!this.opts.minimal && !this.gridLayer) this.renderGrid();
     const ctx = c.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -530,6 +550,7 @@ export class EqCurveCanvas {
     }
     this.drawCurveFill(ctx);
     this.drawCurve(ctx, this.points, this.freqGradient(ctx, 1), 2.5);
+    if (this.opts.readOnly) return; // display mode: no control dots, no readout
     // Control points: surface-colored dot with a ring in the curve's local hue.
     const dotFill = this.cssVar("--bg-secondary", this.cssVar("--bg", "#fff"));
     this.points.forEach((p, i) => {
@@ -656,10 +677,11 @@ export class EqCurveCanvas {
       this.opts.onSelect?.(this.selectedIndex >= 0 ? this.selectedIndex : null);
       return;
     }
-    this.clearSelection();
+    // Commit the model before notifying selection: the host indexes the new model.
+    this.selectedIndex = releasedIndex;
     this.repaint();
-    // Commits only on real changes: a drag, or an insert-on-empty-click.
     this.opts.onCommit?.(this.points.map((p) => ({ ...p })));
+    this.opts.onSelect?.(releasedIndex);
   };
 
   private onDoubleClick = (e: MouseEvent) => {

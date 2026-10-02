@@ -4,7 +4,7 @@
   "start_url": "/app/micast/",
   "scope": "/app/micast/",
   "display": "standalone",
-  "background_color": "#0b1118",
+  "background_color": "#080a10",
   "theme_color": "#b94b36",
   "icons": [
     { "src": "/app/micast/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

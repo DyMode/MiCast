@@ -1,0 +1,29 @@
+/* Loaded last. These user preferences take precedence over every material. */
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.button, .button.compact, .icon-button, .icon-button.compact, .group-toggle, .segment, .stepper button, .topology-toggle, .settings-index button { min-height: 44px; }
+.icon-button, .icon-button.compact, .group-toggle { min-width: 44px; }
+input[type="range"] { min-height: 44px; }
+.sheet, .player-overlay-panel { overflow-y: auto; overscroll-behavior: contain; }
+
+@media (prefers-contrast: more), (prefers-reduced-transparency: reduce) {
+  .app-header, .sidebar, .tab-bar, .now-playing, .player-overlay-dock,
+  .sheet, .toast, .group, .hero-card, .device-card, .receiver-card,
+  .confirm-dialog, .player-overlay {
+    background: var(--elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .app-header::before, .sidebar::before, .tab-bar::before, .now-playing::before,
+  .sheet::before, .toast::before, .app-header::after, .sidebar::after,
+  .tab-bar::after, .now-playing::after { display: none; }
+  .tab-lens, .nav-lens { backdrop-filter: none; -webkit-backdrop-filter: none; background: var(--accent-soft); }
+}
+@media (prefers-contrast: more) {
+  :root { --text-secondary: var(--text); --text-tertiary: var(--text); }
+  .app-header, .sidebar, .tab-bar, .now-playing, .group, .device-card,
+  .receiver-card, .sheet, .confirm-dialog { border-color: var(--text); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .setup-progress { animation: setup-spin 1.5s linear infinite !important; }
+}

@@ -1,0 +1,124 @@
+/* Onboarding shares the app's aurora and functional-glass hierarchy. */
+.setup-page { background: transparent; padding: max(.75rem,env(safe-area-inset-top)) .75rem max(1.5rem,env(safe-area-inset-bottom)); overflow-y: auto; }
+.setup-brand { position: relative; isolation: isolate; height: 3.75rem; padding: 0 1.25rem; border: 1px solid transparent; border-radius: 999px; background: var(--chrome-tint) padding-box,var(--chrome-rim) border-box; box-shadow: var(--chrome-shadow); }
+.setup-brand::before, .setup-steps::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; backdrop-filter: var(--glass-refract); -webkit-backdrop-filter: var(--chrome-blur); pointer-events: none; }
+.setup-shell { grid-template-columns: 14rem minmax(0,36rem); gap: 1.5rem; max-width: 53rem; min-height: 0; height: auto; margin: 2.5rem auto 0; align-items: start; }
+.setup-steps { position: relative; isolation: isolate; padding: 1.5rem 1rem; border: 1px solid transparent; border-radius: 1.75rem; background: var(--chrome-tint) padding-box,var(--chrome-rim) border-box; box-shadow: var(--chrome-shadow); }
+.setup-step { align-items: flex-start; padding: .875rem .75rem; gap: .75rem; min-height: 5rem; border-radius: 1rem; }
+.setup-step.active { background: var(--accent-soft); }
+.setup-step > span { width: 1.75rem; height: 1.75rem; }
+.setup-step:not(:last-child)::after { display: none; }
+.setup-step strong { font-size: .875rem; line-height: 1.75rem; }
+.setup-step small { font-size: .75rem; color: var(--text-secondary); }
+.setup-content { padding: 2rem; border-radius: 1.75rem; background: var(--card-bg) padding-box,var(--card-rim) border-box; border: 1px solid transparent; box-shadow: var(--card-shadow); backdrop-filter: var(--card-blur); -webkit-backdrop-filter: var(--card-blur); }
+.setup-copy { margin-bottom: 1.5rem; }
+.setup-copy p { display: block; }
+.setup-form { gap: .875rem; }
+.setup-form .choice-row { padding: .875rem 1rem; border-radius: 1rem; }
+.setup-credentials { padding: .25rem 0 .5rem; gap: .875rem; }
+.setup-credentials .input { width: 100%; min-width: 0; height: 3rem; min-height: 44px; background: var(--elevated); }
+.setup-actions, .setup-actions.split { gap: .625rem; flex-wrap: wrap; margin-top: 1rem; }
+.setup-actions .button { min-height: 44px; }
+.setup-provider, .setup-success, .setup-qr { gap: 1rem; }
+.setup-provider > div, .setup-success > div, .setup-qr > div { min-width: 0; overflow-wrap: anywhere; }
+.setup-complete { min-height: 20rem; }
+@media (max-width: 639px) {
+ .setup-brand { height: 3.25rem; padding-inline: 1rem; }
+ .setup-shell { display: grid; grid-template-columns: minmax(0,1fr); gap: 1rem; margin-top: 1.25rem; }
+ .setup-steps { display: grid; grid-template-columns: repeat(var(--setup-step-count),minmax(0,1fr)); gap: .25rem; padding: .5rem; border-radius: 1.5rem; }
+ .setup-step { flex-direction: column; align-items: center; text-align: center; gap: .25rem; min-height: 0; padding: .625rem .125rem; }
+ .setup-step strong { font-size: .6875rem; line-height: 1.4; white-space: nowrap; }
+ .setup-step small, .setup-step .feature-badge { display: none; }
+ .setup-content { padding: 1.25rem; border-radius: 1.5rem; }
+ .setup-copy h1, .setup-complete h1 { font-size: 1.5rem; }
+ .setup-copy p { font-size: .875rem; }
+ .setup-qr { flex-direction: column; align-items: center; text-align: center; }
+ .setup-qr img, .setup-qr-placeholder { width: 10rem; height: 10rem; }
+ .setup-actions .button { flex: 1 1 auto; }
+ .setup-complete { min-height: 18rem; }
+ .setup-appearance .segmented-control { width: 100%; }
+ .setup-appearance .segment { flex: 1; min-width: 0; }
+}
+@media (prefers-contrast: more), (prefers-reduced-transparency: reduce) {
+ .setup-brand, .setup-steps, .setup-content { background: var(--elevated); backdrop-filter: none; -webkit-backdrop-filter: none; border-color: var(--separator); }
+ .setup-brand::before, .setup-steps::before { display: none; }
+}
+
+/* Fit the setup task to the available height, retaining native focus reveal. */
+.setup-page { display: flex; flex-direction: column; gap: clamp(.5rem,2vh,1.25rem); padding-bottom: max(.75rem,env(safe-area-inset-bottom)); scrollbar-width: none; }
+.setup-page::-webkit-scrollbar { display: none; }
+.setup-brand { flex: none; }
+.setup-shell { width: 100%; margin: 0 auto; }
+.setup-content { padding: clamp(1rem,2.5vh,2rem); }
+.setup-copy { margin-bottom: 1rem; }
+.setup-form, .setup-credentials { gap: .625rem; }
+.setup-credentials { padding: 0; }
+.setup-credentials label { gap: .25rem; }
+.setup-actions, .setup-actions.split { margin-top: .5rem; }
+@media (min-width: 640px) {
+ .setup-credentials:not(.setup-target) { grid-template-columns: repeat(2,minmax(0,1fr)); }
+ .setup-credentials:not(.setup-target) > label:first-child { grid-column: 1 / -1; }
+}
+@media (max-height: 740px) {
+ .setup-page { gap: .5rem; padding: .5rem; }
+ .setup-brand { height: 2.75rem; }
+ .setup-steps { padding: .5rem; }
+ .setup-step { padding: .5rem; min-height: 0; }
+ .setup-step small { display: none; }
+ .setup-content { padding: .875rem; }
+ .setup-copy { margin-bottom: .625rem; }
+ .setup-copy h1, .setup-complete h1 { font-size: 1.375rem; }
+ .setup-copy p, .setup-form .caption, .setup-form .choice-row small { font-size: .75rem; }
+ .setup-form, .setup-credentials { gap: .5rem; }
+ .setup-form .choice-row { padding: .625rem .75rem; }
+ .setup-credentials .input { height: 2.75rem; }
+ .setup-qr img, .setup-qr-placeholder { width: 8rem; height: 8rem; }
+ .setup-qr { gap: .625rem; }
+ .setup-complete { min-height: 0; gap: .75rem; }
+}
+@media (max-height: 450px) and (min-width: 640px) {
+ .setup-brand { height: 2.25rem; }
+ .setup-shell { grid-template-columns: 10rem minmax(0,1fr); max-width: 60rem; gap: .75rem; }
+ .setup-step { gap: .5rem; }
+ .setup-step strong { font-size: .75rem; }
+ .setup-credentials:not(.setup-target) { grid-template-columns: repeat(3,minmax(0,1fr)); }
+ .setup-credentials:not(.setup-target) > label:first-child { grid-column: auto; }
+ .setup-copy p { font-size: .75rem; }
+ .setup-qr { flex-direction: row; }
+}
+
+.setup-form[data-setup-airplay2] { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.setup-form[data-setup-airplay2] > :not(.choice-row) { grid-column: 1 / -1; }
+.setup-complete > span { margin-bottom: .5rem; }
+.setup-complete .button { margin-top: 0; }
+.setup-appearance { margin-top: .75rem; }
+@media (max-height: 740px) {
+ .setup-content { padding: .75rem; }
+ .setup-complete { gap: .5rem; }
+ .setup-appearance { margin-top: .5rem; gap: .5rem; }
+ .setup-target .caption { display: none; }
+ .setup-form .choice-row small { display: none; }
+ .setup-page[data-setup-step="access"] .setup-copy p { display: none; }
+}
+@media (max-height: 740px) and (max-width: 639px) {
+ .setup-brand { height: 2.5rem; }
+ .setup-steps { padding: .25rem; gap: 0; }
+ .setup-step { flex-direction: row; justify-content: center; gap: .25rem; padding: .5rem .125rem; }
+ .setup-step > span { width: 1.25rem; height: 1.25rem; font-size: .625rem; }
+ .setup-step strong { font-size: .625rem; }
+ .setup-credentials:not(.setup-target) { grid-template-columns: repeat(2,minmax(0,1fr)); }
+ .setup-credentials:not(.setup-target) > label:first-child { grid-column: 1 / -1; }
+}
+@media (max-height: 450px) and (min-width: 640px) {
+ .setup-form[data-setup-access] { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+ .setup-form[data-setup-access] > .setup-credentials, .setup-form[data-setup-access] > .form-error, .setup-form[data-setup-access] > .setup-actions { grid-column: 1 / -1; }
+ .setup-form[data-setup-access] > .warning-choice { grid-column: 2; grid-row: 1; }
+ .setup-complete { grid-template-columns: auto minmax(0,1fr); align-items: center; }
+ .setup-complete > p, .setup-complete > .setup-appearance, .setup-complete > .setup-actions { grid-column: 1 / -1; }
+ .setup-complete > span { width: 2rem; height: 2rem; margin: 0; }
+ .setup-qr img, .setup-qr-placeholder { width: 6rem; height: 6rem; }
+ .setup-form[data-setup-airplay2] .setup-actions { margin-top: 0; }
+}
+
+.setup-form .form-error { margin: 0; }
+@media (max-height: 450px) { .setup-form .form-error { padding: .375rem .625rem; } }

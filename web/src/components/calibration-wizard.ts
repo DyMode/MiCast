@@ -194,6 +194,11 @@ export class CalibrationWizard {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       });
+      if (this.destroyed) {
+        this.stream.getTracks().forEach(t => t.stop());
+        this.stream = null;
+        return null;
+      }
     } catch {
       this.fail("无法访问麦克风，请检查浏览器授权");
       return null;
@@ -201,8 +206,14 @@ export class CalibrationWizard {
     let session: { token: string; duration_seconds: number };
     try {
       session = await api.calibrationStart(did);
+      if (this.destroyed) {
+        this.stream?.getTracks().forEach(t => t.stop());
+        this.stream = null;
+        await api.calibrationStop(session.token).catch(() => undefined);
+        return null;
+      }
     } catch (e) {
-      this.stream.getTracks().forEach((t) => t.stop());
+      this.stream?.getTracks().forEach((t) => t.stop());
       this.stream = null;
       this.fail(e instanceof Error ? e.message : "音箱未能开始播放");
       return null;
@@ -226,9 +237,11 @@ export class CalibrationWizard {
       };
       tick();
     });
-    recorder.stop();
-    await new Promise((r) => (recorder.onstop = r));
-    this.stream.getTracks().forEach((t) => t.stop());
+    await new Promise<void>(resolve => {
+      recorder.onstop = () => resolve();
+      if (recorder.state === 'inactive') resolve(); else recorder.stop();
+    });
+    this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     await api.calibrationStop(session.token).catch(() => undefined);
     this.token = null;
@@ -250,6 +263,7 @@ export class CalibrationWizard {
 
     try {
       const analysis = await api.calibrationAnalyze(wav, did, this.target);
+      if (this.destroyed) return null;
       const result: WizardResult = {
         points: analysis.points.map(([freq, gain]) => ({ freq, gain })),
         measured: analysis.measured,

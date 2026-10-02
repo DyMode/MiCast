@@ -19,6 +19,7 @@ import {
 import { bindNetworkSections, getCreateFormNetworks, renderNetworkTargets } from "./network-targets";
 import { bindGroupToggles, isGroupExpanded, renderGroupCodecChips, speakerAreaInner } from "./groups";
 import { confirmCalibration, liveCalibration } from "./calibration";
+import { activeSessions } from '../selectors';
 
 // Create-form state lives outside the DOM: a status-poll re-render rebuilds
 // the whole section and would otherwise wipe half-filled forms (the "checkbox
@@ -41,6 +42,9 @@ export function renderReceiversView(state: State): string {
     receivers.length > 0
       ? `<div class="receiver-grid">${receivers
           .map((r) => {
+            const sessions = activeSessions(state).filter(session => session.owner === r.did || session.owner === `dlna:${r.did}`);
+            const casting = sessions.some(session => session.state === 'active');
+            const paused = sessions.some(session => session.state === 'paused');
             const detail = compactTargetLabel(r.name, r.did, state);
             const definition = fullConfig?.receivers.find((item) => item.id === r.did);
             const mapped = Boolean(definition && settingsTargetIds(definition, state).length);
@@ -57,7 +61,7 @@ export function renderReceiversView(state: State): string {
                     ${detail ? `<span class="caption">${escapeHtml(detail)}</span>` : ""}
                   </div>
                 <span class="status-pill ${available ? "running" : r.status === "error" ? "error" : ""}">
-                  ${!mapped ? "未设置" : available ? "可连接" : r.status === "error" ? "不可用" : "准备中"}
+                  ${!mapped ? "未设置" : casting ? "投送中" : paused ? "已暂停" : available ? "可连接" : r.status === "error" ? "不可用" : "准备中"}
                 </span>
                 </div>
               </div>
@@ -130,6 +134,9 @@ function renderManagement(state: State): string {
   // fnOS ships one native AirPlay 2 receiver. Its only meaningful setting is
   // the playback target; creating more advertised receivers is unsupported.
   return `
+    <details class="receiver-management" ${state.receivers.length ? '' : 'open'}>
+    <summary><span>管理播放入口与组合</span><span class="caption">显示名称、播放目标与多音箱设置</span></summary>
+    <div class="receiver-management-body">
     <div class="group-header">显示哪些播放入口</div>
     <div class="group">
       ${hasAvailableTarget ? `<form class="cell receiver-form" data-create-receiver>
@@ -166,11 +173,10 @@ function renderManagement(state: State): string {
         ].filter(Boolean).join(" + ") || "尚无成员";
         return `<div class="sync-group">
         <div class="cell sync-group-header">
-          <button class="group-toggle ${expanded ? "expanded" : ""}" type="button" data-group-toggle="${escapeHtml(group.id)}" aria-label="展开或收起组合 ${escapeHtml(group.name)}">${icon("chevron")}</button>
-          <div class="cell-content">
-            <span class="cell-title">${escapeHtml(group.name)}</span>
-            <span class="cell-subtitle group-summary">${escapeHtml(summary)}${renderGroupCodecChips(group, state)}</span>
-          </div>
+          <button class="group-toggle group-identity ${expanded ? "expanded" : ""}" type="button" data-group-toggle="${escapeHtml(group.id)}" aria-expanded="${expanded}" aria-label="展开或收起组合 ${escapeHtml(group.name)}">
+            <span class="group-identity-copy"><strong>${escapeHtml(group.name)}</strong><small>${escapeHtml(summary)}</small></span>${icon("chevron")}
+          </button>
+          <div class="group-formats">${renderGroupCodecChips(group, state)}</div>
           <div class="segmented-control ${pendingGroupActions.has(groupActionKey("mode", group.id)) ? "control-pending" : ""}" role="group" aria-label="播放模式" aria-busy="${pendingGroupActions.has(groupActionKey("mode", group.id))}">
             <button class="segment ${!isStereo ? "active" : ""}" data-group-mode="${escapeHtml(group.id)}" data-mode="mirror" ${pendingGroupActions.has(groupActionKey("mode", group.id)) ? "disabled" : ""}>同声播放</button>
             <button class="segment ${isStereo ? "active" : ""}" data-group-mode="${escapeHtml(group.id)}" data-mode="stereo" ${pendingGroupActions.has(groupActionKey("mode", group.id)) ? "disabled" : ""}>立体声</button>
@@ -194,7 +200,7 @@ function renderManagement(state: State): string {
         <div data-create-network-picker></div>
         <div class="group-form-actions"><button class="button primary" type="submit">创建组合</button></div>
       </form>` : ""}
-    </div>`;
+    </div></div></details>`;
 }
 
 export function bindReceiversView(container: HTMLElement, rerender: () => void) {  bindNetworkSections(container);

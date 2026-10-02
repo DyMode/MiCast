@@ -1,0 +1,499 @@
+/* ============================================================
+   Liquid Glass — material layer
+   The visual world: chrome and cards are lenses floating over an
+   ambient aurora wallpaper. Five layers per glass surface:
+   1. ::before lens layer — SVG displacement (Chromium) or plain
+      blur+saturate (fallback) of everything behind the surface;
+   2. translucent tint gradient on the element (padding-box);
+   3. 1px hairline rim gradient on the border box;
+   4. specular top edge inside the shadow stack;
+   5. dynamic content behind, supplied by the wallpaper below.
+   Layout rules above stay authoritative; this layer owns color,
+   material, radius and the floating clearances.
+   ============================================================ */
+
+/* Ambient wallpaper the glass refracts. Painted below all content. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -12%;
+  z-index: -1;
+  background: var(--wallpaper);
+  animation: micast-aurora 90s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes micast-aurora {
+  from { transform: translate3d(-1.5%, -1%, 0) scale(1); }
+  to { transform: translate3d(1.5%, 1.5%, 0) scale(1.05); }
+}
+
+/* Browser surfaces carry the design too. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+input,
+textarea {
+  caret-color: var(--accent);
+}
+
+/* Floating chrome clearance overrides — the capsules above swapped the
+   edge-to-edge bars, so every reserve derived from header/tab-bar height
+   now goes through the clearance tokens. */
+html.is-embedded {
+  --header-clearance: 0rem;
+}
+
+.app-body {
+  padding-top: var(--header-clearance);
+}
+
+@media (min-width: 1024px) {
+  .app-body {
+    padding: var(--header-clearance) var(--space-2xl) 0;
+  }
+
+}
+
+@media (max-width: 1023px) {
+  .main-content {
+    padding-bottom: calc(var(--tab-bar-clearance) + var(--space-xl));
+  }
+
+  .has-playback .main-content {
+    padding-bottom: calc(12rem + var(--tab-bar-clearance));
+  }
+
+  .has-playback.playback-minimized .main-content {
+    padding-bottom: calc(var(--tab-bar-clearance) + var(--space-xl) + env(safe-area-inset-bottom));
+  }
+}
+
+/* The lens layer: refraction + blur of the real backdrop. On a negative
+   z-index it sits above the surface's own tint and below its content, so
+   text is never distorted. Elements must create a stacking context. */
+.app-header,
+.sidebar,
+.tab-bar,
+.now-playing,
+.player-overlay-dock,
+.sheet,
+.toast {
+  background: var(--chrome-tint) padding-box, var(--chrome-rim) border-box;
+  border: 1px solid transparent;
+  box-shadow: var(--chrome-shadow);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.app-header::before,
+.sidebar::before,
+.tab-bar::before,
+.now-playing::before,
+.player-overlay-dock::before,
+.sheet::before,
+.toast::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  backdrop-filter: var(--glass-refract);
+  -webkit-backdrop-filter: var(--chrome-blur);
+  pointer-events: none;
+}
+
+.sidebar {
+  isolation: isolate;
+  border-radius: 1.75rem;
+}
+
+/* Gloss: the glass passes OVER the surface's own content — icons and labels
+   sit inside the material, softly refracted, with the specular highlight
+   tracking the pointer (--spec-x/--spec-y). Kept off sheets (QR codes must
+   stay crisp) and toasts (short text stays sharp). */
+.app-header::after,
+.sidebar::after,
+.tab-bar::after,
+.now-playing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--chrome-gloss);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 42%, transparent);
+  transition: opacity 200ms var(--ease-out);
+}
+
+/* Tab bar interactions. The bar itself never moves — it stays docked. Press:
+   deeper refraction + specular follows the finger. Scrub: the lens tracks the
+   pointer 1:1 (no transition) and selects the tab under the finger on
+   release. Tap: the bar swells and settles ("liquid" pulse). */
+.tab-bar {
+  touch-action: none;
+  transition: transform 560ms var(--ease-spring), filter 420ms var(--ease-out);
+}
+
+.tab-bar.held,
+.tab-bar.liquid {
+  --glass-refract: url(#micast-lens-strong) blur(30px) saturate(200%);
+}
+
+.tab-bar.held {
+  filter: brightness(1.05);
+}
+
+/* Tap: the bar liquifies — swells, brightens — then settles back. */
+.tab-bar.liquid {
+  transform: scale(1.03);
+  filter: brightness(1.08) saturate(1.1);
+}
+
+.tab-bar .tab-item {
+  position: relative;
+}
+
+/* The traveling lens: a stadium glass pill (same corner language as the bar)
+   centred on the tab item, gliding to a pressed/tapped tab on the spring
+   curve and growing while it travels. Its backdrop-filter refracts the page
+   content scrolling beneath the floating bar as it passes. Position rides a
+   --lens-x custom property so the moving state can add a scale on top. */
+.tab-lens {
+  position: absolute;
+  left: 0;
+  width: 3.4rem;
+  height: calc(100% - 0.75rem);
+  border-radius: var(--radius-full);
+  background: var(--tab-lens);
+  border: 1px solid var(--tab-lens-rim);
+  backdrop-filter: blur(2px) saturate(170%);
+  -webkit-backdrop-filter: blur(2px) saturate(170%);
+  box-shadow: inset 0 1.5px 0 color-mix(in srgb, white 65%, transparent), inset 0 -1px 0 color-mix(in srgb, white 25%, transparent), 0 3px 12px rgba(20, 30, 60, 0.12);
+  transform: translate3d(var(--lens-x, 0px), 0, 0);
+  scale: 1;
+  transition: transform 520ms var(--ease-spring), scale 520ms var(--ease-spring), backdrop-filter 300ms var(--ease-out), -webkit-backdrop-filter 300ms var(--ease-out);
+  pointer-events: none;
+}
+
+/* While the lens travels it swells; it settles back to size on arrival. */
+.tab-lens.traveling {
+  scale: 1.08;
+}
+
+.tab-bar.scrubbing .tab-lens {
+  transition: backdrop-filter 300ms var(--ease-out), -webkit-backdrop-filter 300ms var(--ease-out);
+}
+
+/* The sidebar's vertical lens: a glass pill matching the nav-item radius,
+   gliding up and down to the hovered or active item. */
+.nav-lens {
+  position: absolute;
+  left: 0.375rem;
+  right: 0.375rem;
+  top: 0.5rem;
+  height: 2.75rem;
+  border-radius: var(--radius-md);
+  background: var(--tab-lens);
+  border: 1px solid var(--tab-lens-rim);
+  backdrop-filter: blur(2px) saturate(170%);
+  -webkit-backdrop-filter: blur(2px) saturate(170%);
+  box-shadow: inset 0 1.5px 0 color-mix(in srgb, white 60%, transparent), inset 0 -1px 0 color-mix(in srgb, white 20%, transparent), 0 3px 10px rgba(20, 30, 60, 0.1);
+  scale: 1;
+  transition: scale 220ms var(--ease-out);
+  pointer-events: none;
+}
+
+.nav-lens.traveling {
+  scale: 1.05;
+}
+
+/* Hovering the lens itself (or dragging it) grows it; it stays grown while
+   the pointer is on it and settles back when the pointer leaves. */
+.nav-lens.held {
+  scale: 1.06;
+}
+
+/* The lens carries the selection now — the items keep their text states but
+   drop their own background fills. Positioned so they paint above the lens. */
+.sidebar .nav-item {
+  position: relative;
+}
+
+.sidebar .nav-item:hover,
+.sidebar .nav-item.active {
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar .nav-item.active {
+  color: var(--accent-foreground);
+}
+
+/* A press-and-hold gesture must never start a text selection. */
+.tab-bar.scrubbing,
+.tab-bar.scrubbing * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Header: a floating capsule with a gap all around. */
+.app-header {
+  top: calc(var(--chrome-float) + env(safe-area-inset-top));
+  left: var(--chrome-float);
+  right: var(--chrome-float);
+  border-radius: var(--radius-full);
+  padding-top: 0;
+}
+
+/* Tab bar: the same capsule at the bottom edge. */
+.tab-bar {
+  left: var(--chrome-float);
+  right: var(--chrome-float);
+  bottom: calc(var(--chrome-float) + env(safe-area-inset-bottom));
+  height: var(--tab-bar-height);
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-full);
+}
+
+/* Active tab: a white glass lens disc that refracts the page content
+   scrolling beneath the floating bar — the icon sits inside the material,
+   not on a flat tint. */
+/* Sidebar navigation: rounded-rectangle items in the iOS 26 selection
+   vocabulary; the active one is a tinted lens. */
+.nav-item {
+  border-radius: var(--radius-md);
+}
+
+.nav-item.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 40%, transparent);
+}
+
+/* Cards: regular glass over the wallpaper. */
+.group,
+.device-card,
+.receiver-card,
+.hero-card,
+.diagnostic-details {
+  background: var(--card-bg) padding-box, var(--card-rim) border-box;
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
+  backdrop-filter: var(--card-blur);
+  -webkit-backdrop-filter: var(--card-blur);
+}
+
+.device-card.expanded {
+  box-shadow: var(--card-shadow-raised);
+}
+
+/* Player: the signature surface — the strongest chrome tier. */
+.now-playing {
+  border-radius: var(--card-radius);
+}
+
+.now-playing {
+  background: var(--chrome-tint) padding-box, var(--chrome-rim) border-box;
+  border: 1px solid transparent;
+  box-shadow: var(--chrome-shadow);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* The fnOS collapsed chip has no lens layer of its own, so it keeps the
+   plain blur directly on the element. */
+.is-fnos .header-playback-trigger.visible {
+  background: var(--chrome-tint) padding-box, var(--chrome-rim) border-box;
+  border: 1px solid transparent;
+  box-shadow: var(--chrome-shadow);
+  backdrop-filter: var(--chrome-blur);
+  -webkit-backdrop-filter: var(--chrome-blur);
+}
+
+.now-playing {
+  bottom: calc(var(--tab-bar-clearance) + var(--space-md));
+}
+
+@media (max-width: 1023px) {
+  .now-playing {
+    bottom: calc(var(--tab-bar-clearance) + var(--space-md));
+  }
+
+  .header-playback-trigger.visible {
+    top: calc(var(--chrome-float) + env(safe-area-inset-top) + (var(--header-height) - 2.75rem) / 2);
+  }
+
+  .is-fnos .header-playback-trigger.visible {
+    bottom: calc(var(--tab-bar-clearance) + var(--space-xs));
+  }
+}
+
+/* Fullscreen player: the wallpaper (or the album art standing in for it)
+   shows through, heavily frosted. 62% — above the 52% chrome spec, because
+   cover art is theme-agnostic: a dark album in light theme (or the inverse)
+   at 52% collapses text contrast; 62% restores it while staying frosted. */
+.player-overlay {
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(44px) saturate(170%);
+  -webkit-backdrop-filter: blur(44px) saturate(170%);
+}
+
+/* Sheets and dialogs: glass over a dimmed, blurred backdrop. */
+.sheet {
+  border-radius: 1.75rem 1.75rem 0 0;
+  box-shadow: var(--chrome-shadow);
+}
+
+@media (min-width: 640px) {
+  .sheet {
+    border-radius: var(--radius-xl);
+  }
+}
+
+.confirm-dialog {
+  background: var(--card-bg) padding-box, var(--card-rim) border-box;
+  border: var(--card-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--card-shadow-raised);
+  backdrop-filter: var(--card-blur);
+  -webkit-backdrop-filter: var(--card-blur);
+}
+
+.confirm-dialog::backdrop {
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.toast {
+  bottom: max(calc(var(--tab-bar-clearance) + var(--space-md)), env(safe-area-inset-bottom));
+}
+
+@media (min-width: 1024px) {
+  .toast {
+    bottom: max(var(--space-xl), env(safe-area-inset-bottom));
+  }
+}
+
+/* Controls: the iOS 26 round language. */
+.button {
+  border-radius: var(--radius-full);
+}
+
+.button.primary {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32), 0 6px 18px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.button.primary:hover:not(:disabled) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 8px 24px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.button.secondary {
+  background: var(--fill-secondary);
+}
+
+.segmented-control {
+  background: var(--fill-tertiary);
+  border-radius: var(--radius-md);
+}
+
+/* iOS 26 selection: the active segment is a rounded rectangle with
+   continuous corners, not a full capsule. */
+.segment {
+  border-radius: 0.625rem;
+}
+
+.segment.active {
+  background: var(--elevated);
+  box-shadow: 0 2px 8px rgba(20, 30, 60, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.switch {
+  box-shadow: inset 0 1px 3px rgba(20, 30, 60, 0.1);
+}
+
+.switch::after {
+  background: var(--control-knob);
+  box-shadow: 0 2px 6px rgba(20, 30, 60, 0.24), 0 0 0 0.5px rgba(20, 30, 60, 0.06);
+}
+
+.input {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border: 0.5px solid var(--separator);
+}
+
+.input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 3.5px var(--accent-soft);
+}
+
+.icon-button:hover {
+  background: var(--fill-tertiary);
+}
+
+.status-pill {
+  border: 0.5px solid color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.volume-control input[type="range"]::-webkit-slider-runnable-track,
+.now-playing input[type="range"]::-webkit-slider-runnable-track,
+.player-overlay input[type="range"]::-webkit-slider-runnable-track {
+  height: 0.3125rem;
+}
+
+.volume-control input[type="range"]::-webkit-slider-thumb,
+.now-playing input[type="range"]::-webkit-slider-thumb,
+.player-overlay input[type="range"]::-webkit-slider-thumb {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: -0.5rem;
+  box-shadow: 0 2px 8px rgba(20, 30, 60, 0.3);
+}
+
+.volume-control input[type="range"]::-moz-range-track,
+.now-playing input[type="range"]::-moz-range-track,
+.player-overlay input[type="range"]::-moz-range-track,
+.volume-control input[type="range"]::-moz-range-progress,
+.now-playing input[type="range"]::-moz-range-progress,
+.player-overlay input[type="range"]::-moz-range-progress {
+  height: 0.3125rem;
+}
+
+.volume-control input[type="range"]::-moz-range-thumb,
+.now-playing input[type="range"]::-moz-range-thumb,
+.player-overlay input[type="range"]::-moz-range-thumb {
+  width: 1.25rem;
+  height: 1.25rem;
+  box-shadow: 0 2px 8px rgba(20, 30, 60, 0.3);
+}
+
+/* Accessibility floors. */
+@media (prefers-reduced-motion: reduce) {
+  body::before {
+    animation: none;
+  }
+
+  .tab-bar {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-refract: blur(20px) saturate(150%);
+    --card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.9));
+    --chrome-tint: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.9));
+  }
+
+  :root[data-theme="dark"] {
+    --card-bg: linear-gradient(180deg, rgba(34, 38, 50, 0.96), rgba(28, 31, 42, 0.94));
+    --chrome-tint: linear-gradient(180deg, rgba(34, 38, 50, 0.96), rgba(26, 29, 40, 0.94));
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --card-bg: linear-gradient(180deg, rgba(34, 38, 50, 0.96), rgba(28, 31, 42, 0.94));
+    --chrome-tint: linear-gradient(180deg, rgba(34, 38, 50, 0.96), rgba(26, 29, 40, 0.94));
+  }
+}

@@ -126,14 +126,90 @@ class Store {
   private state: State = { ...initialState };
   private subscribers: Subscriber[] = [];
   private toastTimer: number | null = null;
+  private retiredRuntimeEpochs = new Set<string>();
+  private runtimeEpoch: string | undefined;
+  private runtimeRevision = -1;
+  private runtimeSequences = new Map<string, number>();
+  private readSequences = new Map<string, number>();
+  private accountRevision = 0;
+
+  invalidateAccountReads() { this.accountRevision++; }
+
+  beginRead(channel: string, accountBound = false) {
+    const sequence = (this.readSequences.get(channel) ?? 0) + 1;
+    this.readSequences.set(channel, sequence);
+    const account = this.accountRevision;
+    return () => this.readSequences.get(channel) === sequence &&
+      (!accountBound || account === this.accountRevision);
+  }
+
+  acceptRuntime(runtime: import('./api').RuntimeState | undefined, channel: string, publishEpoch = true): boolean {
+    if (!runtime) return this.runtimeEpoch === undefined;
+    if (this.runtimeEpoch && !runtime.epoch) return false;
+    if (runtime.epoch && this.retiredRuntimeEpochs.has(runtime.epoch)) return false;
+    if (runtime.epoch !== this.runtimeEpoch) {
+      if (this.runtimeEpoch) this.retiredRuntimeEpochs.add(this.runtimeEpoch);
+      this.runtimeEpoch = runtime.epoch;
+      this.runtimeRevision = -1;
+      this.runtimeSequences.clear();
+      if (publishEpoch) {
+        // A topology snapshot can be the first message after a server restart.
+        // Retire projections before observers select an owner from old data.
+        this.set({ status: null, playback: null });
+      }
+    }
+    if (runtime.revision < this.runtimeRevision) return false;
+    const sequence = runtime.sequence ?? runtime.revision;
+    if (sequence < (this.runtimeSequences.get(channel) ?? -1)) return false;
+    this.runtimeRevision = runtime.revision;
+    this.runtimeSequences.set(channel, sequence);
+    return true;
+  }
 
   get(): State {
     return this.state;
   }
 
+  get runtimeGeneration() { return this.runtimeEpoch; }
+
+  updateDeviceTuning(did: string, eq: Device['eq']) {
+    this.set({ devices: this.state.devices.map(device => device.did === did ? { ...device, eq } : device) });
+  }
+
   set(partial: Partial<State>) {
     const prev = this.state;
+    if (partial.xiaomi && (partial.xiaomi.user_id !== prev.xiaomi.user_id ||
+      partial.xiaomi.logged_in !== prev.xiaomi.logged_in)) {
+      this.invalidateAccountReads();
+      // An independent status refresh may observe login before QR confirmation.
+      // Retire the obsolete sheet together with its account-bound callbacks.
+      if (prev.qr.open && partial.qr === undefined) partial = {...partial, qr: {...prev.qr, open:false}};
+    }
+    if (partial.status) {
+      if (!this.acceptRuntime(partial.status.runtime, 'status', false)) {
+        partial = { ...partial, status: prev.status, ...(partial.receivers ? { receivers: prev.receivers } : {}) };
+      } else if (partial.status.runtime?.epoch && prev.playback?.runtime?.epoch &&
+        partial.status.runtime.epoch !== prev.playback.runtime.epoch && partial.playback === undefined) {
+        partial = { ...partial, playback: null };
+      }
+    }
+    if (partial.playback && !this.acceptRuntime(partial.playback.runtime, 'playback', false)) {
+      partial = { ...partial, playback: prev.playback };
+    } else if (partial.playback?.runtime?.epoch && prev.status?.runtime?.epoch &&
+      partial.playback.runtime.epoch !== prev.status.runtime.epoch && partial.status === undefined) {
+      partial = { ...partial, status: null };
+    }
+    const config = partial.fullConfig;
+    if (config && ((config.runtime_epoch && this.retiredRuntimeEpochs.has(config.runtime_epoch)) ||
+      (config.runtime_epoch === prev.fullConfig?.runtime_epoch &&
+        (config.config_revision ?? 0) < (prev.fullConfig?.config_revision ?? 0)))) {
+      partial = { ...partial, fullConfig: prev.fullConfig, ...(partial.audio ? { audio: prev.audio } : {}) };
+    }
     this.state = { ...prev, ...partial };
+    if (this.runtimeEpoch) {
+      if (this.state.status && this.state.status.runtime?.epoch !== this.runtimeEpoch) this.state.status = null;
+      if (this.state.playback && this.state.playback.runtime?.epoch !== this.runtimeEpoch) this.state.playback = null;
+    }
     this.subscribers.forEach((fn) => fn(this.state, prev));
   }
 

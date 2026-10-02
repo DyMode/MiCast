@@ -208,7 +208,6 @@ function entryLabel(entryId: string, state: State): string {
  * the alert lines must stay in this container.
  */
 export function renderStatusOverview(debug: DebugState | null, state: State): string {
-  const raop = Object.values(debug?.diagnostics?.raop || {});
   const teeDepths = teeDepthsOf(debug);
   const streams = Object.values(debug?.diagnostics?.streams || {});
   const audio = debug?.diagnostics?.audio;
@@ -216,200 +215,153 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
   const sessions = inputSessions(debug);
   const flowingClients = sum(streams.filter((item) => item.flowing).map((item) => item.clients));
   const playing = sessions.total > 0 || flowingClients > 0;
-  const transportErrors =
-    sum(raop.map((item) => item.dropped_packets + item.decode_errors)) +
-    sum(streams.map((item) => item.dropped_chunks));
-  const droppedMs = Math.max(0, ...streams.map((item) => item.dropped_ms || 0));
-  const inputBufferMs = Math.max(
-    0,
-    ...raop.map((item) => item.input_buffer_ms || 0),
-    ...streams.map((item) => item.input_buffer_ms || 0),
-  );
-  const chainLatencyMs = Math.max(
-    0,
-    ...streams.filter((item) => item.flowing).map((item) => item.latency?.estimated_ms || 0),
-  );
-  const latencyMs = inputBufferMs + chainLatencyMs;
 
-  // Conclusions, in one place and sorted by severity. Two rules for every
-  // entry: name the domain the evidence actually points at ("the sender's link"
-  // is not "our encoder"), and always carry the numbers it was drawn from, so a
-  // reader can disagree with the verdict.
-  const verdicts: Array<{ severity: "bad" | "warn" | "ok"; text: string }> = [];
+  // --- the 60-second window everything below reasons from -----------------
+  // Cumulative counters stay in the connection detail; a verdict fired from a
+  // lifetime total stays red forever after one bad minute ("playing fine" with
+  // a red chain was the complaint). Kinds: micast/audio_metrics.py.
+  const win: Record<string, { count: number; ms_max: number; by_entry: Record<string, number> }> =
+    audio?.window || {};
+  const slot = (kind: string) => win[kind] || { count: 0, ms_max: 0, by_entry: {} };
+  const linkSkip = slot("link_skip").count;
+  const linkResend = slot("link_resend").count;
+  const linkDecodeErr = slot("link_decode_error").count;
+  const stallWin = slot("source_stall");
+  const gapWin = slot("source_gap");
+  const encStallWin = slot("encoder_stall");
+  const lagWin = slot("lag_skip");
+  const silenceWin = slot("silence_fill");
+  const reconnectWin = slot("client_reconnect");
+  const loopWin = slot("loop_lag");
+  const ourLossBlocks =
+    slot("tee_drop").count + slot("encoder_drop").count + slot("queue_drop").count;
+  const cpuPercent = audio?.runtime?.cpu_percent ?? 0;
 
-  if ((debug?.cloud?.failures ?? 0) >= 3) {
-    verdicts.push({
-      severity: "bad",
-      text: `米家云端连续 ${debug?.cloud?.failures} 次无响应：音箱列表与扫码登录都需要这台设备能访问外网服务器（DNS、防火墙、代理都会影响）`,
-    });
-  }
+  // The supervisor already separates a sender's own pause (quiet/paused) from
+  // trouble it is fighting (degraded/unhealthy) — reuse that instead of
+  // guessing from counters.
+  const entryList = Object.entries(entries);
+  const notRecovered = entryList.filter(([, health]) => health.state === "unhealthy");
+  const recovering = entryList.filter(([, health]) =>
+    health.state === "degraded_our_side" || health.state === "degraded_speaker",
+  );
+  const stalledNow =
+    stallWin.count > 0 &&
+    entryList.some(([, health]) =>
+      health.state === "degraded_our_side" || health.state === "unhealthy",
+    );
+
+  // Window keys are device ids (speaker side) or stream ids (our side);
+  // resolve both to a name, falling back to the raw key.
+  const nameOfKey = (key: string): string => {
+    const viaEntry = entryLabel(key, state);
+    if (viaEntry !== key) return viaEntry;
+    return state.devices.find((device) => device.did === key)?.name || key;
+  };
+  const topEntryName = (s: { by_entry: Record<string, number> }): string => {
+    const ranked = Object.entries(s.by_entry).sort((a, b) => b[1] - a[1]);
+    return ranked.length ? nameOfKey(ranked[0][0]) : "";
+  };
+
+  // Conclusions: fixed sentences, at most one audio line plus one account
+  // line. The first audio match wins, ordered by where the responsibility
+  // lies; a line only fires when the listener can hear it — absorbed jitter
+  // shows nowhere, and "all fine" shows nothing at all.
+  type Verdict = { severity: "bad" | "warn"; text: string };
+  const alerts: Verdict[] = [];
+
+  // Account family: independent of the audio path, so it may sit next to an
+  // audio verdict. Expired login explains the cloud failures too, so only one
+  // of the two ever shows.
   if (state.xiaomi.status === "expired") {
-    verdicts.push({
+    alerts.push({ severity: "bad", text: "小米账号登录已失效。" });
+  } else if ((debug?.cloud?.failures ?? 0) >= 3) {
+    alerts.push({
       severity: "bad",
-      text: "小米登录已失效：音箱与播放配置都在，重新扫码即可恢复",
+      text: `无法连接米家云端（连续 ${debug?.cloud?.failures} 次无响应）。`,
     });
   }
 
-  // Supervisor alerts: an entry that is not simply healthy says why, and what
-  // it already tried.
-  Object.entries(entries)
-    .filter(
-      ([, health]) =>
-        health.state !== "idle" &&
-        health.state !== "healthy" &&
-        health.state !== "quiet" &&
-        health.state !== "paused",
-    )
-    .forEach(([entryId, health]) => {
-      const label = ENTRY_STATE_LABELS[health.state] || health.state;
-      const action = health.last_action ? ENTRY_ACTION_LABELS[health.last_action.replace(/\(rate-limited\)$/, "")] || health.last_action : "";
-      const parts = [
-        health.reason && !label.includes(health.reason) && !health.reason.includes(label) ? health.reason : "",
-        action ? `已${action}${health.last_action_ok === true ? " · 已恢复" : health.escalations > 1 ? `（第 ${health.escalations} 次）` : ""}` : "",
-        health.buffer_override_s ? `缓冲已加大到 ${health.buffer_override_s}s` : "",
-      ].filter(Boolean);
-      verdicts.push({
-        severity: health.state === "unhealthy" ? "bad" : "warn",
-        text: `${entryLabel(entryId, state)}：${[label, ...parts].join(" · ")}`,
-      });
-    });
+  // Anything that erased a whole second of audio upgrades its line to red,
+  // even when the cause itself sits in the yellow tier.
+  const heavyLoss =
+    ourLossBlocks >= 10 ||
+    Math.max(stallWin.ms_max, gapWin.ms_max, lagWin.ms_max, loopWin.ms_max) >= 1000;
+  const audioVerdict = ((): Verdict | null => {
+    // Verdicts describe what the listener hears; with nothing playing there is
+    // nothing to hear, so a trailing-minute leftover must not outlive playback.
+    if (!playing) return null;
+    if (notRecovered.length) {
+      return { severity: "bad", text: `${nameOfKey(notRecovered[0][0])}无法恢复，当前无声音。` };
+    }
+    if (stalledNow) {
+      return { severity: "bad", text: "投送端已停止送音频。" };
+    }
+    if (linkSkip >= 20 || linkResend >= 10) {
+      const parts = [`跳过 ${linkSkip} 个包`];
+      if (linkResend) parts.push(`重传 ${linkResend} 次`);
+      if (linkDecodeErr) parts.push(`解码失败 ${linkDecodeErr} 次`);
+      return {
+        severity: heavyLoss ? "bad" : "warn",
+        text: `投送端到本机之间丢包（${parts.join(" · ")}）。`,
+      };
+    }
+    if (ourLossBlocks > 0 && (loopWin.ms_max >= 200 || cpuPercent >= 80)) {
+      return {
+        severity: heavyLoss ? "bad" : "warn",
+        text: `转码性能不足，音频已丢弃 ${ourLossBlocks} 块（CPU ${Math.round(cpuPercent)}% · 事件循环最长阻塞 ${Math.round(loopWin.ms_max)}ms）。`,
+      };
+    }
+    if ((lagWin.count > 0 || silenceWin.count > 0) && ourLossBlocks === 0) {
+      const name = topEntryName(lagWin.count >= silenceWin.count ? lagWin : silenceWin);
+      const parts: string[] = [];
+      if (lagWin.count) parts.push(`跳至实时 ${lagWin.count} 次`);
+      if (silenceWin.count) parts.push(`补静音 ${silenceWin.count} 次`);
+      return {
+        severity: heavyLoss ? "bad" : "warn",
+        text: `${name || "音箱"}跟不上取流（${parts.join(" · ")}）。`,
+      };
+    }
+    if (recovering.length) {
+      return { severity: "warn", text: `${nameOfKey(recovering[0][0])}发生断音，已自动重建。` };
+    }
+    return null;
+  })();
+  if (audioVerdict) alerts.push(audioVerdict);
 
-  // Which hop is losing audio. The three groups of counters are independent:
-  // RAOP loss is the sender→device link, sink counters are the device→speaker
-  // side, encoder/CPU/loop numbers are this process on this machine. Our own
-  // three stages reporting zero drops is what allows the attribution below.
-  const packetsSkipped = sum(raop.map((item) => item.dropped_packets));
-  const resendRequests = sum(raop.map((item) => item.resend_requests));
-  const decodeErrors = sum(raop.map((item) => item.decode_errors));
-  const sourceGaps = audio ? audio.source.gaps || 0 : 0;
-  const sourceGapMaxMs = audio ? audio.source.gap_max_ms || 0 : 0;
-  const sinkMetrics = Object.values(debug?.diagnostics?.sinks || {}).flatMap((perSink) =>
-    Object.values(perSink || {}),
-  );
-  const sinkLagSkips = sum(sinkMetrics.map((item) => item.lag_drops || 0));
-  const sinkSilenceFills = sum(sinkMetrics.map((item) => item.silence_fills || 0));
-  const reconnects = audio?.client.reconnects || 0;
-  const ourDrops = (audio ? audio.drops.tee + audio.drops.encoder_in + audio.drops.encoder_out : 0) + droppedMs;
-  const encodeP95 = audio?.encode.p95_ms || 0;
-  const encodeMax = audio?.encode.max_ms || 0;
-  const cpuPercent = audio?.runtime?.cpu_percent || 0;
-  const loopLagMax = audio?.runtime?.loop_lag_max_ms || 0;
-
-  if (playing && (packetsSkipped >= 20 || (sourceGapMaxMs >= 150 && resendRequests >= 3))) {
-    verdicts.push({
-      severity: "bad",
-      text: [
-        "投送端（手机/电脑）到这台设备之间链路不稳：",
-        packetsSkipped ? `已跳过 ${packetsSkipped} 个音频包` : "",
-        resendRequests ? `已请求重传 ${resendRequests} 次` : "",
-        sourceGaps ? `音源空隙 ${sourceGaps} 次（最长 ${Math.round(sourceGapMaxMs)}ms）` : "",
-        decodeErrors ? `解码错误 ${decodeErrors}` : "",
-        "。编码、流服务与音箱三段没有丢弃，所以卡顿来自这一段；让发送端靠近路由器、用 5GHz 频段、关闭发送端的省电模式通常最有效。",
-      ]
-        .filter(Boolean)
-        .join(" "),
-    });
-  } else if (playing && sourceGaps >= 5 && packetsSkipped < 5) {
-    verdicts.push({
-      severity: "warn",
-      text: `投送端送来的音频成团/停顿：音源空隙 ${sourceGaps} 次（最长 ${Math.round(sourceGapMaxMs)}ms）但没有丢包。多为发送端应用自身或其省电策略，换播放器或保持前台可改善。`,
-    });
-  }
-
-  if (playing && reconnects > 0) {
-    verdicts.push({
-      severity: "bad",
-      text: `音箱端链路不佳：音箱重连 ${reconnects} 次${sinkLagSkips ? `、被跳至实时 ${sinkLagSkips} 次` : ""}${ourDrops ? `（MiCast 侧同时丢弃了 ${Math.round(ourDrops)}ms，也可能与它有关）` : "（MiCast 侧没有丢弃）"}。优先检查这台音箱的 Wi-Fi 位置与信号。`,
-    });
-  } else if (playing && (sinkLagSkips > 0 || sinkSilenceFills > 0)) {
-    verdicts.push({
-      severity: "warn",
-      text: `音箱跟不上取流：被跳至实时 ${sinkLagSkips} 次、注入静音 ${sinkSilenceFills} 次，但没有重连（MiCast 侧没有丢弃）。更像这台音箱自身的处理能力，换 MP3 试一次可区分。`,
-    });
-  }
-
-  if (playing && (cpuPercent >= 80 || ourDrops > 0) && loopLagMax >= 150) {
-    // Attribution by our own cost, never by the output-interval metric: that
-    // one is gated by the source (see the 输出间隔 tile), so a big number there
-    // is an upstream symptom, not evidence of a slow encoder.
-    verdicts.push({
-      severity: "bad",
-      text: `MiCast 自身余量不足：本进程 CPU ${Math.round(cpuPercent)}%（单核口径）、事件循环最长阻塞 ${Math.round(loopLagMax)}ms${ourDrops > 0 ? `、丢弃 ${Math.round(ourDrops)}ms` : ""}。减少同时取流的目标数，或降码率/采样率。`,
-    });
-  } else if (playing && cpuPercent < 50 && loopLagMax >= 150) {
-    verdicts.push({
-      severity: "warn",
-      text: `事件循环最长被阻塞 ${Math.round(loopLagMax)}ms，而本进程 CPU 只有 ${Math.round(cpuPercent)}%：这台设备上还有别的负载（我们看不到是谁），先排查主机上的其他服务。`,
-    });
-  }
-
-  if (playing && !verdicts.length) {
-    verdicts.push({
-      severity: "ok",
-      text: `未发现明显瓶颈：输出间隔 P95 ${Math.round(encodeP95)}ms · 无丢包 · 无重连 · 事件循环 ${Math.round(audio?.runtime?.loop_lag_ms || 0)}ms。仍觉得卡就导出报告，用运行记录里的时间点对齐听感。`,
-    });
-  }
-
-  const severityRank = { bad: 0, warn: 1, ok: 2 } as const;
-  const orderedVerdicts = [...verdicts].sort(
-    (left, right) => severityRank[left.severity] - severityRank[right.severity],
-  );
-  const VERDICT_LIMIT = 4;
-  const alerts = orderedVerdicts.slice(0, VERDICT_LIMIT);
-  const hiddenVerdicts = orderedVerdicts.length - alerts.length;
-
-  const entryStates = Object.values(entries).map((item) => item.state);
-  const anyQuiet = entryStates.some((state) => state === "quiet" || state === "paused");
-  // The account side belongs on this page too: when Xiaomi's cloud is out of
-  // reach, nothing here can be fixed from MiCast, and it explains the empty
-  // speaker list (and why scanning a fresh QR will not work either).
-  if ((debug?.cloud?.failures ?? 0) >= 3) {
-    alerts.unshift({
-      severity: "bad",
-      text: `米家云端连续 ${debug?.cloud?.failures} 次无响应：音箱列表与扫码登录都需要这台设备能访问外网服务器（DNS、防火墙、代理都会影响）`,
-    });
-  }
-  const ourSideFault = entryStates.some(
-    (state) => state === "degraded_our_side" || state === "unhealthy",
-  );
-  // Red only when OUR side is genuinely failing, per the supervisor's own
-  // verdict. The source counters are lifetime totals: a single silence fill
-  // hours ago (or a sender that simply paused — every pause pads the stream
-  // until it resumes) would otherwise paint the ring red forever.
+  // Chain tiles share the verdicts' window: green = nothing lost in the last
+  // minute, yellow = audio lost but the stream is still moving, red = silence.
+  // Absorbed jitter colours nothing, so a healthy session stays green.
+  const anyBadEntry = notRecovered.length > 0;
   const sourceState: RingState = !playing
     ? "idle"
-    : ourSideFault
+    : stalledNow || anyBadEntry
       ? "bad"
-      : audio && audio.source.stalls > 0
+      : linkSkip > 0 || linkResend > 0 || linkDecodeErr > 0
         ? "warn"
-        : anyQuiet || entryStates.some((state) => state === "bursty")
-          ? "warn"
-          : "ok";
-  // Red only when the encoder stage actually cost audio: a full input queue
-  // drops PCM, a full output queue drops encoded frames. A 200ms+ gap between
-  // encoded frames is cadence jitter (the pacing burst, then one frame period),
-  // not loss — the audio arrives late, not missing — so it stays a warning.
-  const encoderLoss = audio ? audio.drops.encoder_in + audio.drops.encoder_out : 0;
+        : "ok";
   const encodeState: RingState = !playing
     ? "idle"
-    : encoderLoss > 0
+    : ourLossBlocks >= 10 || loopWin.ms_max >= 1000
       ? "bad"
-      : audio && (audio.encode.stalls > 0 || audio.encoder_gap.count > 0)
+      : ourLossBlocks > 0 || loopWin.ms_max >= 200
         ? "warn"
         : "ok";
   const streamState: RingState = !playing
     ? "idle"
-    : droppedMs > 0 || transportErrors > 0
+    : ourLossBlocks >= 10 || linkSkip >= 100
       ? "bad"
-      : flowingClients === 0
+      : linkSkip > 0 || linkResend > 0 || ourLossBlocks > 0
         ? "warn"
-        : "ok";
+        : flowingClients === 0
+          ? "warn"
+          : "ok";
   const speakerState: RingState = !playing
     ? "idle"
-    : Object.values(entries).some((item) => item.state === "unhealthy")
+    : anyBadEntry
       ? "bad"
-      : Object.values(entries).some((item) => item.state === "degraded_speaker")
-        ? "bad"
+      : lagWin.count > 0 || silenceWin.count > 0 || reconnectWin.count > 0 || recovering.length > 0
+        ? "warn"
         : flowingClients === 0
           ? "warn"
           : "ok";
@@ -428,22 +380,26 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
             : "手机 1",
       note: !playing
         ? ""
-        : sessions.airplay2 && sessions.classic
-          ? `手机 ${sessions.classic} · AP2 ${sessions.airplay2}`
-          : "",
+        : [
+            sessions.airplay2 && sessions.classic ? `手机 ${sessions.classic} · AP2 ${sessions.airplay2}` : "",
+            stalledNow ? "已停滞" : "",
+            linkSkip ? `投送丢包 ${linkSkip}` : "",
+          ].filter(Boolean).join(" · "),
     },
     {
       label: "转码",
       icon: "wave",
       state: encodeState,
       value: audio ? `${audio.encode.p95_ms} ms` : debug?.audio_config.format.toUpperCase() || "—",
-      note: audio
-        ? encoderLoss
-          ? `丢失 ${encoderLoss} 块`
-          : audio.encode.stalls
-            ? `${audio.encode.stalls} 次偏大`
-            : "P95 稳定"
-        : "",
+      note: !playing
+        ? ""
+        : ourLossBlocks
+          ? `丢弃 ${ourLossBlocks} 块`
+          : loopWin.ms_max >= 200
+            ? `阻塞 ${Math.round(loopWin.ms_max)}ms`
+            : encStallWin.count
+              ? `${encStallWin.count} 次偏大`
+              : "P95 稳定",
     },
     {
       label: "流",
@@ -456,8 +412,8 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       note: !playing
         ? ""
         : [
-            transportErrors ? `投送丢包 ${transportErrors}` : "",
-            droppedMs ? `丢弃 ${droppedMs}ms` : "",
+            linkSkip ? `投送丢包 ${linkSkip}` : "",
+            ourLossBlocks ? `丢弃 ${ourLossBlocks} 块` : "",
             teeDepths.length ? `缓冲 ${Math.round(Math.max(...teeDepths.map((item) => item.depth_ms)))}ms` : "",
           ].filter(Boolean).join(" · ") || "取流中",
     },
@@ -466,24 +422,31 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       icon: "speaker",
       state: speakerState,
       value: !playing ? "未连接" : flowingClients ? `${flowingClients} 台` : "0 台",
-      note: !playing ? "" : flowingClients ? "正在接收" : "未取流",
+      note: !playing
+        ? ""
+        : flowingClients
+          ? [
+              lagWin.count ? `跳至实时 ${lagWin.count} 次` : "",
+              silenceWin.count ? `补静音 ${silenceWin.count} 次` : "",
+            ].filter(Boolean).join(" · ") || "正在接收"
+          : "未取流",
     },
   ];
 
   const headline =
     debug === null
       ? "正在读取状态…"
-      : debug.bridge_status.status !== "running"
+      : !["running", "degraded"].includes(debug.bridge_status.status)
         ? "服务未运行"
         : !playing
-          ? "空闲"
+          ? debug.bridge_status.status === "degraded" ? "部分功能不可用" : "空闲"
           : speakerState === "ok" && sourceState !== "bad" && encodeState !== "bad"
-            ? "正在播放"
+            ? debug.bridge_status.status === "degraded" ? "正在播放 · 部分功能不可用" : "正在播放"
             : "播放异常";
   const headlineState: RingState =
     debug === null
       ? "idle"
-      : debug.bridge_status.status !== "running" || headline === "播放异常"
+      : !["running", "degraded"].includes(debug.bridge_status.status) || headline === "播放异常"
         ? "bad"
         : !playing
           ? "idle"
@@ -547,7 +510,6 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       <div class="diagnostic-alert ${alert.severity === "bad" ? "is-bad" : ""}">${alert.text}</div>`,
         )
         .join("")}
-      ${hiddenVerdicts > 0 ? `<div class="diagnostic-alert">还有 ${hiddenVerdicts} 条结论，见下方运行记录</div>` : ""}
       ${
         events.length
           ? `<div class="diagnostic-events">${events
@@ -563,6 +525,7 @@ const EVENT_LABELS: Record<string, string> = {
   source_stall: "音源停滞",
   source_gap: "音源空缺",
   lag_skip: "延迟线跳过",
+  silence_fill: "补静音",
   tee_drop: "PCM 分发丢弃",
   encoder_drop: "编码器丢弃",
   client_reconnect: "音箱重连",
@@ -754,31 +717,6 @@ export function renderAudioPath(debug: DebugState | null): string {
 }
 
 
-const ENTRY_STATE_LABELS: Record<string, string> = {
-  idle: "空闲",
-  starting: "启动中",
-  healthy: "正常",
-  quiet: "音源暂停",
-  paused: "已暂停",
-  degraded_our_side: "MiCast 侧异常",
-  degraded_speaker: "音箱侧异常",
-  bursty: "音源成团",
-  unhealthy: "未能恢复",
-};
-
-const ENTRY_ACTION_LABELS: Record<string, string> = {
-  pipeline_rebuild: "重建管道",
-  source_restart: "重启音源",
-  play_reissue: "重发播放",
-  client_kick: "重连音箱",
-};
-
-/**
- * Per-entry health from the audio supervisor: the single authority that
- * decides whether an entry is delivering audio and which recovery step it has
- * reached. Surfaced here so a stuck entry explains itself instead of needing a
- * manual pipeline rebuild.
- */
 /**
  * Which diagnostics sections the user opened.
  *
@@ -849,8 +787,8 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
         </div>
         <div class="diagnostic-step-label diagnostic-tools-label"><strong>单项检查</strong><span>仅在对应问题出现时使用</span></div>
         <div class="diagnostic-utilities">
-          <button class="diagnostic-test" id="btn-debug-codecs" ${selectedTestDeviceIds(state, debug).length ? "" : "disabled"}><strong>测试音频格式</strong><span>依次实测 MP3、FLAC、WAV、PCM（直通）；收到数据才算支持，PCM 只能靠试听</span><em>开始检查</em></button>
-          <button class="diagnostic-test" id="btn-debug-tts" ${selectedTestDeviceIds(state, debug).length !== 1 ? "" : "disabled"}><strong>测试米家语音</strong><span>让单台音箱朗读测试语句，检查账号与指令响应</span><em>开始检查</em></button>
+          <button class="diagnostic-test" id="btn-debug-codecs" ${selectedTestDeviceIds(state, debug).length ? "" : "disabled"}><strong>测试音频格式</strong><span>检查 MP3、FLAC、WAV；PCM 请试听确认</span><em>开始检查</em></button>
+          <button class="diagnostic-test" id="btn-debug-tts" ${selectedTestDeviceIds(state, debug).length !== 1 ? "" : "disabled"}><strong>测试米家语音</strong><span>朗读测试语句，检查账号与响应</span><em>开始检查</em></button>
           <button class="diagnostic-test" id="btn-debug-play-stream" ${selectedStream ? "" : "disabled"}><strong>重新接入当前 AirPlay</strong><span>${selectedStream
             ? selectedSessionActive ? `重新播放“${escapeHtml(selectedStream.name)}”当前收到的内容` : `“${escapeHtml(selectedStream.name)}”当前没有收到音频`
             : "所选音箱没有对应的独立播放入口"}</span><em>尝试接入</em></button>
@@ -884,9 +822,9 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
         <select class="log-filter log-freeze" data-log-freeze aria-label="时间范围">
           ${FREEZE_OPTIONS.map(([value, label]) => `<option value="${value}" ${freezeSelectValue() === value ? "selected" : ""}>${label}</option>`).join("")}
         </select>
-        <button class="button plain log-action" type="button" data-log-copy>复制</button>
+        <div class="runtime-log-actions"><button class="button plain log-action" type="button" data-log-copy>复制</button>
         <button class="button plain log-action" type="button" data-log-clear>清空</button>
-        <button class="button plain log-action log-report-action" type="button" data-log-report title="下载脱敏后的设置、实时状态与所选时段的日志，反馈问题时请附上">导出报告</button>
+        <button class="button plain log-action log-report-action" type="button" data-log-report title="下载脱敏后的设置、实时状态与所选时段的日志，反馈问题时请附上">导出报告</button></div>
       </div>
       <div class="log-freeze-bar" data-log-freeze-bar ${logFreeze ? "" : "hidden"}>${renderFreezeBar(debug)}</div>
       <div class="runtime-log" role="log" aria-label="运行记录" data-runtime-log>
@@ -928,7 +866,8 @@ export function renderStreamSummary(debug: DebugState | null): string {
   const attention = Object.values(debug?.diagnostics?.entries || {}).filter(
     (item) => item.state !== "idle" && item.state !== "healthy",
   ).length;
-  const parts = [active ? `${active} 路播放中` : "无播放", `共 ${streams.length} 路`];
+  const clients = sum(streams.map((item) => item.clients));
+  const parts = [active ? `${active} 路播放中` : "无播放", `${clients} 个取流连接`, `${streams.length} 条音频管道`];
   if (attention) parts.push(`${attention} 项待观察`);
   return parts.join(" · ");
 }
@@ -1064,22 +1003,6 @@ export function bindDebugPanel(container: HTMLElement, showToast: (msg: string) 
     (document.activeElement as HTMLElement | null)?.blur?.();
     rerender?.();
 
-    const restoreTestAnchor = () => {
-      const appRoot = document.getElementById("app");
-      const scroller = document.querySelector<HTMLElement>(".app-body");
-      const anchor = document.querySelector<HTMLElement>(".diagnostic-workbench");
-      if (appRoot?.scrollTop) appRoot.scrollTop = 0;
-      if (!scroller || !anchor) return;
-      const headerBottom = document.querySelector<HTMLElement>(".app-header")?.getBoundingClientRect().bottom ?? 0;
-      const desiredTop = headerBottom + 16;
-      scroller.scrollTop += anchor.getBoundingClientRect().top - desiredTop;
-    };
-
-    restoreTestAnchor();
-    requestAnimationFrame(() => {
-      restoreTestAnchor();
-      requestAnimationFrame(restoreTestAnchor);
-    });
   };
   bindStreamKicks(container, showToast);
   const refreshBtn = container.querySelector<HTMLButtonElement>("[data-refresh-pipelines]");
@@ -1697,13 +1620,41 @@ function openLogScopeDialog(mode: LogScopeMode): Promise<void> {
  * unanchored replace reads as the list endlessly scrolling.
  */
 export function updateRuntimeLog(log: HTMLElement, debug: DebugState | null): void {
-  // Nested desktop logs don't self-scroll (max-height:none) — nothing to pin.
-  if (getComputedStyle(log).overflowY === "visible") {
-    log.innerHTML = renderRuntimeLogRows(debug);
-    return;
-  }
-  const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
-  const pinned = gap <= 48;
-  log.innerHTML = renderRuntimeLogRows(debug);
-  if (pinned) log.scrollTop = log.scrollHeight;
+  const markup = renderRuntimeLogRows(debug);
+  if (log.innerHTML === markup) return;
+  const outer = log.closest<HTMLElement>('.app-body');
+  const outerTop = outer?.scrollTop ?? 0;
+  const previousTop = log.scrollTop;
+  const nested = getComputedStyle(log).overflowY !== 'visible';
+  const pinned = nested && log.scrollHeight - previousTop - log.clientHeight <= 48;
+  log.innerHTML = markup;
+  if (nested) log.scrollTop = pinned ? log.scrollHeight : previousTop;
+  // A growing desktop log must never commandeer the application's scroller.
+  if (outer) outer.scrollTop = outerTop;
+}
+
+
+/** Refresh live projections without remounting diagnostic controls or scrollers. */
+export function updateDebugPanel(container: HTMLElement, state: State): void {
+  const debug = state.debug;
+  if (!debug) return;
+  const scroller = container.closest<HTMLElement>('.app-body');
+  const scrollTop = scroller?.scrollTop ?? 0;
+  const log = container.querySelector<HTMLElement>('[data-runtime-log]');
+  if (log) updateRuntimeLog(log, debug);
+  updateLogChrome(debug);
+  const update = (selector: string, markup: string) => {
+    const node = container.querySelector<HTMLElement>(selector);
+    if (!node || node.innerHTML === markup) return null;
+    node.innerHTML = markup;
+    return node;
+  };
+  update('[data-connection-checks]', renderStatusOverview(debug, state));
+  const streams = update('[data-stream-list]', renderStreamRows(debug, state));
+  if (streams) bindStreamKicks(streams, message => store.showToast(message));
+  const summary = container.querySelector<HTMLElement>('[data-stream-summary]');
+  if (summary) summary.textContent = renderStreamSummary(debug);
+  update('[data-audio-path]', renderAudioPath(debug));
+  update('[data-technical-metrics]', renderTechnicalMetrics(debug));
+  if (scroller) scroller.scrollTop = scrollTop;
 }

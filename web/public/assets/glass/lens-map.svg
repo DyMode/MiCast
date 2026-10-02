@@ -1,0 +1,10 @@
+<!-- Authored vector displacement field. The flat centre protects content;
+     only the rounded perimeter bends the backdrop. No random noise. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="x"><stop stop-color="#280000"/><stop offset=".09" stop-color="#800000"/><stop offset=".91" stop-color="#800000"/><stop offset="1" stop-color="#d80000"/></linearGradient>
+    <linearGradient id="y" x2="0" y2="1"><stop stop-color="#002880"/><stop offset=".09" stop-color="#008080"/><stop offset=".91" stop-color="#008080"/><stop offset="1" stop-color="#00d880"/></linearGradient>
+  </defs>
+  <rect id="vertical" width="512" height="512" fill="url(#y)"/>
+  <rect width="512" height="512" fill="url(#x)" style="mix-blend-mode:screen"/>
+</svg>

@@ -50,19 +50,19 @@ export function renderOnboarding(state: State): string {
   const addableSpeakers = state.devices.filter(
     (item) => !state.fullConfig?.receivers.some((r) => r.target_type === "speaker" && r.target_id === item.did)
   );
-  return `<main class="setup-page">
+  return `<main class="setup-page" data-setup-step="${step}">
     <header class="setup-brand">${logo()}</header>
     <div class="setup-shell">
-      <nav class="setup-steps" aria-label="部署进度">
-        <div class="setup-step ${stepState("access")}"><span>${stepNumber("access")}</span><div><strong>管理访问</strong><small>设置进入 MiCast 的方式</small></div></div>
-        <div class="setup-step ${stepState("xiaomi")}"><span>${stepNumber("xiaomi")}</span><div><strong>连接米家</strong><small>同步并控制你的音箱</small></div></div>
-        <div class="setup-step ${stepState("receivers")}"><span>${stepNumber("receivers")}</span><div><strong>播放入口</strong><small>一键添加全部音箱${stepIndex("receivers") > currentIndex && !xiaomiReady ? ` <em class="step-tag">需先连接米家</em>` : ""}</small></div></div>
-        ${supportsAirPlay2 ? `<div class="setup-step ${stepState("airplay2")}"><span>${stepNumber("airplay2")}</span><div><strong>AirPlay 2 <em class="feature-badge">实验性</em></strong><small>按需开启独立入口${stepIndex("airplay2") > currentIndex && !xiaomiReady ? ` <em class="step-tag">需先连接米家</em>` : ""}</small></div></div>` : ""}
+      <nav class="setup-steps" aria-label="部署进度" style="--setup-step-count:${orderedSteps.length}">
+        <div class="setup-step ${stepState("access")}" ${step === "access" ? `aria-current="step"` : ""}><span>${stepNumber("access")}</span><div><strong>管理访问</strong><small>设置进入 MiCast 的方式</small></div></div>
+        <div class="setup-step ${stepState("xiaomi")}" ${step === "xiaomi" ? `aria-current="step"` : ""}><span>${stepNumber("xiaomi")}</span><div><strong>连接米家</strong><small>同步并控制你的音箱</small></div></div>
+        <div class="setup-step ${stepState("receivers")}" ${step === "receivers" ? `aria-current="step"` : ""}><span>${stepNumber("receivers")}</span><div><strong>播放入口</strong><small>一键添加全部音箱${stepIndex("receivers") > currentIndex && !xiaomiReady ? ` <em class="step-tag">需先连接米家</em>` : ""}</small></div></div>
+        ${supportsAirPlay2 ? `<div class="setup-step ${stepState("airplay2")}" ${step === "airplay2" ? `aria-current="step"` : ""}><span>${stepNumber("airplay2")}</span><div><strong>AirPlay 2 <em class="feature-badge">实验性</em></strong><small>按需开启独立入口${stepIndex("airplay2") > currentIndex && !xiaomiReady ? ` <em class="step-tag">需先连接米家</em>` : ""}</small></div></div>` : ""}
       </nav>
       <section class="setup-content">
         ${step === "access" ? `<div class="setup-copy"><h1>管理访问</h1><p>选择谁可以打开和管理这台 MiCast。</p></div>
           <form class="setup-form" data-setup-access>
-            <label class="choice-row selected"><input type="radio" name="access_mode" value="protected" checked><span><strong>使用账号密码</strong><small>限制谁可以管理 MiCast</small></span></label>
+            <label class="choice-row selected"><input type="radio" name="access_mode" value="protected" checked><span><strong>使用账号密码</strong></span></label>
             <div class="setup-credentials" data-setup-credentials>
               <label>用户名<input class="input" name="username" autocomplete="username" maxlength="64" value="${escapeHtml(state.access?.username || "admin")}" required></label>
               <label>密码<input class="input" name="password" type="password" autocomplete="new-password" minlength="6" required></label>
@@ -90,6 +90,7 @@ export function renderOnboarding(state: State): string {
             <label class="choice-row selected"><input type="radio" name="airplay2_enabled" value="false" checked><span><strong>暂不开启</strong><small>之后可随时在设置中开启</small></span></label>
             <label class="choice-row"><input type="radio" name="airplay2_enabled" value="true"><span><strong>开启 AirPlay 2</strong><small>创建一个独立的 AirPlay 2 播放入口</small></span></label>
             ${targetOptions ? `<div class="setup-credentials setup-target" data-airplay2-target hidden><label>播放目标<select class="input" name="target">${targetOptions}</select></label><p class="caption">AirPlay 2 会将声音播放到这台音箱，之后可在设置中更改。</p></div>` : ""}
+            <p class="form-error" data-setup-error role="alert" hidden></p>
             <div class="setup-actions split">${backButton}<button class="button primary" type="submit">继续</button></div>
           </form>`
           : `<div class="setup-complete"><span>✓</span><h1>已经准备好了</h1><p>之后可随时在设置中调整。</p>
@@ -172,6 +173,7 @@ export function bindOnboarding(container: HTMLElement, handlers: {
     }
   });
   const airplay2Form = container.querySelector<HTMLFormElement>("[data-setup-airplay2]");
+  let airplay2Saving = false;
   const syncAirPlay2 = () => {
     const enabled = airplay2Form?.querySelector<HTMLInputElement>('input[name="airplay2_enabled"]:checked')?.value === "true";
     const target = airplay2Form?.querySelector<HTMLElement>("[data-airplay2-target]");
@@ -181,12 +183,28 @@ export function bindOnboarding(container: HTMLElement, handlers: {
   airplay2Form?.querySelectorAll<HTMLInputElement>('input[name="airplay2_enabled"]').forEach((input) => input.addEventListener("change", syncAirPlay2));
   airplay2Form?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (airplay2Saving) return;
     const data = new FormData(airplay2Form);
     const enabled = data.get("airplay2_enabled") === "true";
     const button = airplay2Form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    const error = airplay2Form.querySelector<HTMLElement>('[data-setup-error]');
+    const controls = Array.from(airplay2Form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('input, select, button'));
+    const disabled = controls.map(control => control.disabled);
+    airplay2Saving = true;
+    controls.forEach(control => control.disabled = true);
+    if (error) error.hidden = true;
     if (button) { button.disabled = true; button.textContent = "正在保存…"; }
     try { await handlers.onAirPlay2(enabled, enabled ? String(data.get("target") || "") || null : null); }
-    catch { if (button) { button.disabled = false; button.textContent = "继续"; } }
+    catch (reason) {
+      if (error) {
+        error.hidden = false;
+        error.textContent = `${reason instanceof Error ? readableError(reason) : "无法保存 AirPlay 2 设置"}。可重试，或选择“暂不开启”后继续。`;
+      }
+    } finally {
+      airplay2Saving = false;
+      controls.forEach((control, index) => control.disabled = disabled[index]);
+      if (button) button.textContent = "继续";
+    }
   });
   container.querySelector<HTMLElement>("[data-setup-enter]")?.addEventListener("click", handlers.onComplete);
   container.querySelectorAll<HTMLElement>("[data-theme]").forEach((el) =>
