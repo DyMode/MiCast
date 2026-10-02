@@ -132,7 +132,8 @@ def run_desktop() -> None:
 
     from micast.main import app  # noqa: PLC0415 — after logging is set up
 
-    config = uvicorn.Config(app, host=settings.host, port=settings.port, log_level="info")
+    config = uvicorn.Config(app, host=settings.host, port=settings.port, log_level="info",
+                            use_colors=False if sys.stdout is None else None)
     server = uvicorn.Server(config)
     from micast.ports import reserve_tcp
 

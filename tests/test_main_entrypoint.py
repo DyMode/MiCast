@@ -32,6 +32,9 @@ def test_tcp_launcher_hands_reserved_socket_to_server(monkeypatch):
     monkeypatch.setattr(entrypoint.settings, "_preferred_port", None)
     monkeypatch.setattr(entrypoint, "reserve_tcp", lambda *_a, **_k: lease)
     monkeypatch.setitem(sys.modules, "micast.main", SimpleNamespace(app=fake_app))
+    # PyInstaller windowed executables do not provide stdout/stderr.
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
 
     class FakeServer:
         def __init__(self, config):

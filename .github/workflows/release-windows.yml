@@ -61,11 +61,13 @@ jobs:
           $env:MICAST_HOST = '127.0.0.1'
           $env:MICAST_PORT = '42300'
           $env:MICAST_DATA_DIR = Join-Path $env:RUNNER_TEMP 'micast-smoke-data'
+          $env:MICAST_LOG_DIR = Join-Path $env:RUNNER_TEMP 'micast-smoke-logs'
           $p = Start-Process .\dist\MiCast.exe -PassThru -WindowStyle Hidden
           $ok = $false
           try {
             for ($i = 0; $i -lt 40; $i++) {
               Start-Sleep 2
+              if ($p.HasExited) { break }
               try {
                 Invoke-RestMethod http://127.0.0.1:42300/health -TimeoutSec 2 | Out-Null
                 $ok = $true; break
@@ -74,7 +76,11 @@ jobs:
           } finally {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           }
-          if (-not $ok) { throw "MiCast.exe did not answer /health within 80s" }
+          if (-not $ok) {
+            Get-ChildItem $env:MICAST_LOG_DIR -Filter '*.log' -ErrorAction SilentlyContinue |
+              ForEach-Object { Get-Content $_.FullName -Tail 100 }
+            throw "MiCast.exe did not answer /health during the startup check"
+          }
 
       - uses: actions/upload-artifact@v7
         with:

@@ -68,7 +68,9 @@ def main() -> None:
     else:
         try:
             uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port,
-                                         log_level="info")).run(sockets=[lease.socket])
+                                         log_level="info",
+                                         use_colors=False if sys.stdout is None else None
+                                         )).run(sockets=[lease.socket])
         finally:
             lease.close()
 
