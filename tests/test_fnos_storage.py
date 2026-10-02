@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from micast.fnos_storage import prepare, save_report
 

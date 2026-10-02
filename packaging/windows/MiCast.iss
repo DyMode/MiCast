@@ -63,6 +63,9 @@ var
   ExitCode: Integer;
 begin
   Result := '';
+  // Close the tray app before checking ports and replacing its executable.
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM MiCast.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ExitCode);
   ExtractTemporaryFile('MiCast.exe');
   if not ExecAsOriginalUser(ExpandConstant('{tmp}\MiCast.exe'), '--preflight',
     ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
@@ -98,17 +101,6 @@ begin
       Result := False;
     end;
   end;
-end;
-
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  ResultCode: Integer;
-begin
-  Result := '';
-  // Fallback for a same-version reinstall: the tray app ignores WM_CLOSE,
-  // so force-close it here or the {app}\MiCast.exe copy fails on the lock.
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM MiCast.exe', '',
-    SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 function InitializeUninstall(): Boolean;

@@ -53,6 +53,15 @@ def test_windows_distribution_definitions_cover_portable_and_installed_modes():
     assert "{userappdata}\\MiCast" in installer
 
 
+def test_windows_install_has_one_preflight_hook():
+    root = Path(__file__).resolve().parents[1]
+    installer = (root / "packaging/windows/MiCast.iss").read_text(encoding="utf-8")
+    hooks = re.findall(r"(?im)^function\s+PrepareToInstall\s*\(", installer)
+    assert len(hooks) == 1, "Inno Setup requires a unique PrepareToInstall hook"
+    hook = installer.split("function PrepareToInstall", 1)[1].split("end;", 1)[0]
+    assert hook.index("taskkill.exe") < hook.index("--preflight")
+
+
 def test_multiarch_docker_build_keeps_web_build_off_qemu():
     root = Path(__file__).resolve().parents[1]
     dockerfile = (root / "docker" / "Dockerfile").read_text(encoding="utf-8")
