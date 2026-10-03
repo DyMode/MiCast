@@ -44,20 +44,20 @@
           }
         },
         "0.3.3": {
-          "changelog": "## 更新内容\r\n\r\n- 统一 AirPlay、AirPlay 2 与 DLNA 的播放会话、目标归属和资源清理，改善接管、暂停恢复、异常重试与多音箱同步。\r\n- 支持实时组合延迟调整，完善独立 EQ、声道处理、音频格式检测及播放状态反馈。\r\n- 优化米家云端异常处理、音箱控制与音量反馈。\r\n- 优化 Liquid Glass、深浅主题、移动端导航与拖动，重新整理普通、缩小及全屏播放器。\r\n- 修复切歌歌词残留，统一接收歌词显示，优化调音控制点、音箱组合与诊断布局。\r\n- 完善端口分配与安装预检、fnOS AirPlay 2 启动与共享日志目录，提供 FnDepot 应用源。\r\n- 整理当前功能、部署与维护文档。\r\n\r\n## 下载\r\n\r\n- Windows：`MiCast-Setup.exe` 安装版或 `MiCast-Portable.zip` 便携版。\r\n- 飞牛 fnOS：按设备架构选择 `micast-x86-0.3.3.fpk` 或 `micast-arm-0.3.3.fpk`。\r\n- Docker：`ghcr.io/dymode/micast:0.3.3`。\r\n\r\nAirPlay 2 为实验性功能，飞牛 ARM 包提供经典 AirPlay 与 DLNA，内置 AirPlay 2 运行时由 x86 包提供。\r\n",
+          "changelog": "## 更新内容\r\n\r\n- 统一 AirPlay、AirPlay 2 与 DLNA 的播放会话、目标归属和资源清理，改善接管、暂停恢复、异常重试与多音箱同步。\r\n- 支持实时组合延迟调整，完善独立 EQ、声道处理、音频格式检测及播放状态反馈。\r\n- 优化米家云端异常处理、音箱控制与音量反馈。\r\n- 优化 Liquid Glass、深浅主题、移动端导航与拖动，重新整理普通、缩小及全屏播放器。\r\n- 修复切歌歌词残留，统一接收歌词显示，优化调音控制点、音箱组合与诊断布局。\r\n- 完善端口分配与安装预检、fnOS AirPlay 2 启动与共享日志目录，提供 FnDepot 应用源。\r\n- 整理当前功能、部署与维护文档。\n- 修复链路节点停止漂浮，优化节点间距、主路径与光效。\n- 首次安装与重装引导默认明亮模式，优化引导布局并适配无滚动显示。\n- 移动端最小播放器改为轻薄圆角方形，适配有封面和无封面状态，支持跟手拖动与边缘吸附。\r\n\r\n## 下载\r\n\r\n- Windows：`MiCast-Setup.exe` 安装版或 `MiCast-Portable.zip` 便携版。\r\n- 飞牛 fnOS：按设备架构选择 `micast-x86-0.3.3.fpk` 或 `micast-arm-0.3.3.fpk`。\r\n- Docker：`ghcr.io/dymode/micast:0.3.3`。\r\n\r\nAirPlay 2 为实验性功能，飞牛 ARM 包提供经典 AirPlay 与 DLNA，内置 AirPlay 2 运行时由 x86 包提供。\r\n\r\n\r\n**Full Changelog**: https://github.com/DyMode/MiCast/compare/v0.3.2...v0.3.3\r\n\r\n**Full Changelog**: https://github.com/DyMode/MiCast/compare/v0.3.2...v0.3.3\r\n",
           "updated_at": "2026-10-02T15:30:19.0000000+00:00",
           "os_min_version": "1.2.0602",
           "run_as": "root",
           "packages": {
             "x86": {
               "download_url": "https://github.com/DyMode/MiCast/releases/download/v0.3.3/micast-x86-0.3.3.fpk",
-              "sha256": "4bce0f8b9da83e28cfad8083b09521797e1940689a4a748c63f8bbae8855aca0",
-              "size": 120655907
+              "sha256": "f6cc7616fb7db2540902285a80ba69702623e75673a8e6e41a522a8e3c10fd3c",
+              "size": 120618149
             },
             "arm": {
               "download_url": "https://github.com/DyMode/MiCast/releases/download/v0.3.3/micast-arm-0.3.3.fpk",
-              "sha256": "bcfc49d6987e7f2c2609e98f83a3aa33c945f2db78126aa3288eaec00bcfb228",
-              "size": 77829470
+              "sha256": "b9d1bc31001a1c1ef9f729f80939205cb9596977d1907231b3e4d88f89386121",
+              "size": 77776552
             }
           }
         }
