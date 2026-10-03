@@ -14,6 +14,7 @@ import { targetOwner, volumeTargets } from '../selectors';
 // True while the user is holding any slider in the bar; playback pushes must
 // not re-render the bar (and reset a slider to the server value) mid-drag.
 let dragging = false;
+let miniPosition: { x: number; y: number } | null = null;
 export function isPlaybackBarInteracting(): boolean {
   return dragging;
 }
@@ -270,8 +271,56 @@ export function bindPlaybackBar(container: HTMLElement) {
       setPlayerView("minimized");
     }, 180);
   });
+  const mini = container.querySelector<HTMLButtonElement>(".header-playback-trigger");
+  let suppressRestore = false;
+  if (mini && window.matchMedia('(max-width: 1023px)').matches) {
+    const bounds = () => {
+      const nav = document.querySelector('.tab-bar')?.getBoundingClientRect();
+      return { right: Math.max(12, innerWidth - 68), bottom: Math.max(12, (nav?.top ?? innerHeight) - 68) };
+    };
+    const place = (x: number, y: number) => {
+      const limit = bounds();
+      miniPosition = { x: Math.max(12, Math.min(limit.right, x)), y: Math.max(12, Math.min(limit.bottom, y)) };
+      mini.style.left = `${miniPosition.x}px`;
+      mini.style.top = `${miniPosition.y}px`;
+      mini.style.right = 'auto'; mini.style.bottom = 'auto';
+    };
+    if (miniPosition) place(miniPosition.x, miniPosition.y);
+    let gesture: { id: number; x: number; y: number; left: number; top: number; moved: boolean } | null = null;
+    mini.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || gesture) return;
+      const rect = mini.getBoundingClientRect();
+      gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, moved: false };
+      suppressRestore = false;
+      mini.setPointerCapture(e.pointerId);
+    });
+    mini.addEventListener('pointermove', e => {
+      if (!gesture || gesture.id !== e.pointerId) return;
+      const dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
+      if (!gesture.moved && Math.hypot(dx, dy) < 6) return;
+      gesture.moved = true; dragging = true;
+      mini.style.transform = "none";
+      place(gesture.left + dx, gesture.top + dy);
+    });
+    const release = () => {
+      if (!gesture) return;
+      suppressRestore = gesture.moved;
+      if (gesture.moved && miniPosition) {
+        const left = miniPosition.x + 28 < innerWidth / 2;
+        place(left ? 12 : bounds().right, miniPosition.y);
+        mini.style.left = left ? '12px' : 'calc(100vw - 68px)';
+        mini.style.top = `clamp(12px, ${miniPosition.y}px, calc(100dvh - var(--tab-bar-clearance) - 68px))`;
+      }
+      mini.style.transform = "";
+      gesture = null; dragging = false;
+    };
+    mini.addEventListener('pointerup', release);
+    mini.addEventListener('pointercancel', release);
+    mini.addEventListener('lostpointercapture', release);
+  }
   container.querySelectorAll("[data-playback-restore]").forEach((el) => {
     el.addEventListener("click", () => {
+      if (el === mini && suppressRestore) { suppressRestore = false; return; }
       restoring = true;
       setPlayerView("normal");
       // dispatchEvent renders synchronously; the flag only matters for that pass.

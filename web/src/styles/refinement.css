@@ -72,11 +72,12 @@
 .tuning-toolbar { gap: .65rem; }
 .tuning-target { min-width: 0; }
 .tuning-target select { min-width: 0; max-width: 100%; }
-.topology-node-list { position: absolute; left: 1rem; bottom: 2.75rem; z-index: 5; max-width: calc(100% - 2rem); color: #e2e8f0; background: #0b1825; border: 1px solid #2d4255; border-radius: .875rem; font-size: .8125rem; }
+.topology-node-list { position: absolute; left: 1rem; bottom: 2.75rem; z-index: 5; max-width: calc(100% - 2rem); color: #e2e8f0; background: rgba(17, 31, 44, .94); backdrop-filter: blur(12px); border: 1px solid rgba(148, 163, 184, .18); border-radius: .875rem; font-size: .8125rem; }
 .topology-node-list summary { padding: .65rem .875rem; cursor: pointer; }
 .topology-node-list [data-topology-nodes] { max-height: 12rem; overflow-y: auto; }
 .topology-node-list button { display: flex; justify-content: space-between; gap: 1rem; width: 100%; min-height: 44px; padding: .65rem .875rem; border: 0; background: transparent; color: inherit; cursor: pointer; }
-.topology-node-list button:hover { background: #172b3d; }
+.topology-node-list button:hover { background: rgba(56, 189, 248, .08); }
+.topology-node-list button + button { border-top: 1px solid rgba(148, 163, 184, .08); }
 .topology-node-list button span:first-child { overflow-wrap: anywhere; text-align: left; }
 .topology-node-list button span:last-child { white-space: nowrap; color: #94a3b8; }
 .boot-content { text-align: center; max-width: 30rem; padding: 2rem; }

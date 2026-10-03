@@ -929,6 +929,11 @@ async function init() {
 
   try {
     const access = await api.getAccessStatus();
+    // A fresh installation must not inherit an old browser theme preference.
+    if (!access.access_configured && !access.setup_complete) {
+      store.setUi({ theme: "light" });
+      applyTheme("light");
+    }
     store.set({ access, onboardingStep: access.access_configured ? "xiaomi" : "access" });
     render(store.get());
     if (!access.setup_complete || (access.auth_enabled && !access.authenticated)) {

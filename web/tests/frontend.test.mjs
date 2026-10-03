@@ -944,3 +944,70 @@ test('failed connection retry remains recoverable without an uncaught rejection'
   assert.equal(await page.locator('[data-connection-notice]').isVisible(),true);
   assert.equal(await page.evaluate(()=>window.__retryUnhandled),0);
 });
+
+for (const [width, reducedMotion] of [[1440, 'no-preference'], [390, 'no-preference'], [390, 'reduce']]) {
+  test(`topology keeps a gentle breeze after settling ${width} ${reducedMotion}`, async t => {
+    const {page} = await open(t, {viewport:{width,height:900}, reducedMotion});
+    await page.clock.install();
+    await navigate(page, 'topology');
+    await page.evaluate(() => {
+      window.__topologyPaint = {};
+      const arc = CanvasRenderingContext2D.prototype.arc;
+      CanvasRenderingContext2D.prototype.arc = function(x,y,r,...rest) {
+        if (this.canvas.matches('[data-topology-canvas]') && r > 4 && r < 6) {
+          window.__topologyPaint[`${this.fillStyle}:${r.toFixed(2)}`] = {x,y};
+        }
+        return arc.call(this,x,y,r,...rest);
+      };
+    });
+    await page.clock.runFor(25000);
+    const read = () => page.evaluate(() => structuredClone(window.__topologyPaint));
+    let previous = await read();
+    assert.equal(Object.keys(previous).length,3);
+    for (let interval=0; interval<3; interval++) {
+      await page.clock.runFor(5000);
+      const next = await read();
+      const distances = Object.keys(next).map(key => Math.hypot(next[key].x-previous[key].x,next[key].y-previous[key].y));
+      if (reducedMotion === 'reduce') assert.ok(Math.max(...distances)<.2,'reduced motion keeps settled nodes still');
+      else assert.ok(Math.max(...distances)>1,'nodes continue moving after the initial layout settles');
+      previous = next;
+    }
+    const beforeUpdate = await read();
+    await page.evaluate(async () => {
+      const {topology} = await import('/app/micast/tests/fixtures.mjs');
+      window.dispatchEvent(new CustomEvent('micast:topology',{detail:{...topology,ts:Date.now()/1000}}));
+    });
+    await page.clock.runFor(50);
+    const afterUpdate = await read();
+    assert.ok(Math.hypot(afterUpdate['#34d399:4.34'].x-beforeUpdate['#34d399:4.34'].x,afterUpdate['#34d399:4.34'].y-beforeUpdate['#34d399:4.34'].y)<1,'refresh does not restart the breeze');
+    const point = afterUpdate['#34d399:4.34'];
+    await page.locator('[data-topology-canvas]').click({position:point});
+    await page.locator('.topology-detail-head').getByText('客厅',{exact:true}).waitFor();
+  });
+}
+
+for (const viewport of [{width:1440,height:900},{width:390,height:844},{width:390,height:568},{width:844,height:390}]) {
+ test(`setup fits every step ${viewport.width}x${viewport.height}`,async t=>{
+  const {page}=await open(t,{viewport});
+  for(const step of ['access','xiaomi','receivers','airplay2','complete']){
+   await page.evaluate(async step=>{const {store}=await import('/app/micast/src/state.ts');store.set({access:{...store.get().access,setup_complete:false,access_configured:step!=='access'},onboardingStep:step,fullConfig:{...store.get().fullConfig,airplay2_available:true},xiaomi:{logged_in:false}});window.dispatchEvent(new Event('micast:request-render'));},step);
+   if(step==='airplay2') await page.locator('input[name="airplay2_enabled"][value="true"]').check();
+   const d=await page.locator('.setup-page').evaluate(e=>({height:e.clientHeight,scroll:e.scrollHeight,bottom:e.querySelector('.setup-content').getBoundingClientRect().bottom}));
+   assert.ok(d.scroll<=d.height+1&&d.bottom<=viewport.height+1,`${step} overflow ${JSON.stringify(d)}`);
+  }
+ });
+}
+test('fresh setup ignores stale dark preference',async t=>{
+ const context=await browser.newContext({colorScheme:'dark'});t.after(()=>context.close());const page=await context.newPage();
+ await page.addInitScript(()=>localStorage.setItem('micast-ui',JSON.stringify({theme:'dark'})));
+ await installFixtures(page,{'/api/access/status':async()=>({access_configured:false,setup_complete:false,auth_enabled:false,authenticated:true})});
+ await page.goto(url);await page.waitForSelector('[data-setup-access]');assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+});
+test('mobile mini centers cover and fallback and separates drag from click',async t=>{
+ const {page}=await open(t);
+ for(const cover of [null,{url:'assets/brands/mijia-app.png',rev:'test'}]){
+ await page.evaluate(async cover=>{const {store}=await import('/app/micast/src/state.ts');store.set({status:{...store.get().status,now_playing:{r1:{title:'测试',cover}}}});window.dispatchEvent(new Event('micast:request-render'));},cover);
+ const g=await page.locator('.header-playback-trigger.visible').evaluate(e=>{const r=e.getBoundingClientRect(),c=(e.querySelector('img')??e.querySelector('svg')).getBoundingClientRect();return {w:r.width,h:r.height,dx:c.x+c.width/2-r.x-r.width/2,dy:c.y+c.height/2-r.y-r.height/2};});assert.equal(g.w,56);assert.equal(g.h,56);assert.ok(Math.abs(g.dx)<1&&Math.abs(g.dy)<1,JSON.stringify(g));
+ }
+ const mini=page.locator('.header-playback-trigger.visible'),r=await mini.boundingBox();await page.mouse.move(r.x+28,r.y+28);await page.mouse.down();await page.mouse.move(45,r.y-40,{steps:8});await page.mouse.up();await page.waitForTimeout(250);assert.equal(await mini.count(),1);assert.equal(Math.round((await mini.boundingBox()).x),12);await mini.click();assert.equal(await page.locator('.now-playing:not(.is-minimized)').count(),1);
+});

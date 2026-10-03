@@ -122,3 +122,26 @@
 
 .setup-form .form-error { margin: 0; }
 @media (max-height: 450px) { .setup-form .form-error { padding: .375rem .625rem; } }
+
+/* One composed setup surface, centered within the available viewport. */
+.setup-page { overflow: hidden; }
+.setup-shell { flex: 1; min-height: 0; height: auto; align-content: center; }
+@media (min-width: 640px) {
+ .setup-shell { grid-template-columns: 11rem minmax(0, 36rem); max-width: 50rem; gap: 1.25rem; }
+ .setup-steps { background: transparent; border: 0; box-shadow: none; padding: .75rem 0; border-radius: 0; }
+ .setup-steps::before { display: none; }
+ .setup-step { align-items: center; min-height: 4.5rem; }
+ .setup-step small { display: none; }
+ .setup-content { padding: clamp(1.25rem,3vh,2rem); }
+}
+@media (max-width: 639px) {
+ .setup-shell { align-content: center; gap: .75rem; }
+}
+@media (max-height: 740px) {
+ .setup-content { padding: .75rem; }
+ .setup-step { min-height: 0; }
+}
+@media (max-height: 450px) and (min-width: 640px) {
+ .setup-shell { grid-template-columns: 9rem minmax(0,1fr); max-width: 60rem; gap: .75rem; }
+ .setup-steps { padding: 0; }
+}

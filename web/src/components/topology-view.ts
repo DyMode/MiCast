@@ -217,8 +217,6 @@ export function bindTopologyView(container: HTMLElement): () => void {
 
   // ---------- layout ----------
 
-  // ---------- layout ----------
-
   /** Dynamic anchor (fractions of canvas): a sparse, idle graph centers
    * itself; once a live chain exists, nodes fall into left-to-right lanes
    * with siblings spread vertically. */
@@ -263,11 +261,12 @@ export function bindTopologyView(container: HTMLElement): () => void {
     const mates = visible.filter((n) => n.data.kind === kind).sort(byId);
     const i = mates.indexOf(node);
     const n = mates.length;
-    const y = n <= 1 ? 0.5 : 0.16 + (0.68 * i) / (n - 1);
+    const compactY: Record<string, number> = { source: .38, engine: .55, pipeline: .39, stream: .56, speaker: .4 };
+    const y = n <= 1 ? (compact ? compactY[kind] ?? .5 : .5) : .22 + (.5 * i) / (n - 1);
     return [lanes[kind] ?? 0.5, y];
   }
 
-  function tickLayout(now: number) {
+  function tickLayout() {
     const w = canvas.clientWidth || 1;
     const h = canvas.clientHeight || 1;
     const compact = w < 640;
@@ -275,10 +274,9 @@ export function bindTopologyView(container: HTMLElement): () => void {
     for (const a of all) {
       // spring toward the dynamic anchor (weak, keeps lanes loosely ordered)
       const [ax, ay] = anchorFor(a, all);
-      const anchorStrength = compact ? 0.006 : 0.002;
-      const drift = compact || motionQuery.matches ? 0 : 6;
-      a.vx += (ax * w + Math.sin(now / 2600 + hashCode(a.data.id)) * drift - a.x) * anchorStrength;
-      a.vy += (ay * h + Math.cos(now / 3100 + hashCode(a.data.id)) * drift - a.y) * anchorStrength;
+      const anchorStrength = compact ? 0.009 : 0.006;
+      a.vx += (ax * w - a.x) * anchorStrength;
+      a.vy += (ay * h - a.y) * anchorStrength;
       // pairwise repulsion
       for (const b of all) {
         if (a === b) continue;
@@ -326,21 +324,41 @@ export function bindTopologyView(container: HTMLElement): () => void {
 
   let lastLayout = 0;
   let lastFrame = 0;
+  let windTime = 0;
+  const displayNodes = new Map<string, SimNode>();
   let backdropCache: { w: number; h: number; dpr: number; canvas: HTMLCanvasElement } | null = null;
 
   function draw(now: number) {
     if (destroyed) return;
     raf = requestAnimationFrame(draw);
     if (document.hidden || now - lastFrame < 33) return;
+    // Advance only while visible: returning from the background must not jump.
+    const elapsed = lastFrame ? Math.min(now - lastFrame, 100) : 0;
     lastFrame = now;
+    if (!motionQuery.matches) windTime += elapsed;
     // Simulation is fixed-rate; visual flow follows the display refresh rate.
-    if (!motionQuery.matches && now - lastLayout >= 33) {
-      tickLayout(now);
+    if (now - lastLayout >= 33) {
+      tickLayout();
       lastLayout = now;
     }
 
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
+    // Ambient movement is independent of the settling layout. Edges, labels
+    // and hit targets share these positions, including after status updates.
+    displayNodes.clear();
+    const compact = w < 640;
+    const amplitude = motionQuery.matches ? 0 : 1 - Math.exp(-windTime / 1800);
+    for (const node of nodes.values()) {
+      const phase = seeded(hashCode(node.data.id)) * Math.PI * 2;
+      const breezeX = Math.sin(windTime / 9000) * .55 + Math.sin(windTime / 6200 + phase) * .45;
+      const breezeY = Math.sin(windTime / 11000) * .55 + Math.sin(windTime / 8100 + phase + 1) * .45;
+      displayNodes.set(node.data.id, {
+        ...node,
+        x: clamp(node.x + breezeX * amplitude * (compact ? 8 : 16), 40, w - 40),
+        y: clamp(node.y + breezeY * amplitude * (compact ? 12 : 22), 44, h - 60),
+      });
+    }
     // Bound raster cost independently of desktop resolution and display scaling.
     const dpr = Math.min(window.devicePixelRatio || 1, Math.sqrt(2_000_000 / Math.max(1, w * h)));
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
@@ -356,7 +374,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     for (const edge of edges) {
       if (isEdgeVisible(edge)) drawEdge(edge, now, highlight);
     }
-    for (const node of nodes.values()) {
+    for (const node of displayNodes.values()) {
       if (isNodeVisible(node)) drawNode(node, now, highlight);
     }
   }
@@ -368,7 +386,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
       off.height = h * dpr;
       const octx = off.getContext("2d")!;
       octx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      octx.strokeStyle = "rgba(56, 189, 248, 0.05)";
+      octx.strokeStyle = "rgba(56, 189, 248, 0.028)";
       octx.lineWidth = 1;
       const step = 56;
       octx.beginPath();
@@ -381,7 +399,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
         octx.lineTo(w, y);
       }
       octx.stroke();
-      octx.fillStyle = "rgba(56, 189, 248, 0.08)";
+      octx.fillStyle = "rgba(56, 189, 248, 0.045)";
       for (let x = step; x < w; x += step) {
         for (let y = step; y < h; y += step) {
           octx.fillRect(x - 0.5, y - 0.5, 1.5, 1.5);
@@ -417,8 +435,8 @@ export function bindTopologyView(container: HTMLElement): () => void {
   }
 
   function drawEdge(edge: RenderEdge, now: number, highlight: Set<string> | null) {
-    const a = nodes.get(edge.data.from);
-    const b = nodes.get(edge.data.to);
+    const a = displayNodes.get(edge.data.from);
+    const b = displayNodes.get(edge.data.to);
     if (!a || !b) return;
     const key = edgeKey(edge.data);
     const c = curve(a, b, key);
@@ -435,7 +453,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     ctx.save();
     ctx.globalAlpha = dimmed ? 0.08 : control ? 0.35 : active || stalled ? 0.8 : 0.3;
     ctx.strokeStyle = color;
-    ctx.lineWidth = control ? 1 : active ? 1.6 : 1.2;
+    ctx.lineWidth = control ? 1 : active ? 2 : 1.2;
     if (control || stalled) ctx.setLineDash([4, 6]);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
@@ -447,11 +465,11 @@ export function bindTopologyView(container: HTMLElement): () => void {
       // Particles flow in the data direction: "pull" edges stream toward the
       // speaker, which is also the edge's `to` node in our model.
       const speed = (control ? 0.00012 : 0.00045) * (motionQuery.matches ? .4 : 1);
-      const size = control ? 4 : 8;
+      const size = control ? 4 : 6;
       for (const p of edge.particles) {
         const t = (p + now * speed) % 1;
         const pos = quadPoint(a, c, b, t);
-        ctx.globalAlpha = (dimmed ? 0.08 : 0.9) * (0.4 + 0.6 * Math.sin(t * Math.PI));
+        ctx.globalAlpha = (control ? 0.35 : 0.75) * (0.4 + 0.6 * Math.sin(t * Math.PI));
         if (control) {
           ctx.fillStyle = color;
           ctx.beginPath();
@@ -521,16 +539,16 @@ export function bindTopologyView(container: HTMLElement): () => void {
     if (active) {
       // breathing halo, drawn from the cached glow sprite (shadowBlur is far
       // too slow inside an RDP session)
-      const pulse = 1 + 0.25 * Math.sin(now / 600 + hashCode(data.id));
-      const haloSize = radius * 2.6 * pulse;
-      ctx.globalAlpha = (dimmed ? 0.15 : 0.5) * (pulse - 0.55);
+      const pulse = 1 + 0.12 * Math.sin(now / 2400 + hashCode(data.id));
+      const haloSize = radius * 2.2 * pulse;
+      ctx.globalAlpha = (dimmed ? 0.1 : 0.35) * (pulse - 0.55);
       ctx.drawImage(glowSprite(color), node.x - haloSize, node.y - haloSize, haloSize * 2, haloSize * 2);
       ctx.globalAlpha = dimmed ? 0.15 : 1;
     }
 
     // classic color dot: filled glow sprite + solid core + dark center
     ctx.globalAlpha = dimmed ? 0.15 : 0.9;
-    const glowSize = radius * 2.2;
+    const glowSize = radius * 1.8;
     ctx.drawImage(glowSprite(color), node.x - glowSize, node.y - glowSize, glowSize * 2, glowSize * 2);
     ctx.globalAlpha = dimmed ? 0.15 : 1;
     ctx.fillStyle = color;
@@ -550,7 +568,15 @@ export function bindTopologyView(container: HTMLElement): () => void {
       : backdropIdle
         ? "rgba(148, 163, 184, 0.55)"
         : "rgba(226, 232, 240, 0.92)";
-    ctx.fillText(nodeLabel(data), node.x, node.y + radius + 15);
+    // Keep names readable without running beyond the canvas or adjacent lanes.
+    const labelWidth = Math.min(canvas.clientWidth < 640 ? 100 : 180, canvas.clientWidth - 24);
+    let label = nodeLabel(data);
+    if (ctx.measureText(label).width > labelWidth) {
+      while (label.length > 1 && ctx.measureText(label + "…").width > labelWidth) label = label.slice(0, -1);
+      label += "…";
+    }
+    const labelX = clamp(node.x, labelWidth / 2 + 12, canvas.clientWidth - labelWidth / 2 - 12);
+    ctx.fillText(label, labelX, node.y + radius + 17);
     if (data.kind === "speaker" && data.delay_ms) {
       ctx.font = "11px ui-monospace, monospace";
       ctx.fillStyle = "rgba(148, 163, 184, 0.8)";
@@ -599,15 +625,15 @@ export function bindTopologyView(container: HTMLElement): () => void {
   }
 
   function hitTest(x: number, y: number): { kind: "node" | "edge"; id: string } | null {
-    for (const node of nodes.values()) {
+    for (const node of displayNodes.values()) {
       if (!isNodeVisible(node)) continue;
       if (Math.hypot(node.x - x, node.y - y) < 24) return { kind: "node", id: node.data.id };
     }
     let best: { key: string; dist: number } | null = null;
     for (const edge of edges) {
       if (!isEdgeVisible(edge)) continue;
-      const a = nodes.get(edge.data.from);
-      const b = nodes.get(edge.data.to);
+      const a = displayNodes.get(edge.data.from);
+      const b = displayNodes.get(edge.data.to);
       if (!a || !b) continue;
       const c = curve(a, b, edgeKey(edge.data));
       for (let i = 0; i <= 16; i++) {
