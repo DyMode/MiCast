@@ -15,12 +15,33 @@ from micast.config_store import write_bytes
 logger = logging.getLogger(__name__)
 
 
+def _real_macs() -> set[str]:
+    """MAC addresses of actual interfaces; used to spot getnode()'s random fallback."""
+    macs: set[str] = set()
+    net = Path("/sys/class/net")
+    if net.is_dir():
+        for iface in net.iterdir():
+            try:
+                value = (iface / "address").read_text().strip().lower()
+            except OSError:
+                continue
+            if value and value != "00:00:00:00:00:00":
+                macs.add(value)
+    return macs
+
+
 def _get_machine_id() -> str:
     """Return a stable machine identifier for key derivation."""
-    # Try MAC address first (cross-platform)
+    # Try MAC address first (cross-platform), but only if it belongs to a real
+    # interface: getnode() fabricates a random per-process address when no NIC
+    # is readable, which would change the key (and break stored tokens) on
+    # every service restart.
     node = uuid.getnode()
-    if node:
-        return f"micast-{node:012x}"
+    mac = f"{node:012x}"
+    formatted = ":".join(mac[i : i + 2] for i in range(0, 12, 2))
+    if node and (formatted in _real_macs() or (platform.system() == "Windows"
+                                               and not node & (1 << 40))):
+        return f"micast-{mac}"
 
     system = platform.system()
     try:

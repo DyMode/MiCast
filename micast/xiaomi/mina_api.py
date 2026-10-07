@@ -5,7 +5,7 @@ import logging
 import re
 import time
 
-from miservice import MiNAService
+from micast.xiaomi.cloud import MUSIC_MODELS, MiNAService
 
 logger = logging.getLogger(__name__)
 COMMAND_TIMEOUT_SECONDS = 15.0
@@ -39,11 +39,12 @@ class MinaAPI:
         self.what = what or (f"音箱 {device_id}" if device_id else "小米云端")
         # Optional concurrency slot (see CLOUD_CONCURRENCY).
         self._gate = gate
+        self._plain_first = False
 
     async def _call(self, operation, what: str | None = None):
         """Bound third-party calls so one device cannot hold its lock forever.
 
-        miservice-fork runs on a caller-owned aiohttp ClientSession, and
+        The cloud service runs on an auth-owned aiohttp ClientSession, and
         aiohttp absorbs CancelledError by releasing the connection back to
         its pool, so wait_for's timeout cancellation is connection-safe and
         never poisons the shared session.
@@ -71,6 +72,13 @@ class MinaAPI:
 
     async def play_url(self, url: str) -> dict:
         logger.info("Playing URL on %s: %s", self.device_id, url)
+        if isinstance(self.service, MiNAService):
+            operation = (
+                self.service.play_by_music_url(self.device_id, url)
+                if self._plain_first
+                else self.service.play_plain_url(self.device_id, url)
+            )
+            return await self._call(operation)
         return await self._call(self.service.play_by_url(self.device_id, url))
 
     async def play_music_url(self, url: str, audio_id: str | None = None) -> dict:
@@ -80,6 +88,11 @@ class MinaAPI:
         show that song's cover and scrolling lyrics while playing our stream.
         """
         logger.info("Playing music URL on %s: %s", self.device_id, url)
+        if isinstance(self.service, MiNAService):
+            model = self.service.device2hardware.get(self.device_id)
+            self._plain_first = bool(model and model not in MUSIC_MODELS and not audio_id)
+            if self._plain_first:
+                return await self._call(self.service.play_plain_url(self.device_id, url))
         kwargs = {"audio_id": audio_id} if audio_id else {}
         return await self._call(self.service.play_by_music_url(self.device_id, url, **kwargs))
 

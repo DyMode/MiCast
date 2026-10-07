@@ -256,3 +256,38 @@ def test_one_line_per_outage_and_one_for_the_recovery(caplog):
     assert sum("小米云端连续" in message for message in messages) == 1
     assert any("小米云端已恢复" in message for message in messages)
     assert auth.cloud_health()["failures"] == 0  # the counter that drives the banner
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_keeps_credentials_and_enters_cooldown(monkeypatch):
+    import json
+
+    class LimitedResponse:
+        async def read(self):
+            return json.dumps({"code": 70022}).encode()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    requests = []
+
+    class Session:
+        def get(self, *args, **kwargs):
+            requests.append(True)
+            return LimitedResponse()
+
+    auth = XiaomiAuth()
+    tokens = {"userId": "1", "passToken": "saved"}
+    auth._token_store = SimpleNamespace(load=lambda: tokens)
+
+    async def session():
+        return Session()
+
+    monkeypatch.setattr(auth, "_get_session", session)
+    for _ in range(6):
+        assert await auth.verify_credentials() == "unknown"
+    assert len(requests) == 5
+    assert tokens["passToken"] == "saved"

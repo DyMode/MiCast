@@ -9,11 +9,11 @@ import time
 from urllib.parse import quote, urlencode
 
 import aiohttp
-from miservice import MiAccount, MiIOService, MiNAService, MiTokenStore
 
 from micast.config import settings
 from micast.config_store import write_json
 from micast.net import new_session
+from micast.xiaomi.cloud import MiAccount, MiIOService, MiNAService
 from micast.xiaomi.token_store import TokenStore
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,8 @@ class XiaomiAuth:
         self._cloud_last_ok_at = 0.0
         self._cloud_last_failure_at = 0.0
         self._last_recovery_attempt_at = 0.0
+        self._login_rate_failures = 0
+        self._login_cooldown_until = 0.0
         self._account: MiAccount | None = None
         self._miot_account: MiAccount | None = None
         self._service: MiNAService | None = None
@@ -165,21 +167,7 @@ class XiaomiAuth:
         """Create a MiAccount pre-loaded with tokens for micoapi."""
         session = await self._get_session()
 
-        class _MemStore(MiTokenStore):
-            def __init__(self, data):
-                self._data = data
-                super().__init__("")
-
-            def load_token(self):
-                return self._data
-
-            def save_token(self, token=None):
-                pass
-
-        account = MiAccount(session, tokens["userId"], "", _MemStore(tokens))
-        account.token = tokens
-        account.now_ua = UA
-        return account
+        return MiAccount(session, tokens, UA)
 
     async def ensure_service(self) -> MiNAService | None:
         """Return MiNAService if tokens are available and valid."""
@@ -196,13 +184,7 @@ class XiaomiAuth:
         return self._service
 
     async def ensure_miot_service(self) -> MiIOService | None:
-        """Return an isolated MIoT service only when xiaomiio tokens exist.
-
-        Passing a micoapi-only account to MiIOService makes miservice attempt a
-        password login without a password/passToken. That failed login can
-        mutate the otherwise healthy MiNA account, so the two services must not
-        share a mutable MiAccount instance.
-        """
+        """Return an isolated MIoT credential snapshot when xiaomiio exists."""
         if self._miot_service:
             return self._miot_service
         tokens = self._token_store.load()
@@ -503,6 +485,8 @@ class XiaomiAuth:
         self, user_id: str, pass_token: str, device_id: str, sid: str
     ) -> tuple[str, str]:
         """Exchange userId+passToken for (ssecurity, serviceToken) of one service."""
+        if time.monotonic() < self._login_cooldown_until:
+            raise RuntimeError("小米账号请求已被限流，请稍后重试；已保存的凭据仍保留")
         session = await self._get_session()
         cookies = {
             "sdkVersion": "accountsdk-18.8.15",
@@ -518,8 +502,16 @@ class XiaomiAuth:
             text = (await resp.read()).decode("utf-8")
             result = _parse_json(text)
 
+        if result.get("code") == 70022:
+            self._login_rate_failures += 1
+            if self._login_rate_failures >= 5:
+                self._login_cooldown_until = time.monotonic() + 7200
+                self._login_rate_failures = 0
+            # A rate limit is not evidence that the passToken is dead.
+            raise RuntimeError("小米账号请求已被限流，请稍后重试；已保存的凭据仍保留")
+        self._login_rate_failures = 0
         if result.get("code") != 0 or not result.get("ssecurity"):
-            raise XiaomiAuthError(f"Login failed for {sid}: {result}")
+            raise XiaomiAuthError(f"小米登录验证失败（{sid}，code={result.get('code')}）")
         service_token = await self._exchange_service_token(result)
         return result["ssecurity"], service_token
 

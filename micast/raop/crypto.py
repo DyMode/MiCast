@@ -3,10 +3,11 @@
 import base64
 import socket
 import struct
+from functools import lru_cache
 
-from Crypto.Cipher import PKCS1_OAEP
-from Crypto.Hash import SHA1
-from Crypto.PublicKey import RSA
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 AIRPORT_KEY = b"""-----BEGIN RSA PRIVATE KEY-----
 MIIEpQIBAAKCAQEA59dE8qLieItsH1WgjrcFRKj6eUWqi+bGLOX1HL3U3GhC/j0Q
@@ -41,24 +42,47 @@ def decode_b64(value: str) -> bytes:
     return base64.b64decode(value + "=" * (-len(value) % 4))
 
 
+@lru_cache(maxsize=1)
+def _airport_key():
+    return serialization.load_pem_private_key(AIRPORT_KEY, password=None)
+
+
+def aes_cbc(data: bytes, key: bytes, iv: bytes, *, encrypt: bool = False) -> bytes:
+    """Classic RAOP encrypts full blocks only; callers preserve the tail."""
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    operation = cipher.encryptor() if encrypt else cipher.decryptor()
+    return operation.update(data) + operation.finalize()
+
+
 def apple_response(challenge: str, local_ip: str, mac: bytes) -> str:
     material = (decode_b64(challenge) + socket.inet_aton(local_ip) + mac).ljust(32, b"\0")
-    key = RSA.import_key(AIRPORT_KEY)
-    size = key.size_in_bytes()
+    key = _airport_key()
+    numbers = key.private_numbers()
+    size = key.key_size // 8
     encoded = b"\0\1" + b"\xff" * (size - len(material) - 3) + b"\0" + material
-    signed = pow(int.from_bytes(encoded, "big"), key.d, key.n).to_bytes(size, "big")
+    signed = pow(int.from_bytes(encoded, "big"), numbers.d, numbers.public_numbers.n).to_bytes(
+        size, "big"
+    )
     return base64.b64encode(signed).decode().rstrip("=")
 
 
 def decrypt_session_key(value: str) -> bytes:
-    return PKCS1_OAEP.new(RSA.import_key(AIRPORT_KEY), hashAlgo=SHA1).decrypt(decode_b64(value))
+    return _airport_key().decrypt(
+        decode_b64(value),
+        padding.OAEP(mgf=padding.MGF1(hashes.SHA1()), algorithm=hashes.SHA1(), label=None),
+    )
 
 
 def encrypt_session_key(key: bytes) -> str:
     """Sender side of rsaaeskey: RSA-OAEP encrypt the session AES key with the
     AirPort public key (the inverse of :func:`decrypt_session_key`)."""
-    public = RSA.import_key(AIRPORT_KEY).public_key()
-    encrypted = PKCS1_OAEP.new(public, hashAlgo=SHA1).encrypt(key)
+    encrypted = (
+        _airport_key()
+        .public_key()
+        .encrypt(
+            key, padding.OAEP(mgf=padding.MGF1(hashes.SHA1()), algorithm=hashes.SHA1(), label=None)
+        )
+    )
     return base64.b64encode(encrypted).decode().rstrip("=")
 
 

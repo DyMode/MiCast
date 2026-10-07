@@ -7,10 +7,9 @@ import time
 from collections.abc import Callable
 
 import av
-from Crypto.Cipher import AES
 
 from micast.audio_metrics import metrics
-from micast.raop.crypto import alac_cookie
+from micast.raop.crypto import aes_cbc, alac_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +216,7 @@ class RaopSession:
         if self.aes_key and self.aes_iv:
             count = len(payload) // 16 * 16
             payload = (
-                AES.new(self.aes_key, AES.MODE_CBC, self.aes_iv).decrypt(payload[:count])
+                aes_cbc(payload[:count], self.aes_key, self.aes_iv)
                 + payload[count:]
             )
         self.push(sequence, payload)

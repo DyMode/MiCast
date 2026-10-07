@@ -6,8 +6,7 @@ import os
 import struct
 import time
 
-from Crypto.Cipher import AES
-
+from micast.raop.crypto import aes_cbc
 from micast.raop.transport import build_timing_reply
 
 logger = logging.getLogger(__name__)
@@ -102,7 +101,7 @@ class RaopSendTransport:
         # through unencrypted (mirrors the receiver-side decrypt path).
         count = len(alac_payload) // 16 * 16
         payload = (
-            AES.new(self.aes_key, AES.MODE_CBC, self.aes_iv).encrypt(alac_payload[:count])
+            aes_cbc(alac_payload[:count], self.aes_key, self.aes_iv, encrypt=True)
             + alac_payload[count:]
         )
         self._audio_transport.sendto(header + payload, (self.host, self.remote_audio_port))
