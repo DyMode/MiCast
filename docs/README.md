@@ -7,6 +7,7 @@
 - [设置生效方式](settings-application.md)
 - [音量控制](volume-control.md)
 - [播放会话与连接生命周期](playback-lifecycle.md)
+- [AirPlay → DLNA 本地桥接](local-bridge.md)
 
 ## 部署与维护
 

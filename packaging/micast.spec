@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 ROOT = Path(SPECPATH).parent  # repo root
 
-datas = []
+datas = [(str(ROOT / "licenses"), "licenses")]
 web_dist = ROOT / "web" / "dist"
 if web_dist.is_dir():
     datas.append((str(web_dist), "web/dist"))
@@ -29,7 +29,7 @@ hiddenimports = (
 a = Analysis(
     [str(ROOT / "micast" / "__main__.py")],
     pathex=[str(ROOT)],
-    binaries=collect_dynamic_libs("av") + collect_dynamic_libs("zxing_cpp"),
+    binaries=collect_dynamic_libs("av"),
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

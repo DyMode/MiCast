@@ -3,6 +3,17 @@ set -u
 mkdir -p "$TRIM_PKGVAR"
 chmod 0700 "$TRIM_PKGVAR"
 chown -R "$TRIM_USERNAME" "$TRIM_PKGVAR"
+# fnOS rebuilds the package var directory during upgrade, which wipes the
+# Xiaomi login and settings. Restore the backup written by upgrade_init.
+backup="${TRIM_PKGVAR}/upgrade-backup.tgz"
+if [ -f "$backup" ]; then
+  if tar -xzf "$backup" -C "$TRIM_PKGVAR" 2>>"$TRIM_TEMP_LOGFILE"; then
+    rm -f "$backup"
+    chown -R "$TRIM_USERNAME" "$TRIM_PKGVAR"
+  else
+    echo "恢复升级前配置失败：米家登录与管理访问可能需要重新设置。" >> "$TRIM_TEMP_LOGFILE"
+  fi
+fi
 runtime="${TRIM_APPDEST}/airplay2-runtime"
 if [ -d "$runtime" ]; then
   chmod 0755 "$runtime/bin/nqptp" "$runtime/bin/shairport-sync" "$runtime/run-shairport"
