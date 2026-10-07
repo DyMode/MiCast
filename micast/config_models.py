@@ -125,9 +125,15 @@ class ReceiverConfig(BaseModel):
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1, max_length=64)
-    target_type: str = Field(default="selected", pattern=r"^(selected|speaker|group)$")
+    target_type: str = Field(default="selected", pattern=r"^(selected|speaker|group|dlna)$")
     target_id: str | None = None
     enabled: bool = True
+    # None preserves legacy AirPlay + global DLNA behavior.
+    dlna_enabled: bool | None = None
+    target_name: str = Field(default="", max_length=128)
+    target_model: str = Field(default="", max_length=128)
+    control_policy: str = Field(default="legacy", pattern=r"^(legacy|auto|local|cloud)$")
+    local_target_id: str | None = None
 
 
 class SpeakerGroupConfig(BaseModel):
@@ -244,6 +250,10 @@ class AirPlay2InstanceConfig(BaseModel):
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1, max_length=50)
-    target_type: str = Field(pattern=r"^(speaker|group)$")
+    target_type: str = Field(pattern=r"^(speaker|group|dlna)$")
     target_id: str = Field(min_length=1)
+    target_name: str = Field(default="", max_length=128)
+    target_model: str = Field(default="", max_length=128)
+    control_policy: str = Field(default="legacy", pattern=r"^(legacy|auto|local|cloud)$")
+    local_target_id: str | None = None
     enabled: bool = True

@@ -287,6 +287,10 @@ async def build_playback_state(device_manager: DeviceManager, refresh: bool = Fa
         devices.append(
             {
                 "did": did,
+                "player_observation": (
+                    device_manager.player_observation(did)
+                    if hasattr(device_manager, "player_observation") else None
+                ),
                 "name": device_manager.get_alias(did),
                 "volume": await device_manager.get_volume(did, refresh=refresh),
                 # The background format probe plays a silent test stream on an

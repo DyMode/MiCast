@@ -69,9 +69,10 @@ def build_fixtures(
         token = f"{prefix}-{fmt}-{secrets.token_urlsafe(6)}"
         path = directory / f"{token}.{extension}"
         if transcode:
-            with av.open(io.BytesIO(source_wav), mode="r") as source, av.open(
-                str(path), mode="w", format=extension
-            ) as target:
+            with (
+                av.open(io.BytesIO(source_wav), mode="r") as source,
+                av.open(str(path), mode="w", format=extension) as target,
+            ):
                 stream = target.add_stream(codec, rate=rate)
                 stream.layout = "stereo"
                 for frame in source.decode(audio=0):
@@ -158,7 +159,7 @@ async def probe_device_formats(
     the background probe from fighting a playback that just started.
     """
     results: dict[str, bool | None] = {}
-    for fmt in formats or list(fixtures):
+    for fmt in formats if formats is not None else list(fixtures):
         if should_continue is not None and not should_continue():
             break
         entry = fixtures.get(fmt)
@@ -169,21 +170,31 @@ async def probe_device_formats(
             expected_bytes = path.stat().st_size
         except OSError:
             expected_bytes = 0
-        supported = await probe_format(
-            stream_server,
-            device_manager,
-            device_id,
-            token,
-            fixture_url(token),
-            owner,
-            expected_bytes=expected_bytes,
-        )
-        if supported is None:
-            # Nothing proven: keep whatever the table already says.
-            results[fmt] = None
-        else:
-            results[fmt] = device_manager.note_codec_capability(
-                device_id, fmt, supported, reason
+        sessions = getattr(device_manager, "sessions", None)
+        lease = sessions.begin(owner, "diagnostic") if sessions is not None else None
+        try:
+            supported = await probe_format(
+                stream_server,
+                device_manager,
+                device_id,
+                token,
+                fixture_url(token),
+                owner,
+                expected_bytes=expected_bytes,
             )
-        await device_manager.stop_playback(device_id, owner=owner)
+            if supported is None:
+                # Nothing proven: keep whatever the table already says.
+                results[fmt] = None
+            else:
+                results[fmt] = device_manager.note_codec_capability(
+                    device_id, fmt, supported, reason
+                )
+        finally:
+            # Cancellation when a phone starts must release the silent test too.
+            # Owner checks prevent this cleanup from stopping its replacement.
+            try:
+                await device_manager.stop_playback(device_id, owner=owner)
+            finally:
+                if lease is not None:
+                    await sessions.close(lease.token, "format_probe_finished")
     return results

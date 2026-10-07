@@ -84,6 +84,10 @@ class AudioBridge:
         from micast.recovery import RecoveryCoordinator
 
         self.recovery = RecoveryCoordinator(self.sessions)
+        from micast.device_capabilities import CapabilityLedger
+
+        self.capabilities = CapabilityLedger(settings.config_path.parent / "capabilities.json")
+        self._control_routes = {}
         from micast.runtime_snapshot import RuntimeSnapshot
 
         self.runtime_snapshot = RuntimeSnapshot()
@@ -133,6 +137,50 @@ class AudioBridge:
     def _session_protocol(self, owner: str) -> str:
         return "airplay2" if owner in self._airplay2_entry_ids() else "airplay"
 
+    def resolve_control_route(self, entry_id):
+        from micast.control_routing import select_route
+
+        owner = entry_id.removeprefix("dlna:")
+        entry = next(
+            (
+                item
+                for item in [*settings.receivers, *settings.airplay2_instances]
+                if item.id == owner
+            ),
+            None,
+        )
+        sessions = getattr(self, "sessions", None)
+        lease = sessions.current(entry_id) if sessions else None
+        cache = getattr(self, "_control_routes", {})
+        previous = cache.get(entry_id)
+        if lease is not None and previous and previous[0] == lease.token:
+            return previous[1]
+        format = settings.audio.format.upper() if settings.audio.auto_transcode else "PCM"
+        server = getattr(self, "_stream_server", None)
+        if entry is not None and entry.local_target_id and server is not None:
+            from micast.audio_encoder import _FORMATS
+
+            sid = entry_id + settings.stream_suffix(entry_id, entry.local_target_id)
+            mime = server.stream_content_type(sid)
+            if mime:
+                # A registered variant may still use the previous encoder
+                # during a settings transition; verify the actual stream.
+                format = next(
+                    (name.upper() for name, info in _FORMATS.items() if info.content_type == mime),
+                    "UNKNOWN",
+                )
+        route = select_route(
+            entry,
+            getattr(self, "_dlna_discovery", None),
+            getattr(self, "capabilities", None),
+            format,
+        )
+        if lease is not None:
+            if not hasattr(self, "_control_routes"):
+                self._control_routes = {}
+            self._control_routes[entry_id] = (lease.token, route)
+        return route
+
     def _target_capabilities(self, target: str) -> dict:
         if target.startswith("dlna-target:"):
             discovery = self._dlna_discovery
@@ -171,6 +219,11 @@ class AudioBridge:
             "orchestration": self._orchestration_status(),
             "airplay2_instances": list(self._airplay2_runtime.values()),
             "diagnostics": self.diagnostics,
+            "control_routes": {
+                key: value[1].snapshot()
+                for key, value in getattr(self, "_control_routes", {}).items()
+                if (lease := self.sessions.current(key)) and lease.token == value[0]
+            },
             "now_playing": self._now_playing(),
             "runtime": self.runtime_snapshot.project(self.sessions),
         }
@@ -192,7 +245,8 @@ class AudioBridge:
             sessions = getattr(self, "sessions", None)
             lease = sessions.current(receiver_id) if sessions is not None else None
             if sessions is not None and (
-                lease is None or lease.protocol != "airplay"
+                lease is None
+                or lease.protocol != "airplay"
                 or lease.state.value not in ("active", "quiet", "paused")
             ):
                 continue
@@ -503,16 +557,19 @@ class AudioBridge:
                 for receiver_id in list(self._local_provider.receivers):
                     await self.sessions.close_all(receiver_id, reason="airplay_disabled")
                     await self._stop_classic_entry_pipelines(receiver_id)
-                await self._local_provider.start(
-                    [], settings.effective_stream_host, None, None
-                )
+                await self._local_provider.start([], settings.effective_stream_host, None, None)
                 return
-            running = {key for key, value in self._local_provider.receivers.items()
-                       if value.status == "running"}
+            running = {
+                key
+                for key, value in self._local_provider.receivers.items()
+                if value.status == "running"
+            }
             await self._local_provider.start(
                 [(item.id, item.name) for item in settings.active_receivers()],
-                settings.effective_stream_host, self._local_session_start,
-                self._local_session_stop, self._local_volume,
+                settings.effective_stream_host,
+                self._local_session_start,
+                self._local_session_stop,
+                self._local_volume,
             )
             await self._ensure_airplay_discovery()
             for key, item in self._local_provider.receivers.items():
@@ -613,8 +670,11 @@ class AudioBridge:
                 self._plan = new_plan
                 if not diff.noop and not diff.delay_only and getattr(self, "media_playback", None):
                     affected = (
-                        diff.classic_rebuild | diff.encoder_restart | diff.classic_added
-                        | diff.airplay2_rebuild | diff.external_airplay_changed
+                        diff.classic_rebuild
+                        | diff.encoder_restart
+                        | diff.classic_added
+                        | diff.airplay2_rebuild
+                        | diff.external_airplay_changed
                         | diff.external_dlna_changed
                     )
                     owners = {f"dlna:{entry}" for entry in affected}
@@ -1037,8 +1097,11 @@ class AudioBridge:
     async def _start_engine(self) -> None:
         if settings.airplay_engine == "local":
             await self._stream_server.start()
-            desired = ([(item.id, item.name) for item in settings.active_receivers()]
-                       if settings.airplay_enabled and classic_ingress_available() else [])
+            desired = (
+                [(item.id, item.name) for item in settings.active_receivers()]
+                if settings.airplay_enabled and classic_ingress_available()
+                else []
+            )
             await self._local_provider.start(
                 desired,
                 settings.effective_stream_host,
@@ -1056,6 +1119,7 @@ class AudioBridge:
             return
         await self._stream_server.start()
         await self._receiver_manager.start()
+        await self._ensure_airplay_discovery()
         await self._start_pipelines()
 
     async def _ensure_airplay_discovery(self) -> None:
@@ -1069,7 +1133,15 @@ class AudioBridge:
         if self._dlna_targets is None:
             self._dlna_discovery = DlnaDiscovery()
             self._dlna_targets = DlnaTargetManager(
-                self._dlna_discovery, self.sessions, self._stream_server.stream_content_type
+                self._dlna_discovery,
+                self.sessions,
+                self._stream_server.stream_content_type,
+                capabilities=self.capabilities,
+                stream_metrics=self._stream_server,
+                recovery=self.recovery,
+                source_active=lambda owner: (
+                    (self._source_activity_at(owner) or 0) > time.monotonic() - 3
+                ),
             )
             await self._dlna_discovery.start()
 
@@ -1096,9 +1168,12 @@ class AudioBridge:
         discovery running, those sessions can't survive a network blip anyway.
         """
         if enabled:
-            if self._running and settings.airplay_engine == "local":
+            if self._running:
                 await self._ensure_airplay_discovery()
             return
+        for session in list(self.sessions.snapshot()):
+            if session["owner"].startswith("local-test:"):
+                await self.sessions.close_all(session["owner"], reason="discovery_disabled")
         if self._airplay_targets:
             await self._airplay_targets.stop_all()
         if self._dlna_targets:
@@ -1111,6 +1186,8 @@ class AudioBridge:
         # devices discovered before the toggle flipped.
         self._airplay_targets = None
         self._airplay_discovery = None
+        if self._dlna_targets:
+            await self._dlna_targets.close()
         self._dlna_targets = None
         self._dlna_discovery = None
 
@@ -1610,7 +1687,8 @@ class AudioBridge:
             if not resume:
                 return ids
             return [
-                did for did in ids
+                did
+                for did in ids
                 if (target := self.sessions.targets.current(prefix + did)) is None
                 or (lease is not None and target.token == lease.token)
             ]
@@ -1645,7 +1723,11 @@ class AudioBridge:
                 sample_rate=48000 if entry_id in self._airplay2_entry_ids() else 44100,
                 steal=not resume,
             )
-        dlna_ids = available(settings.receiver_dlna_targets(entry_id), "dlna-target:")
+        route = self.resolve_control_route(entry_id)
+        candidates = settings.receiver_dlna_targets(entry_id)
+        if route.channel in {"cloud", "blocked"}:
+            candidates = []
+        dlna_ids = available(candidates, "dlna-target:")
         if dlna_ids and self._dlna_targets:
             register_external("external:dlna", self._dlna_targets)
             # DLNA renderers pull the HTTP stream — no PCM tap needed.
@@ -1653,7 +1735,10 @@ class AudioBridge:
                 f"http://{settings.effective_stream_host}:{settings.stream_port}/stream/{entry_id}"
             )
             await self._dlna_targets.play_targets(
-                entry_id, dlna_ids, cast_url, settings.receiver_network_channels(entry_id),
+                entry_id,
+                dlna_ids,
+                cast_url,
+                settings.receiver_network_channels(entry_id),
                 steal=not resume,
             )
             if (
@@ -1787,6 +1872,24 @@ class AudioBridge:
         """
         self._sender_volumes[receiver_id] = percent
         mode = self._volume_modes.setdefault(receiver_id, settings.sender_volume_mode)
+        # Direct DLNA mappings without RenderingControl use stream attenuation.
+        entry = next(
+            (
+                item
+                for item in [*settings.receivers, *settings.airplay2_instances]
+                if item.id == receiver_id
+            ),
+            None,
+        )
+        if (
+            entry is not None
+            and mode == "linked"
+            and self.resolve_control_route(receiver_id).channel == "dlna"
+        ):
+            target = entry.target_id if entry.target_type == "dlna" else entry.local_target_id
+            device = self._dlna_discovery.resolve(target) if self._dlna_discovery else None
+            if device is None or not device.rendering_url:
+                mode = "independent"
         pipelines = {**self._pipelines, **getattr(self, "_airplay2_pipelines", {})}
         for key, pipeline in pipelines.items():
             if key == receiver_id or key.startswith(f"{receiver_id}-"):
@@ -1823,6 +1926,8 @@ class AudioBridge:
             await self._airplay_discovery.stop()
         if self._dlna_discovery:
             await self._dlna_discovery.stop()
+            if self._dlna_targets:
+                await self._dlna_targets.close()
             self._dlna_discovery = None
             self._dlna_targets = None
         self._target_taps.clear()
@@ -1854,8 +1959,10 @@ class AudioBridge:
         )
         states = [receiver.status for receiver in receivers]
         if settings.airplay2_enabled:
-            states.extend(item.get("status", "starting")
-                          for item in getattr(self, "_airplay2_runtime", {}).values())
+            states.extend(
+                item.get("status", "starting")
+                for item in getattr(self, "_airplay2_runtime", {}).values()
+            )
         dlna = getattr(self, "dlna_service", None)
         if dlna and settings.dlna_enabled and classic_ingress_available():
             states.append(dlna.status)
@@ -1925,8 +2032,11 @@ class AudioBridge:
         )
         for entry_id in sorted(diff.classic_removed):
             await self.sessions.close_all(entry_id, reason="receiver_removed")
-        desired = ([(item.id, item.name) for item in settings.active_receivers()]
-                   if settings.airplay_enabled and classic_ingress_available() else [])
+        desired = (
+            [(item.id, item.name) for item in settings.active_receivers()]
+            if settings.airplay_enabled and classic_ingress_available()
+            else []
+        )
         await self._local_provider.start(
             desired,
             settings.effective_stream_host,
@@ -2166,10 +2276,12 @@ class AudioBridge:
         registry = getattr(self, "sessions", None)
         owners = [item["owner"] for item in registry.snapshot()] if registry else []
         owners.extend(settings.audio_entry_ids())
-        return sorted({
-            _stream_owner(stream, owners) or stream
-            for stream in set(self._pipelines) | set(self._airplay2_pipelines)
-        })
+        return sorted(
+            {
+                _stream_owner(stream, owners) or stream
+                for stream in set(self._pipelines) | set(self._airplay2_pipelines)
+            }
+        )
 
     def entry_stream_ids(self, entry_id: str) -> list[str]:
         return [
@@ -2350,6 +2462,8 @@ class AudioBridge:
         """
         manager = getattr(self, "_device_manager", None)
         if manager is None:
+            return
+        if self.resolve_control_route(entry_id).channel in {"dlna", "blocked"}:
             return
         base = f"http://{settings.effective_stream_host}:{settings.stream_port}"
         for did in self.entry_targets(entry_id):

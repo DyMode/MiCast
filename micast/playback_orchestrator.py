@@ -140,6 +140,9 @@ class PlaybackOrchestrator:
                 )
 
     async def start_lyrics_session(self, receiver_id: str) -> None:
+        resolver = getattr(self.bridge, "resolve_control_route", None)
+        if resolver and resolver(receiver_id).channel in {"dlna", "blocked"}:
+            return
         if not settings.touchscreen_lyrics:
             return
         server = self.bridge.local_server(receiver_id)
@@ -179,15 +182,24 @@ class PlaybackOrchestrator:
         # the stream outlives individual sessions, so quick reconnects are free.
         protocol = (
             self.bridge._session_protocol(receiver_id)
-            if hasattr(self.bridge, "_session_protocol") else "airplay"
+            if hasattr(self.bridge, "_session_protocol")
+            else "airplay"
         )
         lease = self.bridge.sessions.begin(receiver_id, protocol)
         self.bridge.sessions.register(
-            lease.token, "receiver-output",
+            lease.token,
+            "receiver-output",
             lambda: self._release_receiver_output(receiver_id, lease.token),
         )
+        resolver = getattr(self.bridge, "resolve_control_route", None)
+        if resolver and resolver(receiver_id).channel in {"dlna", "blocked"}:
+            return
         targets = settings.receiver_targets(receiver_id)
         if not targets:
+            if settings.receiver_dlna_targets(receiver_id) or settings.receiver_airplay_targets(
+                receiver_id
+            ):
+                return
             logger.warning("Receiver %s has no playback target", receiver_id)
             return
         if not steal:
@@ -229,9 +241,7 @@ class PlaybackOrchestrator:
         )
         for did, result in zip(targets, results, strict=True):
             if isinstance(result, Exception):
-                logger.warning(
-                    "Speaker %s failed to start for %s: %s", did, receiver_id, result
-                )
+                logger.warning("Speaker %s failed to start for %s: %s", did, receiver_id, result)
                 self.device_manager.note_play_error(
                     did, receiver_id, str(result), attempted.get(did)
                 )
@@ -253,9 +263,7 @@ class PlaybackOrchestrator:
         attempted: dict[str, str] | None = None,
     ) -> None:
         fmt = self._active_stream_format()
-        pending = {
-            did for did in targets if self.device_manager.owner_of(did) == receiver_id
-        }
+        pending = {did for did in targets if self.device_manager.owner_of(did) == receiver_id}
         # Slow speakers and a cold stream server can need a few seconds before
         # the first bytes arrive. Do not turn startup latency into a false
         # codec incompatibility.
@@ -271,11 +279,7 @@ class PlaybackOrchestrator:
                 # live session a missing pull proves nothing about the
                 # speaker's codec support — abort without recording it.
                 return
-            healthy_now = {
-                did
-                for did in pending
-                if self._stream_pull_confirmed(receiver_id, did)
-            }
+            healthy_now = {did for did in pending if self._stream_pull_confirmed(receiver_id, did)}
             if healthy_now:
                 # A pull that is still growing is proof; a stalled one merely
                 # keeps the device in "pending" for the next attempt.
@@ -378,7 +382,7 @@ class PlaybackOrchestrator:
         """Speakers of every enabled receiver: the devices this app can play to."""
         targets: list[str] = []
         for receiver in settings.receivers:
-            if not receiver.enabled:
+            if not receiver.enabled or getattr(receiver, "control_policy", "legacy") == "local":
                 continue
             for did in settings.receiver_targets(receiver.id):
                 if did not in targets:
@@ -484,10 +488,7 @@ class PlaybackOrchestrator:
             # Skip only when the session never ended (duplicate play-begins).
             # After an engine restart the bridge's active set is cleared, so a
             # genuinely fresh start always replays even if our latch survived.
-            if (
-                receiver_id in self._started_sessions
-                and self.bridge.is_session_active(receiver_id)
-            ):
+            if receiver_id in self._started_sessions and self.bridge.is_session_active(receiver_id):
                 logger.debug(
                     "Receiver %s session start already served; skipping replay",
                     receiver_id,
@@ -530,7 +531,9 @@ class PlaybackOrchestrator:
             return  # an old generation cannot tear down the replacement's outputs
         self.bridge.drop_stream_clients(receiver_id)
         speaker_cleanup = []
-        if getattr(self.device_manager, "sessions", None) is not self.bridge.sessions:
+        resolver = getattr(self.bridge, "resolve_control_route", None)
+        local = resolver and resolver(receiver_id).channel in {"dlna", "blocked"}
+        if not local and getattr(self.device_manager, "sessions", None) is not self.bridge.sessions:
             speaker_cleanup = [
                 self.device_manager.stop_playback(did, owner=receiver_id)
                 for did in settings.receiver_targets(receiver_id)
@@ -665,9 +668,12 @@ class PlaybackOrchestrator:
                 self._pending_group_recoveries.pop(receiver_id, None)
 
         self._pending_group_recoveries[receiver_id] = self._start_background(
-            (self.bridge.recovery.run(receiver_id, "group", recover)
-             if getattr(self.bridge, "recovery", None) else recover()),
-            f"group-recovery:{receiver_id}"
+            (
+                self.bridge.recovery.run(receiver_id, "group", recover)
+                if getattr(self.bridge, "recovery", None)
+                else recover()
+            ),
+            f"group-recovery:{receiver_id}",
         )
 
     async def on_receiver_volume(self, receiver_id: str, percent: int):

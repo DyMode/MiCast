@@ -84,7 +84,8 @@ async def test_dlna_didl_uses_registered_format_during_configuration_transition(
     adapter.stream_content_type = lambda sid: observed.append(sid) or "audio/flac"
     try:
         await adapter.play_targets("r", ["d"], "http://m/stream/r")
-        assert observed == ["r"]
+        assert observed == ["r", "r"]
+        assert adapter._soap.await_args_list[0].args[2]["CurrentURI"].endswith("/audio.flac")
         assert "audio/flac" in adapter._soap.await_args_list[0].args[2]["CurrentURIMetaData"]
     finally:
         await sessions.close_all()

@@ -37,11 +37,41 @@ def install(
         target_id = payload.get("target_id")
         if not name:
             raise HTTPException(status_code=400, detail="name required")
-        if target_type not in ("selected", "speaker", "group"):
+        if target_type not in ("selected", "speaker", "group", "dlna"):
             raise HTTPException(status_code=400, detail="invalid target_type")
-        receiver = await apply_config_transaction(
-            lambda: settings.add_receiver(name, target_type, target_id), apply_runtime
-        )
+        if len(name) > 64:
+            raise HTTPException(status_code=400, detail="入口名称最多 64 个字符")
+        if any(item.name == name for item in settings.receivers):
+            raise HTTPException(status_code=409, detail="已有同名播放入口，请更换名称")
+        device = None
+        if target_type == "dlna":
+            device = bridge.dlna_discovery.resolve(target_id) if bridge.dlna_discovery else None
+            if not device or not device.online:
+                raise HTTPException(status_code=409, detail="请开启网络发现并选择在线 DLNA 设备")
+            if any(
+                item.target_type == "dlna" and item.target_id == target_id
+                for item in settings.receivers
+            ):
+                raise HTTPException(status_code=409, detail="此设备已有 AirPlay 入口")
+
+        def create():
+            # Recheck uniqueness under the configuration transaction lock.
+            if any(item.name == name for item in settings.receivers):
+                raise HTTPException(status_code=409, detail="已有同名播放入口，请更换名称")
+            if target_type == "dlna" and any(
+                item.target_type == "dlna" and item.target_id == target_id
+                for item in settings.receivers
+            ):
+                raise HTTPException(status_code=409, detail="此设备已有 AirPlay 入口")
+            return settings.add_receiver(
+                name,
+                target_type,
+                target_id,
+                target_name=device.name[:128] if device else "",
+                target_model=device.model[:128] if device else "",
+            )
+
+        receiver = await apply_config_transaction(create, apply_runtime)
         return receiver.model_dump()
 
     @router.delete("/definitions/{receiver_id}")
@@ -53,19 +83,60 @@ def install(
 
     @router.patch("/definitions/{receiver_id}")
     async def update_receiver(receiver_id: str, payload: dict):
-        # Classic AirPlay entries are not re-mappable: the target is fixed at
-        # creation (a speaker/group pick, or "follow the selected speaker").
-        # Remapping is an AirPlay 2 concept and lives on its instances.
+        # Legacy speaker/group mappings stay fixed. A local bridge can select
+        # a replacement LAN renderer without recreating its AirPlay identity.
+        current = next((item for item in settings.receivers if item.id == receiver_id), None)
+        if current is None:
+            raise HTTPException(status_code=404, detail="receiver not found")
+        name = payload.get("name")
+        if name is not None:
+            name = str(name).strip()
+            if not name or len(name) > 64:
+                raise HTTPException(status_code=400, detail="请输入 1–64 个字符的入口名称")
+            if any(item.id != receiver_id and item.name == name for item in settings.receivers):
+                raise HTTPException(status_code=409, detail="已有同名播放入口，请更换名称")
+        device = None
         if "target_type" in payload or "target_id" in payload:
-            raise HTTPException(status_code=400, detail="经典 AirPlay 入口不支持修改播放目标")
-        receiver = await apply_config_transaction(
-            lambda: settings.update_receiver(
+            if current.target_type == "dlna" and payload.get("target_type", "dlna") == "dlna":
+                device = (
+                    bridge.dlna_discovery.resolve(payload.get("target_id"))
+                    if bridge.dlna_discovery
+                    else None
+                )
+                if not device or not device.online:
+                    raise HTTPException(status_code=409, detail="请选择在线 DLNA 设备")
+                if any(
+                    item.id != receiver_id
+                    and item.target_type == "dlna"
+                    and item.target_id == device.id
+                    for item in settings.receivers
+                ):
+                    raise HTTPException(status_code=409, detail="此设备已有 AirPlay 入口")
+            else:
+                raise HTTPException(status_code=400, detail="经典 AirPlay 入口不支持修改播放目标")
+
+        def update():
+            if name is not None and any(
+                item.id != receiver_id and item.name == name for item in settings.receivers
+            ):
+                raise HTTPException(status_code=409, detail="已有同名播放入口，请更换名称")
+            if device is not None and any(
+                item.id != receiver_id
+                and item.target_type == "dlna"
+                and item.target_id == device.id
+                for item in settings.receivers
+            ):
+                raise HTTPException(status_code=409, detail="此设备已有 AirPlay 入口")
+            return settings.update_receiver(
                 receiver_id,
-                name=payload.get("name"),
+                name=name,
                 enabled=payload.get("enabled"),
-            ),
-            apply_runtime,
-        )
+                target_id=device.id if device else None,
+                target_name=device.name[:128] if device else None,
+                target_model=device.model[:128] if device else None,
+            )
+
+        receiver = await apply_config_transaction(update, apply_runtime)
         if receiver is None:
             raise HTTPException(status_code=404, detail="receiver not found")
         return receiver.model_dump()

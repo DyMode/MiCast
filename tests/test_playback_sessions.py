@@ -184,7 +184,7 @@ async def test_http_pull_is_a_session_resource_and_retries_after_stop_are_reject
     server = StreamServer()
     server.sessions = sessions
     server.register_stream("r1", raw_pcm_format(48000))
-    request = Request({"type": "http", "method": "GET", "path": "/stream/r1", "query_string": b""})
+    request = Request({"type": "http", "method": "GET", "path": "/stream/r1", "query_string": b"", "headers": []})
     response = await server._serve_stream(request, "r1", "r1", "speaker-a")
     assert any(key.startswith("stream:") for key in lease.resources)
     await sessions.close(lease.token)

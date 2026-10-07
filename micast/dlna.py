@@ -33,8 +33,8 @@ AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
 RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
 DLNA_SINK_PROTOCOLS = ",".join(
-    f"http-get:*:{mime}:*" for mime in
-    ("audio/mpeg", "audio/mp4", "audio/aac", "audio/flac", "audio/wav")
+    f"http-get:*:{mime}:*"
+    for mime in ("audio/mpeg", "audio/mp4", "audio/aac", "audio/flac", "audio/wav")
 )
 
 
@@ -101,7 +101,15 @@ class DlnaService:
         self.http_detail = ""
 
     def active_receivers(self) -> list[ReceiverConfig]:
-        return settings.active_receivers() if settings.dlna_enabled else []
+        return (
+            [
+                item
+                for item in settings.active_receivers()
+                if item.target_type != "dlna" and item.dlna_enabled is not False
+            ]
+            if settings.dlna_enabled
+            else []
+        )
 
     def receiver(self, receiver_id: str) -> ReceiverConfig | None:
         if self.status in {"error", "unsupported"} or not self.http_available:
@@ -304,9 +312,11 @@ class DlnaService:
             return {
                 "TransportState": state.state,
                 "TransportStatus": "ERROR_OCCURRED" if state.error else "OK",
-                "TransportPlaySpeed": "1", "AVTransportURI": state.uri,
+                "TransportPlaySpeed": "1",
+                "AVTransportURI": state.uri,
                 "AVTransportURIMetaData": state.metadata,
-                "CurrentTrackURI": state.uri, "CurrentTrackMetaData": state.metadata,
+                "CurrentTrackURI": state.uri,
+                "CurrentTrackMetaData": state.metadata,
                 "CurrentTrackDuration": self.duration_time(receiver_id),
                 "CurrentMediaDuration": self.duration_time(receiver_id),
                 "NextAVTransportURI": state.next_uri,
@@ -315,7 +325,8 @@ class DlnaService:
         if service == "RenderingControl":
             return {"Volume": state.volume, "Mute": int(state.muted)}
         return {
-            "SourceProtocolInfo": "", "SinkProtocolInfo": DLNA_SINK_PROTOCOLS,
+            "SourceProtocolInfo": "",
+            "SinkProtocolInfo": DLNA_SINK_PROTOCOLS,
             "CurrentConnectionIDs": "0",
         }
 
@@ -413,7 +424,8 @@ class DlnaService:
                     raise
                 current = self.sessions.current(self._owner(receiver_id))
                 if (
-                    current is not None and current.identity == previous.session_id
+                    current is not None
+                    and current.identity == previous.session_id
                     and current.state == SessionState.ACTIVE
                 ):
                     state.__dict__.update(previous.__dict__)
@@ -611,13 +623,15 @@ class DlnaService:
         if state and state.session_id == lease.identity and lease.state == SessionState.CLOSED:
             state.finished = lease.reason == "media_finished"
             if state.finished and state.next_uri and receiver_id not in self._next_tasks:
+
                 async def advance():
                     try:
                         current = self.sessions.current(lease.token.owner)
                         if (
                             self.states.get(receiver_id) is state
                             and state.session_id == lease.identity
-                            and state.finished and state.next_uri
+                            and state.finished
+                            and state.next_uri
                             and (current is None or current.token == lease.token)
                         ):
                             await self.next_track(receiver_id)
@@ -657,7 +671,8 @@ class DlnaService:
         for receiver_id, state in self.states.items():
             lease = self.sessions.current(self._owner(receiver_id))
             if (
-                lease is None or lease.identity != state.session_id
+                lease is None
+                or lease.identity != state.session_id
                 or lease.state not in (SessionState.ACTIVE, SessionState.PAUSED, SessionState.QUIET)
             ):
                 continue

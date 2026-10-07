@@ -56,6 +56,7 @@ class SessionStreamingResponse(StreamingResponse):
             if self.sessions is not None:
                 self.sessions.forget(self.session_token, key)
 
+
 # Hard ceiling on a client's delay line. Producer (sender clock) and consumer
 # (speaker clock) always drift a little; a speaker that trails accumulates
 # backlog without bound until its queue overflows. Capping the lag skips it to
@@ -143,10 +144,12 @@ def _drop_whole_chunks(buffer: deque[bytes], requested: int) -> int:
     return dropped
 
 
-
-
 async def _serve_seekable_media(
-    url: str, ss: float, volume_provider=None, sessions=None, session_token=None,
+    url: str,
+    ss: float,
+    volume_provider=None,
+    sessions=None,
+    session_token=None,
 ) -> StreamingResponse:
     """In-process transcode of a remote URL streamed back as MP3. Seeking the
     input container is fast when the origin supports Range requests (music
@@ -179,13 +182,19 @@ async def _serve_seekable_media(
                 else:
                     sessions.release(session_token, resource_key)
                 lease = sessions.current(session_token.owner)
-                if completed and sessions.valid(session_token) and lease and not any(
-                    key.startswith("media:") for key in lease.resources
+                if (
+                    completed
+                    and sessions.valid(session_token)
+                    and lease
+                    and not any(key.startswith("media:") for key in lease.resources)
                 ):
                     sessions.end(session_token, "media_finished", immediate=True)
 
     return SessionStreamingResponse(
-        generator(), media_type="audio/mpeg", sessions=sessions, session_token=session_token,
+        generator(),
+        media_type="audio/mpeg",
+        sessions=sessions,
+        session_token=session_token,
     )
 
 
@@ -237,6 +246,14 @@ class StreamServer:
         self._setup_routes()
 
     def _setup_routes(self) -> None:
+        @self._app.api_route(
+            "/stream/{device_id}/for/{receiver_id}/{sink}/audio.{ext}", methods=["GET", "HEAD"]
+        )
+        async def dlna_audio(
+            request: Request, device_id: str, receiver_id: str, sink: str, ext: str
+        ):
+            return await self._serve_stream(request, device_id, receiver_id, sink)
+
         @self._app.get("/stream/{device_id}/for/{receiver_id}/{sink}")
         async def stream_for_sink(request: Request, device_id: str, receiver_id: str, sink: str):
             # Xiaomi players may discard a URL's query string before pulling
@@ -287,7 +304,7 @@ class StreamServer:
                 )
 
             async def tone_stream():
-                duration_seconds = 600
+                duration_seconds = session.get("duration_seconds", 600)
                 data_bytes = 44100 * 4 * duration_seconds
                 yield wav_header(44100, data_bytes=data_bytes)
                 pcm = session.get("pcm") or test_tone_wav()[44:]
@@ -343,6 +360,7 @@ class StreamServer:
                     position = end % len(pcm)
                     chunk = chunk[: data_bytes - sent]
                     sent += len(chunk)
+                    session["bytes_sent"] = sent
                     yield chunk
                     await asyncio.sleep(chunk_seconds)
 
@@ -351,7 +369,7 @@ class StreamServer:
                 media_type="audio/wav",
                 headers={
                     "Cache-Control": "no-store",
-                    "Content-Length": str(44 + 44100 * 4 * 600),
+                    "Content-Length": str(44 + 44100 * 4 * session.get("duration_seconds", 600)),
                 },
             )
 
@@ -369,8 +387,11 @@ class StreamServer:
             if self.media_session and token is None:
                 raise HTTPException(status_code=410, detail="Playback session ended")
             return await _serve_seekable_media(
-                url, max(0.0, ss), provider,
-                self.sessions if token is not None else None, token,
+                url,
+                max(0.0, ss),
+                provider,
+                self.sessions if token is not None else None,
+                token,
             )
 
         @self._app.get("/diagnostic/builtin.wav")
@@ -398,8 +419,8 @@ class StreamServer:
                         block = await asyncio.to_thread(handle.read, 16384)
                         if not block:
                             break
-                        self._diagnostic_bytes[token] = (
-                            self._diagnostic_bytes.get(token, 0) + len(block)
+                        self._diagnostic_bytes[token] = self._diagnostic_bytes.get(token, 0) + len(
+                            block
                         )
                         yield block
 
@@ -489,10 +510,7 @@ class StreamServer:
 
     def client_delay_states(self, device_id: str) -> list[dict]:
         """Per-client delay-line state for one stream (consumer health)."""
-        return [
-            self._client_delay.get(queue, {})
-            for queue in self._clients.get(device_id, set())
-        ]
+        return [self._client_delay.get(queue, {}) for queue in self._clients.get(device_id, set())]
 
     def set_buffer_override(self, device_id: str, seconds: float | None) -> None:
         """Per-stream delay-line reserve override (see the audio supervisor).
@@ -517,6 +535,30 @@ class StreamServer:
             if state.get("receiver") == receiver_id and state.get("sink") == sink
         )
 
+    def sink_first_byte_at(self, receiver_id: str, sink: str) -> float:
+        return min(
+            (
+                float(state.get("first_byte_at") or 0)
+                for state in self._client_delay.values()
+                if state.get("receiver") == receiver_id
+                and state.get("sink") == sink
+                and state.get("first_byte_at")
+            ),
+            default=0.0,
+        )
+
+    def sink_connected_at(self, receiver_id: str, sink: str) -> float:
+        return min(
+            (
+                float(state.get("connected_at") or 0)
+                for state in self._client_delay.values()
+                if state.get("receiver") == receiver_id
+                and state.get("sink") == sink
+                and state.get("connected_at")
+            ),
+            default=0.0,
+        )
+
     def sink_last_byte_at(self, receiver_id: str, sink: str) -> float:
         """When this speaker last received audio (0.0 = never)."""
         return max(
@@ -534,6 +576,7 @@ class StreamServer:
             return
         state["bytes_out"] = int(state.get("bytes_out") or 0) + count
         state["last_byte_at"] = time.monotonic()
+        state.setdefault("first_byte_at", state["last_byte_at"])
 
     def client_backlog_chunks(self, device_id: str) -> int:
         """Deepest per-client queue of not-yet-sent chunks for one stream.
@@ -545,9 +588,7 @@ class StreamServer:
         backpressure, and throttling against it throws away the sender's
         look-ahead instead of banking it in the speaker's buffer.
         """
-        return max(
-            (queue.qsize() for queue in self._clients.get(device_id, ())), default=0
-        )
+        return max((queue.qsize() for queue in self._clients.get(device_id, ())), default=0)
 
     def _max_lag_seconds(self) -> float:
         """How far a client may lead before we trim it to live.
@@ -645,10 +686,27 @@ class StreamServer:
         if receiver_id is None and self.stream_owner is not None:
             receiver_id = self.stream_owner(device_id)
         lease = self.sessions.current(receiver_id) if self.sessions and receiver_id else None
-        if self.sessions is not None and receiver_id and (
-            lease is None or not self.sessions.valid(lease.token)
+        if (
+            self.sessions is not None
+            and receiver_id
+            and (lease is None or not self.sessions.valid(lease.token))
         ):
             raise HTTPException(status_code=410, detail="Playback session ended")
+        # Renderers probe the resource before opening their playback GET. A
+        # HEAD must never allocate a subscriber or claim that audio is flowing.
+        if request.method == "HEAD":
+            response = Response(media_type=stream_format.content_type, headers={
+                "Accept-Ranges": "none", "Cache-Control": "no-store",
+                "transferMode.dlna.org": "Streaming",
+            })
+            # The live resource has no known size; zero describes an empty file.
+            del response.headers["content-length"]
+            return response
+        logger.info(
+            "Audio HTTP request: stream=%s sink=%s method=%s range=%s agent=%s",
+            device_id, sink, request.method, request.headers.get("range", ""),
+            request.headers.get("user-agent", ""),
+        )
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
         metrics.note_client_connect(device_id, replacing=bool(self._clients.get(device_id)))
         self._clients.setdefault(device_id, set()).add(queue)
@@ -677,11 +735,13 @@ class StreamServer:
             # out. The only honest test of "can this speaker play this format"
             # is a sustained pull: a device that opens the URL and rejects the
             # payload is indistinguishable from a healthy one by request count.
+            "connected_at": time.monotonic(),
             "bytes_out": 0,
             "last_byte_at": 0.0,
         }
         resource_key = f"stream:{id(queue)}"
         if lease is not None:
+
             def release_connection():
                 state = self._client_delay.get(queue)
                 if state is not None:
@@ -761,6 +821,7 @@ class StreamServer:
                 frame = silence_frames[silence_index % len(silence_frames)]
                 silence_index += 1
                 return frame
+
             # Delay-line byte rate: nominal when the format has one (mp3/wav/
             # pcm); for flac the broadcast-observed rate once it is trustworthy.
             # Until then — and while this client is still short of its reserve —
@@ -768,9 +829,7 @@ class StreamServer:
             # warm-up (every session's first speaker) still ends up on a real
             # delay line instead of passing every encoder hiccup through.
             byte_rate = self._delay_line_byte_rate(device_id)
-            buffer_seconds = self._buffer_overrides.get(
-                device_id, settings.stream_buffer_seconds
-            )
+            buffer_seconds = self._buffer_overrides.get(device_id, settings.stream_buffer_seconds)
             initial_buffer = int(byte_rate * buffer_seconds) if byte_rate else 0
             # Delay alignment: extra bytes held back per client so this speaker
             # trails its siblings. Re-read live each chunk — a smaller value
@@ -877,9 +936,7 @@ class StreamServer:
                             held -= len(head)
                             skipped += len(head)
                         if skipped:
-                            metrics.note_lag_skip(
-                            skipped, skipped / byte_rate * 1000, device_id
-                        )
+                            metrics.note_lag_skip(skipped, skipped / byte_rate * 1000, device_id)
                         if skipped and state is not None:
                             state["lag_drops"] = int(state.get("lag_drops") or 0) + 1
                             if state["lag_drops"] == 1 or state["lag_drops"] % 20 == 0:
@@ -955,9 +1012,7 @@ class StreamServer:
                             state["needs_fill"] = None
                         if state.get("ready_at") is None and held >= reserve:
                             state["ready_at"] = time.monotonic()
-                        metrics.note_queue_depth(
-                            queue.qsize(), float(state["buffer_ms"])
-                        )
+                        metrics.note_queue_depth(queue.qsize(), float(state["buffer_ms"]))
                     # Release whole chunks, never byte slices: chunk boundaries
                     # are encoder write boundaries, so the client's decoder
                     # always sees complete frames.
@@ -983,9 +1038,11 @@ class StreamServer:
                 if waiting is not None and sink and waiting["clients"].get(sink) is queue:
                     waiting["clients"].pop(sink, None)
                 logger.info(
-                    "Stream client disconnected from /stream/%s: %s",
-                    device_id,
-                    request.client,
+                    "Stream client disconnected from /stream/%s: %s "
+                    "(sink=%s bytes=%s duration=%.1fs intentional=%s)",
+                    device_id, request.client, sink, state.get("bytes_out", 0),
+                    time.monotonic() - state.get("connected_at", time.monotonic()),
+                    bool(state.get("intentional_close")),
                 )
                 if (
                     receiver_id
@@ -1004,6 +1061,9 @@ class StreamServer:
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
                 "Expires": "0",
+                "Accept-Ranges": "none",
+                **({"transferMode.dlna.org": "Streaming"}
+                   if "/audio." in request.url.path else {}),
             },
         )
 
@@ -1115,12 +1175,7 @@ class StreamServer:
         # orphaned first task would end up driving (or killing) the second
         # server while its own socket leaks.
         async with self._start_lock:
-            if (
-                self._task
-                and not self._task.done()
-                and self._server
-                and self._server.started
-            ):
+            if self._task and not self._task.done() and self._server and self._server.started:
                 return
             config = Config(
                 self._app, host=settings.host, port=settings.stream_port, log_level="warning"
@@ -1170,8 +1225,11 @@ class StreamServer:
         ``self._server`` at a single assignment point so start()'s readiness
         check and stop()'s shutdown signal always target the live instance.
         """
-        lease = reserve_tcp(settings.preferred_port("stream_port"), settings.host,
-                            strict=settings.port_is_strict("stream_port"))
+        lease = reserve_tcp(
+            settings.preferred_port("stream_port"),
+            settings.host,
+            strict=settings.port_is_strict("stream_port"),
+        )
         settings.apply_resolved_port("stream_port", lease.port)
         server.config.port = lease.port
         try:
@@ -1353,9 +1411,7 @@ class StreamServer:
         last_get = state.get("last_get_at") or 0.0
         return (time.monotonic() - float(last_get)) > CLIENT_UNDRAINED_SECONDS
 
-    def reap_ghost_clients(
-        self, device_id: str, subset: set[asyncio.Queue] | None = None
-    ) -> int:
+    def reap_ghost_clients(self, device_id: str, subset: set[asyncio.Queue] | None = None) -> int:
         """Close dead (half-open) client connections of one stream; returns how
         many were reaped. Mirrors kick_clients' intentional_close semantics so
         group-recovery hooks don't fire for a dead socket. Without this, every
@@ -1403,16 +1459,14 @@ class StreamServer:
                     if isinstance(dropped, bytes):
                         # Byte-accurate accounting: chunk counts mean different
                         # durations per format; bytes/ms are comparable.
-                        self.dropped_bytes[device_id] = (
-                            self.dropped_bytes.get(device_id, 0) + len(dropped)
+                        self.dropped_bytes[device_id] = self.dropped_bytes.get(device_id, 0) + len(
+                            dropped
                         )
                     queue.put_nowait(chunk)
                     state = self._client_delay.get(queue)
                     if state is not None:
                         state["queue_drops"] = int(state.get("queue_drops") or 0) + 1
-                        metrics.note_queue_drops(
-                            1, float(state.get("buffer_ms") or 0)
-                        )
+                        metrics.note_queue_drops(1, float(state.get("buffer_ms") or 0))
                         if state["queue_drops"] in (1, 20, 100):
                             logger.info(
                                 "Client queue for /stream/%s overflowed; dropped "

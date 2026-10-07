@@ -75,10 +75,19 @@ CONTENT_PROFILES: tuple[str, ...] = ("music", "movie", "voice")
 # config default, not a deliberate pin — only true env vars make a busy port
 # fatal instead of sliding to a free one.
 _ENV_PINNED: frozenset[str] = frozenset(
-    key for key, value in os.environ.items()
-    if not (key in {"MICAST_PORT", "MICAST_STREAM_PORT", "MICAST_AIRPLAY_RTSP_PORT",
-                    "MICAST_AIRPLAY_UDP_BASE", "MICAST_AIRPLAY2_PORT"}
-            and value.strip().lower() in {"", "auto"})
+    key
+    for key, value in os.environ.items()
+    if not (
+        key
+        in {
+            "MICAST_PORT",
+            "MICAST_STREAM_PORT",
+            "MICAST_AIRPLAY_RTSP_PORT",
+            "MICAST_AIRPLAY_UDP_BASE",
+            "MICAST_AIRPLAY2_PORT",
+        }
+        and value.strip().lower() in {"", "auto"}
+    )
 )
 
 # Make .env values visible to os.environ so file-persistence checks below can
@@ -311,13 +320,20 @@ class Settings(BaseSettings):
     airplay_enabled: bool = True
     strict_ports: list[str] = Field(default_factory=list)
 
-    @field_validator("port", "stream_port", "airplay_rtsp_port", "airplay_udp_base",
-                     "airplay2_port", mode="before")
+    @field_validator(
+        "port",
+        "stream_port",
+        "airplay_rtsp_port",
+        "airplay_udp_base",
+        "airplay2_port",
+        mode="before",
+    )
     @classmethod
     def _automatic_port(cls, value, info):
         if isinstance(value, str) and value.strip().lower() in {"", "auto"}:
             return cls.model_fields[info.field_name].default
         return value
+
     # Experimental LAN discovery of external playback targets: AirPlay mDNS
     # browse + DLNA SSDP M-SEARCH. Off by default so an idle MiCast never
     # scans the network.
@@ -396,7 +412,8 @@ class Settings(BaseSettings):
 
         if "strict_ports" not in data:
             data["strict_ports"] = [
-                key for key, (_, default) in EDITABLE_PORTS.items()
+                key
+                for key, (_, default) in EDITABLE_PORTS.items()
                 if data.get(key) is not None and data[key] != default
             ]
 
@@ -433,8 +450,9 @@ class Settings(BaseSettings):
                 }
             else:
                 env_var = f"MICAST_{key.upper()}"
-                if (env_var not in os.environ or
-                    (key in EDITABLE_PORTS and not env_pinned(env_var))) and hasattr(self, key):
+                if (
+                    env_var not in os.environ or (key in EDITABLE_PORTS and not env_pinned(env_var))
+                ) and hasattr(self, key):
                     setattr(self, key, value)
         delay_limit_ms = 15000 if self.large_delay_enabled else 5000
         for group in self.groups:
@@ -446,6 +464,7 @@ class Settings(BaseSettings):
 
         if os.environ.get("MICAST_DEPLOYMENT", "").strip().lower() == "fnos":
             from micast.ports import AIRPLAY2_RECEIVER_PORT
+
             changed = data.get("airplay2_port") != AIRPLAY2_RECEIVER_PORT or (
                 "airplay2_port" in self.strict_ports
             )
@@ -655,6 +674,10 @@ class Settings(BaseSettings):
                     name="MiCast",
                     target_type=target_type,
                     target_id=target_id,
+                    target_name=current.target_name if current else "",
+                    target_model=current.target_model if current else "",
+                    control_policy=current.control_policy if current else "legacy",
+                    local_target_id=current.local_target_id if current else None,
                     enabled=True,
                 )
             ]
@@ -678,8 +701,12 @@ class Settings(BaseSettings):
         self.selected_device_id = None
         self.speakers = []
         self.groups = []
-        self.receivers = [item for item in self.receivers if item.target_type == "selected"]
-        self.airplay2_instances = []
+        self.receivers = [
+            item for item in self.receivers if item.target_type in {"selected", "dlna"}
+        ]
+        self.airplay2_instances = [
+            item for item in self.airplay2_instances if item.target_type == "dlna"
+        ]
         self.save_to_file()
         return True
 
@@ -691,14 +718,33 @@ class Settings(BaseSettings):
         target_type: str,
         target_id: str,
         enabled: bool = True,
+        target_name: str | None = None,
+        target_model: str | None = None,
+        control_policy: str | None = None,
+        local_target_id: str | None = None,
     ) -> AirPlay2InstanceConfig:
         current = next((item for item in self.airplay2_instances if item.id == instance_id), None)
+        same_target = (
+            current and current.target_type == target_type and current.target_id == target_id
+        )
         updated = AirPlay2InstanceConfig(
             id=instance_id or uuid.uuid4().hex[:12],
             name=name.strip(),
             target_type=target_type,
             target_id=target_id,
             enabled=enabled,
+            control_policy=control_policy
+            if control_policy is not None
+            else (current.control_policy if same_target else "legacy"),
+            local_target_id=local_target_id
+            if control_policy is not None
+            else (current.local_target_id if same_target else None),
+            target_name=target_name
+            if target_name is not None
+            else (current.target_name if current else ""),
+            target_model=target_model
+            if target_model is not None
+            else (current.target_model if current else ""),
         )
         if current:
             self.airplay2_instances[self.airplay2_instances.index(current)] = updated
@@ -819,7 +865,21 @@ class Settings(BaseSettings):
         return list(group.airplay_targets) if group else []
 
     def receiver_dlna_targets(self, receiver_id: str) -> list[str]:
-        """External DLNA renderer UDNs attached to a receiver's group."""
+        """DLNA UDNs for a direct mapping or a group (classic and AirPlay 2)."""
+        entry_id = receiver_id.removeprefix("dlna:")
+        entry = next(
+            (item for item in [*self.receivers, *self.airplay2_instances] if item.id == entry_id),
+            None,
+        )
+        if entry is not None and entry.target_type == "dlna":
+            return [entry.target_id] if entry.target_id else []
+        if (
+            entry is not None
+            and entry.target_type == "speaker"
+            and entry.local_target_id
+            and entry.control_policy in {"auto", "local"}
+        ):
+            return [entry.local_target_id]
         group = self.group_for_receiver(receiver_id)
         return list(group.dlna_targets) if group else []
 
@@ -1224,10 +1284,22 @@ class Settings(BaseSettings):
         return max(matches, key=len) if matches else None
 
     def add_receiver(
-        self, name: str, target_type: str, target_id: str | None = None
+        self,
+        name: str,
+        target_type: str,
+        target_id: str | None = None,
+        *,
+        target_name: str = "",
+        target_model: str = "",
     ) -> ReceiverConfig:
         receiver = ReceiverConfig(
-            id=uuid.uuid4().hex[:12], name=name, target_type=target_type, target_id=target_id
+            id=uuid.uuid4().hex[:12],
+            name=name,
+            target_type=target_type,
+            target_id=target_id,
+            dlna_enabled=False if target_type == "dlna" else None,
+            target_name=target_name,
+            target_model=target_model,
         )
         self.receivers.append(receiver)
         self.save_to_file()
@@ -1249,6 +1321,10 @@ class Settings(BaseSettings):
         target_type: str | None = None,
         target_id: str | None = None,
         enabled: bool | None = None,
+        target_name: str | None = None,
+        target_model: str | None = None,
+        control_policy: str | None = None,
+        local_target_id: str | None = None,
     ) -> ReceiverConfig | None:
         receiver = next((item for item in self.receivers if item.id == receiver_id), None)
         if receiver is None:
@@ -1263,6 +1339,17 @@ class Settings(BaseSettings):
             data["target_id"] = target_id
         if enabled is not None:
             data["enabled"] = enabled
+        if target_name is not None:
+            data["target_name"] = target_name
+        if target_model is not None:
+            data["target_model"] = target_model
+        if data["target_type"] == "dlna":
+            data["dlna_enabled"] = False
+        if (data["target_type"], data["target_id"]) != (receiver.target_type, receiver.target_id):
+            data["control_policy"], data["local_target_id"] = "legacy", None
+        if control_policy is not None:
+            data["control_policy"] = control_policy
+            data["local_target_id"] = local_target_id
         updated = ReceiverConfig.model_validate(data)
         self.receivers[self.receivers.index(receiver)] = updated
         self.save_to_file()

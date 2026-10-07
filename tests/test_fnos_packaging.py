@@ -109,6 +109,15 @@ def test_fnos_setcap_is_arch_aware_and_warns_instead_of_aborting():
         assert "警告" in script
 
 
+def test_fnos_upgrade_restores_the_pre_upgrade_backup():
+    upgrade = (FNOS / "cmd" / "upgrade_callback").read_text(encoding="utf-8")
+    # The backup written by upgrade_init must actually be restored, otherwise
+    # the Xiaomi login and settings are lost on every package upgrade.
+    assert 'tar -xzf "$backup" -C "$TRIM_PKGVAR"' in upgrade
+    assert 'rm -f "$backup"' in upgrade
+    assert "chown" in upgrade
+
+
 def test_fnos_builders_support_arm_without_bundling_x86_airplay2():
     shell = (ROOT / "scripts" / "build-fnos.sh").read_text(encoding="utf-8")
     install = (FNOS / "cmd" / "install_callback").read_text(encoding="utf-8")

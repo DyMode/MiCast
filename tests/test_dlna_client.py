@@ -1,5 +1,7 @@
 """DLNA discovery XML parsing, target config, and classify_device."""
 
+import time
+
 from micast.airplay_discovery import classify_device
 from micast.config import Settings, SpeakerGroupConfig
 from micast.dlna_client import DlnaDevice, DlnaDiscovery, _soap_action
@@ -58,11 +60,22 @@ def test_known_dlna_response_refreshes_liveness():
         control_url="http://192.168.0.20/control",
         last_seen=1,
     )
+    discovery._described_at[location] = time.monotonic()
 
     discovery.note_location(location)
 
     assert discovery._devices["uuid:renderer"].last_seen > 1
     assert discovery._pending_locations == set()
+
+
+def test_known_renderer_periodically_refreshes_service_and_firmware_metadata():
+    location = "http://d/device.xml"
+    discovery = DlnaDiscovery()
+    discovery._devices["d"] = DlnaDevice(
+        "d", "音箱", location=location, control_url="http://d/control"
+    )
+    discovery.note_location(location)
+    assert location in discovery._pending_locations
 
 
 def test_update_group_sanitizes_dlna_targets(monkeypatch):

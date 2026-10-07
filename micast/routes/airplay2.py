@@ -22,6 +22,17 @@ def install(bridge: AudioBridge) -> APIRouter:
         if target_type == "group":
             group = next((item for item in settings.groups if item.id == target_id), None)
             return group.name if group else "未找到音箱组合"
+        if target_type == "dlna":
+            device = bridge.dlna_discovery.resolve(target_id) if bridge.dlna_discovery else None
+            saved = next(
+                (
+                    item
+                    for item in [*settings.receivers, *settings.airplay2_instances]
+                    if item.target_type == "dlna" and item.target_id == target_id
+                ),
+                None,
+            )
+            return device.name if device else (saved.target_name if saved else "离线 DLNA 设备")
         return "当前选择的音箱"
 
     @router.get("")
@@ -121,6 +132,19 @@ def install(bridge: AudioBridge) -> APIRouter:
                     {"type": "speaker", "id": item.did, "name": item.alias or item.did}
                     for item in settings.speakers
                 ],
+                *[
+                    {"type": "dlna", "id": item.id, "name": item.name}
+                    for item in (bridge.dlna_discovery.devices() if bridge.dlna_discovery else [])
+                    if item.online and item.control_url
+                ],
+                *[
+                    {"type": "dlna", "id": item.target_id, "name": item.target_name or item.name}
+                    for item in [*settings.receivers, *settings.airplay2_instances]
+                    if item.target_type == "dlna"
+                    and not (
+                        bridge.dlna_discovery and bridge.dlna_discovery.resolve(item.target_id)
+                    )
+                ],
                 *[{"type": "group", "id": item.id, "name": item.name} for item in settings.groups],
             ],
         }
@@ -136,17 +160,24 @@ def install(bridge: AudioBridge) -> APIRouter:
         name = str(payload.get("name", "")).strip()
         target_type = str(payload.get("target_type", "")).strip()
         target_id = str(payload.get("target_id", "")).strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="请输入实例名称")
+        if not name or len(name) > 50:
+            raise HTTPException(status_code=400, detail="请输入 1–50 个字符的实例名称")
         if len([item for item in settings.airplay2_instances if item.id != instance_id]) >= 32:
             raise HTTPException(status_code=409, detail="最多支持 32 个播放入口")
-        if target_type not in ("speaker", "group"):
+        if target_type not in ("speaker", "group", "dlna"):
             raise HTTPException(status_code=400, detail="请选择播放目标")
         valid_target = (
             any(item.did == target_id for item in settings.speakers)
             if target_type == "speaker"
             else any(item.id == target_id for item in settings.groups)
         )
+        device = None
+        if target_type == "dlna":
+            device = bridge.dlna_discovery.resolve(target_id) if bridge.dlna_discovery else None
+            valid_target = bool(device and device.online) or any(
+                item.target_type == "dlna" and item.target_id == target_id
+                for item in [*settings.receivers, *settings.airplay2_instances]
+            )
         if not valid_target:
             raise HTTPException(status_code=400, detail="播放目标不存在")
         item = await apply_config_transaction(
@@ -156,6 +187,8 @@ def install(bridge: AudioBridge) -> APIRouter:
                 target_type=target_type,
                 target_id=target_id,
                 enabled=bool(payload.get("enabled", True)),
+                target_name=device.name if device else None,
+                target_model=device.model if device else None,
             ),
             bridge.apply_config_change,
         )

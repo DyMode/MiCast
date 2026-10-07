@@ -40,6 +40,8 @@ def entry_fingerprint(s: Settings, entry_id: str) -> EntryFingerprint | None:
         name = receiver.name
         target = {
             "type": receiver.target_type,
+            "control_policy": receiver.control_policy,
+            "local_target_id": receiver.local_target_id,
             # Resolve "selected" so re-selecting a speaker diffs this entry.
             "id": receiver.target_id
             or (s.selected_device_id if receiver.target_type == "selected" else None),
@@ -47,7 +49,12 @@ def entry_fingerprint(s: Settings, entry_id: str) -> EntryFingerprint | None:
     elif instance is not None:
         kind = "airplay2"
         name = instance.name
-        target = {"type": instance.target_type, "id": instance.target_id}
+        target = {
+            "type": instance.target_type,
+            "id": instance.target_id,
+            "control_policy": instance.control_policy,
+            "local_target_id": instance.local_target_id,
+        }
     else:
         return None
     group = s.group_for_receiver(entry_id)

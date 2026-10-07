@@ -34,11 +34,17 @@ PLAY_ERROR_MAX_ATTEMPTS = 5
 PLAY_ERROR_BACKOFF_FACTOR = 2.0
 PLAY_ERROR_MAX_BACKOFF_SECONDS = 300.0
 
-# Xiaomi's status helper performs an implicit device-list request before each
-# player query. A two-second watchdog therefore doubled cloud traffic without
-# improving recovery in practice; three five-second misses still fit the
-# existing 15-second restore guard.
+# Fast confirmation/recovery checks; healthy playback uses six times this interval.
 STATUS_CHECK_INTERVAL_SECONDS = 5.0
+
+
+def status_check_delay(*, initial=False, healthy=False, failures=0):
+    if failures:
+        return STATUS_CHECK_INTERVAL_SECONDS * min(6 * 2 ** min(failures - 1, 2), 24)
+    if initial:
+        return STATUS_CHECK_INTERVAL_SECONDS * 0.6
+    return STATUS_CHECK_INTERVAL_SECONDS * (6 if healthy else 1)
+
 # The formats a speaker can be asked to play, in the app's own words:
 #
 #   mp3 / flac / wav — our encoder's output (settings.audio.format)
@@ -98,6 +104,8 @@ class DeviceManager:
         # ground truth (post-login, explicit refresh) pass force=True.
         self._devices_fetched_at = 0.0
         self._watchdog_tasks: dict[str, asyncio.Task] = {}
+        self._status_confirm_tasks: dict[str, asyncio.Task] = {}
+        self._player_observations: dict[str, dict] = {}
         self._playing: set[str] = set()
         self._paused: set[str] = set()
         self._stream_urls: dict[str, str] = {}
@@ -150,8 +158,10 @@ class DeviceManager:
 
     def reset(self) -> None:
         """Drop every cached device/playback state (清空数据 → 回到引导页)."""
-        for task in self._watchdog_tasks.values():
+        for task in (*self._watchdog_tasks.values(), *self._status_confirm_tasks.values()):
             task.cancel()
+        self._status_confirm_tasks.clear()
+        self._player_observations.clear()
         self._watchdog_tasks.clear()
         self._devices = []
         self._service = None
@@ -181,7 +191,8 @@ class DeviceManager:
         # Persist any capability record still waiting in the debounce window.
         self._codec_save_deadline = 0.0
         self._save_codec_capabilities()
-        tasks = [task for task in self._watchdog_tasks.values() if not task.done()]
+        tasks = [task for task in (*self._watchdog_tasks.values(),
+                                  *self._status_confirm_tasks.values()) if not task.done()]
         if self._error_retry_task and not self._error_retry_task.done():
             tasks.append(self._error_retry_task)
         for task in tasks:
@@ -189,6 +200,7 @@ class DeviceManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._watchdog_tasks.clear()
+        self._status_confirm_tasks.clear()
         self._error_retry_task = None
 
     @selected_device_id.setter
@@ -222,6 +234,10 @@ class DeviceManager:
         service = await self.auth.ensure_service()
         if self._service is not service:
             self._service = service
+            from micast.xiaomi.cloud import MiNAService
+
+            if isinstance(service, MiNAService):
+                service.cache_devices(self._devices)
         return self._service is not None
 
     async def list_devices(self, force: bool = False) -> list[dict]:
@@ -241,9 +257,8 @@ class DeviceManager:
             self.auth.note_cloud_result(True)
         except Exception as exc:
             self.auth.note_cloud_result(False)
-            # Never trust miservice's error text: "Login failed" also wraps
-            # pure network errors, and an expired serviceToken can surface as
-            # an opaque {"code": ...} body. Ask Xiaomi directly: a rejected
+            # A failed cloud request does not prove credential expiry.
+            # Ask Xiaomi directly: a rejected
             # passToken kills the login, a working one heals the serviceToken
             # and earns one retry, and an inconclusive check keeps everything.
             logger.warning("device_list failed (%s); verifying login", exc)
@@ -491,6 +506,7 @@ class DeviceManager:
             if owner is not None and self._owners.get(device_id) == owner:
                 self._owners.pop(device_id, None)
             self._stop_watchdog(device_id)
+            self._confirm_idle_status(device_id)
 
     async def stop_playback(
         self,
@@ -565,6 +581,7 @@ class DeviceManager:
                 self.sessions.forget(token, f"speaker:{device_id}")
                 self.sessions.targets.forget(f"speaker:{device_id}", token)
             self._stop_watchdog(device_id)
+            self._confirm_idle_status(device_id)
 
     def playing_ids(self) -> list[str]:
         return list(self._playing)
@@ -912,6 +929,7 @@ class DeviceManager:
             return None if refresh else self._volumes.get(device_id)
         try:
             status = await self.cloud_api(device_id).get_status()
+            self._remember_player_status(device_id, status)
             volume = _find_volume(status)
             if volume is not None:
                 self._volumes[device_id] = volume
@@ -919,6 +937,41 @@ class DeviceManager:
         except Exception as exc:
             logger.debug("Unable to read volume for %s: %s", device_id, exc)
             return None if refresh else self._volumes.get(device_id)
+
+    def _remember_player_status(self, device_id, status):
+        self._player_observations[device_id] = {
+            "status": _find_play_status(status), "checked_at": time.time(),
+            "observed_at": time.monotonic(),
+        }
+        volume = _find_volume(status)
+        if volume is not None:
+            self._volumes[device_id] = volume
+
+    def player_observation(self, device_id):
+        observation = self._player_observations.get(device_id)
+        if observation is None:
+            return {"status": None, "checked_at": None, "fresh": False}
+        return {"status": observation["status"], "checked_at": observation["checked_at"],
+                "fresh": time.monotonic() - observation["observed_at"] <= 45}
+
+    def _confirm_idle_status(self, device_id):
+        self._player_observations.pop(device_id, None)
+        previous = self._status_confirm_tasks.pop(device_id, None)
+        if previous:
+            previous.cancel()
+
+        async def confirm():
+            await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS * 0.4)
+            try:
+                if device_id in self._playing or not self._service or self.cloud_degraded():
+                    return
+                status = await self.cloud_api(device_id).get_status()
+                if device_id not in self._playing:
+                    self._remember_player_status(device_id, status)
+            except Exception:
+                self._player_observations.pop(device_id, None)
+
+        self._status_confirm_tasks[device_id] = asyncio.create_task(confirm())
 
     def is_playing(self, device_id: str) -> bool:
         return device_id in self._playing
@@ -948,9 +1001,15 @@ class DeviceManager:
         self._start_watchdog(device_id)
 
     def _start_watchdog(self, device_id: str) -> None:
+        confirmation = self._status_confirm_tasks.pop(device_id, None)
+        if confirmation:
+            confirmation.cancel()
         task = self._watchdog_tasks.get(device_id)
+        self._player_observations.pop(device_id, None)
         if task and not task.done():
-            return
+            if task is asyncio.current_task():
+                return
+            task.cancel()
         self._watchdog_tasks[device_id] = asyncio.create_task(self._watchdog_loop(device_id))
 
     def _stop_watchdog(self, device_id: str) -> None:
@@ -961,19 +1020,44 @@ class DeviceManager:
     async def _watchdog_loop(self, device_id: str) -> None:
         """Restore an active AirPlay stream after voice-assistant interruptions."""
         inactive_checks = 0
+        failures = 0
+        delay = status_check_delay(initial=True)
         while device_id in self._playing:
             try:
-                await asyncio.sleep(STATUS_CHECK_INTERVAL_SECONDS)
+                await asyncio.sleep(delay)
+                if device_id not in self._playing:
+                    break
+                delay = status_check_delay()
                 if not self._service:
+                    self._player_observations.pop(device_id, None)
+                    failures += 1
+                    delay = status_check_delay(failures=failures)
                     continue
                 if self.cloud_degraded():
+                    self._player_observations.pop(device_id, None)
+                    failures += 1
+                    delay = status_check_delay(failures=failures)
                     # Polling a cloud that is not answering only adds lookups to
                     # the resolver pool the user's login has to pass through.
                     continue
                 api = self.cloud_api(device_id)
+                observed_owner = self._owners.get(device_id)
+                observed_url = self._stream_urls.get(device_id)
                 status = await api.get_status()
+                if device_id not in self._playing:
+                    break
+                if (self._owners.get(device_id), self._stream_urls.get(device_id)) != (
+                    observed_owner, observed_url
+                ):
+                    continue
+                self._remember_player_status(device_id, status)
                 logger.debug("Speaker %s status: %s", device_id, status)
                 play_status = _find_play_status(status)
+                if play_status is None:
+                    failures += 1
+                    delay = status_check_delay(failures=failures)
+                    continue
+                failures = 0
                 owner = self._owners.get(device_id, "")
                 finite_media = owner == MANUAL_PLAY_OWNER or owner.startswith("dlna:")
                 media = getattr(getattr(self, "bridge", None), "media_playback", None)
@@ -993,6 +1077,7 @@ class DeviceManager:
                     except Exception:
                         active = True  # never restore on a checker failure
                 if active:
+                    delay = status_check_delay(healthy=True)
                     inactive_checks = 0
                     anchor_group = self.anchor_group_of(device_id)
                     if (
@@ -1067,6 +1152,9 @@ class DeviceManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                self._player_observations.pop(device_id, None)
+                failures += 1
+                delay = status_check_delay(failures=failures)
                 logger.warning("Watchdog error for %s: %s", device_id, e)
 
     async def recover_play_stream(self, device_id, url, owner=None, force=True):

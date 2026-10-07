@@ -75,7 +75,11 @@ class _FakeDeviceManager:
             verdict = None
         self.records.setdefault(did, {})[fmt] = verdict
         self.meta.setdefault(did, {})[fmt] = {
-            "status": "unverified" if verdict is None else "supported" if verdict else "unsupported",
+            "status": "unverified"
+            if verdict is None
+            else "supported"
+            if verdict
+            else "unsupported",
             "verified_at": int(__import__("time").time()),
             "reason": reason,
         }
@@ -358,3 +362,86 @@ async def test_the_probe_sits_out_a_cloud_outage(monkeypatch, fast_probe):
 
     assert device_manager.records == {}
     assert device_manager.play_calls == []
+
+
+@pytest.mark.asyncio
+async def test_probe_with_real_session_registry_finishes_all_formats_without_phantom_session(
+    monkeypatch,
+):
+    from micast.audio_bridge import AudioBridge
+    from micast.playback_sessions import PlaybackSessions
+
+    manager = _FakeDeviceManager()
+    manager.sessions = PlaybackSessions(lambda: 120)
+    bridge = AudioBridge.__new__(AudioBridge)
+    bridge.sessions = manager.sessions
+    observed = []
+
+    async def probe(*args, **kwargs):
+        owner = args[5]
+        session = manager.sessions.current(owner)
+        observed.append(session.protocol)
+        return True
+
+    monkeypatch.setattr(codec_probe, "probe_format", probe)
+    fixtures = {fmt: (fmt, Path("missing"), "audio/x") for fmt in ("mp3", "flac", "wav")}
+    result = await codec_probe.probe_device_formats(
+        None,
+        manager,
+        "d",
+        fixtures,
+        owner="auto-probe:d",
+        should_continue=lambda: not bridge.has_active_sessions(),
+    )
+    assert set(result) == set(fixtures)
+    assert observed == ["diagnostic"] * 3
+    assert manager.stopped == ["d"] * 3
+    assert not manager.sessions.snapshot()
+    assert not bridge.has_active_sessions()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_probe_stops_silent_test_and_releases_its_session(monkeypatch):
+    import asyncio
+
+    from micast.playback_sessions import PlaybackSessions
+
+    manager = _FakeDeviceManager()
+    manager.sessions = PlaybackSessions(lambda: 120)
+    entered = asyncio.Event()
+
+    async def probe(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(codec_probe, "probe_format", probe)
+    task = asyncio.create_task(
+        codec_probe.probe_device_formats(
+            None,
+            manager,
+            "d",
+            {"mp3": ("mp3", Path("missing"), "audio/mpeg")},
+            owner="auto-probe:d",
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert manager.stopped == ["d"]
+    assert not manager.sessions.snapshot()
+
+
+@pytest.mark.asyncio
+async def test_empty_requested_probe_formats_never_start_playback():
+    manager = _FakeDeviceManager()
+    result = await codec_probe.probe_device_formats(
+        None,
+        manager,
+        "d",
+        {"mp3": ("mp3", Path("missing"), "audio/mpeg")},
+        owner="auto-probe:d",
+        formats=[],
+    )
+    assert result == {}
+    assert not manager.play_calls
