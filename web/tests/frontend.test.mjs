@@ -49,7 +49,8 @@ before(async () => {
 after(async () => { await browser?.close(); await server?.close(); });
 
 async function open(t, options = {}, overrides = {}) {
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...options });
+  const {skipPlayer, ...browserOptions} = options;
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...browserOptions });
   t.after(() => context.close());
   const page = await context.newPage();
   page.setDefaultTimeout(7000);
@@ -59,7 +60,7 @@ async function open(t, options = {}, overrides = {}) {
   const requests = await installFixtures(page, overrides);
   await page.goto(url);
   await page.waitForSelector('.app-shell');
-  await page.waitForFunction(() => document.querySelector('.now-playing'));
+  if (!skipPlayer) await page.waitForFunction(() => document.querySelector('.now-playing'));
   return { page, requests };
 }
 async function navigate(page, section) {
@@ -698,7 +699,12 @@ for (const [device, viewport] of [['desktop', {width:1280,height:900}], ['mobile
     });
     await navigate(page,'settings');
     assert.equal(await page.locator('[data-port-input="airplay2_port"]').count(),0);
+    await page.locator('[data-open-advanced]').getByText('1 个端口异常',{exact:true}).waitFor();
+    await page.locator('[data-open-advanced]').click();
+    await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='advanced');
     await page.getByText('固定 TCP 7000 被占用，释放后重新启动',{exact:true}).waitFor();
+    await page.locator('[data-advanced-back]').click();
+    await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='settings');
     assert.equal(await page.locator('[data-retry-protocol="dlna"]').count(),0);
     assert.equal(await page.locator('#airplay2-enabled').count(),1);
     assert.equal(await page.locator('#dlna-enabled').count(),1);
@@ -892,17 +898,25 @@ test('dark navigation uses readable text accent and port fields fit five digits'
     '/api/config':async()=>({...config,ports:[{id:'stream_port',name:'音频流服务',mode:'auto',editable:true,preferred:42400,actual:42400,protocol:'tcp',status:'listening',detail:'音箱拉取音频流'}]})
   });
   await navigate(page,'settings');
+  // Read the settled theme color, independently of the navigation transition.
+  await page.addStyleTag({content:'.sidebar .nav-item { transition: none !important; }'});
+  const metrics=await page.evaluate(()=>{
+    const color=getComputedStyle(document.querySelector('.sidebar .nav-item.active')).color;
+    return {color};
+  });
+  await page.locator('[data-open-advanced]').click();
+  await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='advanced');
   const input=page.locator('.port-control .settings-number');
   await input.waitFor();
   await page.waitForTimeout(600);
-  const metrics=await page.evaluate(()=>{
+  const field=await page.evaluate(()=>{
     const input=document.querySelector('.port-control .settings-number');
-    const color=getComputedStyle(document.querySelector('.sidebar .nav-item.active')).color;
-    return {color,width:input.getBoundingClientRect().width,height:input.getBoundingClientRect().height,font:parseFloat(getComputedStyle(input).fontSize),scrollWidth:input.scrollWidth,clientWidth:input.clientWidth};
+    return {width:input.getBoundingClientRect().width,height:input.getBoundingClientRect().height,font:parseFloat(getComputedStyle(input).fontSize),scrollWidth:input.scrollWidth,clientWidth:input.clientWidth};
   });
-  assert.equal(metrics.color,'rgb(214, 235, 255)');
-  assert.ok(metrics.width<=95);assert.ok(metrics.height<=42);assert.ok(metrics.font<=16);
-  assert.ok(metrics.scrollWidth<=metrics.clientWidth);
+  const metricsAll={...metrics,...field};
+  assert.equal(metricsAll.color,'rgb(214, 235, 255)');
+  assert.ok(metricsAll.width<=95);assert.ok(metricsAll.height<=42);assert.ok(metricsAll.font<=16);
+  assert.ok(metricsAll.scrollWidth<=metricsAll.clientWidth);
   await input.scrollIntoViewIfNeeded();
 
 });
@@ -1010,4 +1024,239 @@ test('mobile mini centers cover and fallback and separates drag from click',asyn
  const g=await page.locator('.header-playback-trigger.visible').evaluate(e=>{const r=e.getBoundingClientRect(),c=(e.querySelector('img')??e.querySelector('svg')).getBoundingClientRect();return {w:r.width,h:r.height,dx:c.x+c.width/2-r.x-r.width/2,dy:c.y+c.height/2-r.y-r.height/2};});assert.equal(g.w,56);assert.equal(g.h,56);assert.ok(Math.abs(g.dx)<1&&Math.abs(g.dy)<1,JSON.stringify(g));
  }
  const mini=page.locator('.header-playback-trigger.visible'),r=await mini.boundingBox();await page.mouse.move(r.x+28,r.y+28);await page.mouse.down();await page.mouse.move(45,r.y-40,{steps:8});await page.mouse.up();await page.waitForTimeout(250);assert.equal(await mini.count(),1);assert.equal(Math.round((await mini.boundingBox()).x),12);await mini.click();assert.equal(await page.locator('.now-playing:not(.is-minimized)').count(),1);
+});
+
+
+for (const [device, viewport] of [['desktop', {width:1280,height:900}], ['mobile', {width:390,height:844}]]) {
+ test(`Local bridge creates an AirPlay-only mapping without Xiaomi on ${device}`, async t => {
+  const udn = 'uuid:local:renderer';
+  let localConfig = {...config, receivers:[], groups:[], network_discovery_enabled:true};
+  const localDevice = {id:udn,name:'书房音箱',model:'DLNA Renderer',kind:'speaker',online:true,supported:true,attached_group:null,stream_status:'',stream_detail:''};
+  const {page,requests} = await open(t,{viewport,skipPlayer:true},{
+   '/api/config':async()=>localConfig,
+   '/api/xiaomi/status':async()=>({logged_in:false,user_id:null}),
+   '/api/dlna-devices':async()=>[localDevice],
+   '/api/receivers/definitions':async route=>{
+    const payload=JSON.parse(route.request().postData());
+    assert.equal(payload.target_id,udn);
+    const item={...payload,id:'local-entry',enabled:true,dlna_enabled:false,target_name:localDevice.name};
+    localConfig={...localConfig,receivers:[item]};return item;
+   },
+  });
+  await navigate(page,'receivers');
+  const section=page.locator('[data-local-bridge]');
+  await section.getByRole('button',{name:'添加 AirPlay 入口',exact:true}).click();
+  const input=section.locator('input[name=name]');
+  await input.fill('书房本地播放');
+  await page.evaluate(()=>window.dispatchEvent(new Event('micast:request-render')));
+  assert.equal(await section.locator('input[name=name]').inputValue(),'书房本地播放');
+  await page.screenshot({path:`../.run/local-bridge-${device}.png`,fullPage:true});
+  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth);
+  assert.equal(overflow,false);
+  await section.getByRole('button',{name:'创建入口',exact:true}).click();
+  await section.getByRole('button',{name:'编辑入口',exact:true}).waitFor();
+  assert.equal(localConfig.receivers[0].target_type,'dlna');
+  assert.equal(localConfig.receivers[0].name,'书房本地播放');
+  assert.equal(requests.some(r=>r.path==='/api/devices'),false);
+ });
+}
+
+test('Local bridge onboarding offers a complete path without Xiaomi login',async t=>{
+ const {page}=await open(t);
+ await page.evaluate(async()=>{
+  const {store}=await import('/app/micast/src/state.ts');
+  store.set({access:{...store.get().access,setup_complete:false},onboardingStep:'xiaomi',xiaomi:{logged_in:false},devices:[]});
+  window.dispatchEvent(new Event('micast:request-render'));
+ });
+ await page.locator('[data-setup-local]').click();
+ await page.locator('[data-local-bridge]').waitFor();
+ assert.equal(await page.locator('[data-local-scan]').textContent(),'开启并发现');
+ await page.locator('[data-receivers-skip]').click();
+ await page.getByRole('heading',{name:'已经准备好了'}).waitFor();
+});
+
+
+test('Local bridge uses the fixed AirPlay 2 entry on single-instance installs',async t=>{
+ const udn='uuid:single:device';
+ let cfg={...config,receivers:[],groups:[],airplay_engine:'airplay2',airplay2_available:true,airplay2_mode:'single',airplay2_enabled:false,airplay2_instances:[],network_discovery_enabled:true,protocol_status:{airplay:{status:'unsupported'}}};
+ const {page,requests}=await open(t,{skipPlayer:true},{
+  '/api/config':async()=>cfg,
+  '/api/xiaomi/status':async()=>({logged_in:false}),
+  '/api/dlna-devices':async()=>[{id:udn,name:'本地播放器',online:true,supported:true,model:'Test',kind:'speaker'}],
+  '/api/airplay2/instances':async route=>{const item=JSON.parse(route.request().postData());assert.equal(item.id,'airplay2');assert.equal(item.target_id,udn);cfg={...cfg,airplay2_instances:[{...item,enabled:true}]};return item;},
+  '/api/config/airplay2':async route=>{cfg={...cfg,airplay2_enabled:JSON.parse(route.request().postData()).enabled};return {airplay2_enabled:cfg.airplay2_enabled};},
+ });
+ await navigate(page,'receivers');
+ const section=page.locator('[data-local-bridge]');
+ await section.getByRole('button',{name:'添加 AirPlay 入口',exact:true}).click();
+ await section.getByText('当前安装提供一个固定 AirPlay 2 入口。绑定其他设备会替换它的播放目标。').waitFor();
+ await section.getByRole('button',{name:'创建入口',exact:true}).click();
+ await section.getByRole('button',{name:'编辑入口',exact:true}).waitFor();
+ assert.equal(cfg.airplay2_enabled,true);
+ await section.locator('[data-local-enabled]').uncheck();
+ await page.waitForFunction(()=>document.querySelector('[data-local-enabled]')?.checked===false);
+ assert.equal(requests.some(r=>r.path==='/api/receivers/definitions'),false);
+ assert.equal(requests.some(r=>r.path==='/api/airplay2/instances/airplay2/enabled'),false);
+});
+
+for (const [theme, width] of [['light', 1280], ['dark', 320]]) {
+ test(`Capability evidence and explicit control policies preserve drafts on ${theme}`, async t => {
+  const key='xiaomi:d1';
+  let proof={action:'play_stream',format:'MP3',level:'pulled',stale:false,can_confirm:true,pulled_at:1000,verified_at:1000};
+  let entry={id:'r1',kind:'classic',name:'客厅音箱',target_type:'speaker',policy:'legacy',local_target_id:null,route:{channel:'cloud',reason:'保持米家云端控制'}};
+  const {page,requests}=await open(t,{viewport:{width,height:900},colorScheme:theme},{
+   '/api/capabilities':async()=>({devices:[{id:key,name:'OH2',model:'OH2',availability:'online',revision:0,records:[proof]},{id:'dlna:uuid:oh2',name:'OH2 本地',model:'OH2',availability:'online',revision:0,records:[]}],entries:[entry],runtime:{}}),
+   '/api/capabilities/confirm':async route=>{const payload=JSON.parse(route.request().postData());assert.equal(payload.device_id,key);assert.equal(payload.format,'MP3');assert.equal(payload.pulled_at,1000);proof={...proof,level:'confirmed',can_confirm:false};return {ok:true};},
+   '/api/capabilities/classic/r1':async route=>{const payload=JSON.parse(route.request().postData());entry={...entry,policy:payload.policy,local_target_id:payload.local_target_id,route:{channel:payload.policy==='local'?'dlna':'cloud',reason:payload.policy==='local'?'用户选择仅本地':'保持米家云端控制'}};return {ok:true};},
+  });
+  await navigate(page,'settings');
+  await page.locator('[data-open-advanced]').click();
+  await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='advanced');
+  const panel=page.locator('.main-content');
+  await panel.getByLabel('客厅音箱 控制策略').selectOption('local');
+  await page.waitForFunction(()=>!document.querySelector('[data-cap-policy]').disabled);
+  const savedRequest=page.waitForRequest(request=>request.url().includes('/api/capabilities/classic/r1')&&JSON.parse(request.postData()||'{}').local_target_id==='uuid:oh2');
+  await panel.getByLabel('客厅音箱 关联本地设备').selectOption('uuid:oh2');
+  const saved=await savedRequest;
+  assert.deepEqual(JSON.parse(saved.postData()),{policy:'local',local_target_id:'uuid:oh2'});
+  await page.evaluate(()=>window.dispatchEvent(new Event('micast:request-render')));
+  assert.equal(await panel.getByLabel('客厅音箱 控制策略').inputValue(),'local');
+  assert.equal(await panel.getByLabel('客厅音箱 关联本地设备').inputValue(),'uuid:oh2');
+  await page.evaluate(async()=>{
+   const {store}=await import('/app/micast/src/state.ts');
+   store.setUi({activeSection:'account'});
+   window.dispatchEvent(new Event('micast:request-render'));
+  });
+  await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='account');
+  const account=page.locator('.main-content');
+  await account.getByRole('button',{name:'已听到声音',exact:true}).click();
+  await account.locator('[data-cap-device]').click();
+  await account.getByText(/已确认出声 ·/).waitFor();
+  await page.evaluate(async()=>{
+   const {store}=await import('/app/micast/src/state.ts');
+   store.setUi({activeSection:'advanced'});
+   window.dispatchEvent(new Event('micast:request-render'));
+  });
+  await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='advanced');
+  await page.waitForFunction(()=>[...document.querySelectorAll('.main-content .cell-subtitle')].some(el=>el.textContent.trim()==='用户选择仅本地'));
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  assert.equal(requests.some(request=>request.path==='/api/xiaomi/login'),false);
+  await page.screenshot({path:`../.run/capabilities-${theme}.png`});
+ });
+}
+
+
+test('Capability reads cannot restore the previous account after a late response', async t => {
+ const {page}=await open(t);
+ await page.evaluate(async()=>{
+  const {api}=await import('/app/micast/src/api.ts');
+  window.__capReads=0;
+  api.getCapabilities=async()=>{
+   window.__capReads++;
+   if(window.__capReads===1) return new Promise(resolve=>window.__releaseCapability=()=>resolve({devices:[],entries:[{id:'old',kind:'classic',name:'旧账号能力',target_type:'speaker',policy:'legacy',local_target_id:null,route:{channel:'cloud',reason:'旧状态'}}],runtime:{}}));
+   return {devices:[],entries:[],runtime:{}};
+  };
+ });
+ await page.evaluate(async()=>{
+  const {store}=await import('/app/micast/src/state.ts');
+  store.setUi({activeSection:'account'});
+  window.dispatchEvent(new Event('micast:request-render'));
+ });
+ await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='account');
+ await page.waitForFunction(()=>!!window.__releaseCapability);
+ await page.evaluate(async()=>{
+  const {store}=await import('/app/micast/src/state.ts');
+  store.set({xiaomi:{logged_in:false,user_id:null},devices:[]});
+  window.__releaseCapability();
+ });
+ await page.waitForTimeout(50);
+ assert.equal(await page.locator('.main-content').getByText('旧账号能力',{exact:true}).count(),0);
+ // A fresh read on the new account must replace the loading state, not the old data.
+ await page.evaluate(async()=>{
+  const {store}=await import('/app/micast/src/state.ts');
+  store.set({xiaomi:{logged_in:true,user_id:'new-account'}});
+  store.setUi({activeSection:'account'});
+  window.dispatchEvent(new Event('micast:request-render'));
+ });
+ await page.getByText('尚无验证记录',{exact:true}).waitFor();
+ assert.equal(await page.locator('.main-content').getByText('旧账号能力',{exact:true}).count(),0);
+});
+
+test('Pending capability policy save disables the row and rejects repeated changes', async t => {
+ const {page}=await open(t);
+ await page.evaluate(async()=>{
+  const {api}=await import('/app/micast/src/api.ts');
+  window.__capSaves=0;
+  window.__capEntry={id:'r1',kind:'classic',name:'测试入口',target_type:'speaker',policy:'legacy',local_target_id:null,route:{channel:'cloud',reason:'云端'}};
+  api.getCapabilities=async()=>({devices:[],entries:[window.__capEntry],runtime:{}});
+  api.setControlPolicy=async()=>{
+   window.__capSaves++;
+   return new Promise(resolve=>window.__finishCapSave=()=>resolve({ok:true}));
+  };
+ });
+ await navigate(page,'settings');
+ await page.locator('[data-open-advanced]').click();
+ await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='advanced');
+ const select=page.getByLabel('测试入口 控制策略');
+ await select.selectOption('cloud');
+ await page.waitForFunction(()=>window.__capSaves===1);
+ assert.equal(await select.isDisabled(),true);
+ assert.equal(await select.inputValue(),'cloud');
+ // A second change while the save is in flight must not start another save.
+ await page.evaluate(()=>{
+  const select=document.querySelector('[data-cap-policy]');
+  select.value='legacy';
+  select.dispatchEvent(new Event('change',{bubbles:true}));
+ });
+ assert.equal(await page.evaluate(()=>window.__capSaves),1);
+ // Let the save finish; the server now reports the new policy.
+ await page.evaluate(()=>{window.__capEntry={...window.__capEntry,policy:'cloud'};window.__finishCapSave();});
+ await page.waitForFunction(()=>!document.querySelector('[data-cap-policy]').disabled);
+ assert.equal(await select.inputValue(),'cloud');
+});
+
+test('Advanced settings subpage roundtrips and the notify webhook saves on the account page', async t => {
+ const {page,requests}=await open(t);
+ await navigate(page,'settings');
+ await page.locator('[data-open-advanced]').click();
+ await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='advanced');
+ await page.getByRole('heading',{name:'高级设置'}).waitFor();
+ await page.locator('[data-advanced-back]').click();
+ await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='settings');
+ await page.evaluate(async()=>{
+  const {store}=await import('/app/micast/src/state.ts');
+  store.setUi({activeSection:'account'});
+  window.dispatchEvent(new Event('micast:request-render'));
+ });
+ await page.waitForFunction(()=>document.querySelector('.main-content').dataset.activeSection==='account');
+ const input=page.locator('#notify-webhook');
+ await input.fill('https://example.test/hook');
+ await page.locator('#notify-webhook-status').getByText('已保存',{exact:true}).waitFor();
+ assert.deepEqual(JSON.parse(requests.find(r=>r.path==='/api/config/notify-webhook').body),{url:'https://example.test/hook'});
+});
+
+
+
+test('leaving account cancels a pending notification address save', async t => {
+ const {page,requests}=await open(t);
+ await navigate(page,'settings');
+ await page.locator('[data-open-account]').click();
+ await page.locator('#notify-webhook').fill('https://example.test/abandoned');
+ await page.locator('[data-account-back]').click();
+ await page.waitForTimeout(800);
+ assert.equal(requests.filter(r=>r.path==='/api/config/notify-webhook').length,0);
+});
+
+test('DLNA help opens beside the title without a permanent notice', async t => {
+ const {page}=await open(t,{viewport:{width:390,height:844}});
+ await navigate(page,'settings');
+ const help=page.locator('.protocol-help');
+ assert.equal(await help.count(),1);
+ assert.equal(await help.getAttribute('open'),null);
+ await help.locator('summary').click();
+ assert.equal(await help.locator('.protocol-help-content').isVisible(),true);
+ const bounds=await help.locator('.protocol-help-content').boundingBox();
+ assert.ok(bounds.x>=0 && bounds.x+bounds.width<=390);
+ await help.locator('summary').click();
+ assert.equal(await help.getAttribute('open'),null);
 });

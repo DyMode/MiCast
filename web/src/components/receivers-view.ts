@@ -1,3 +1,4 @@
+import { renderLocalBridge, bindLocalBridge, localDevice } from "./local-bridge";
 import type { State } from "../state";
 import { icon, brandIcon } from "../icons";
 import { api } from "../api";
@@ -48,7 +49,9 @@ export function renderReceiversView(state: State): string {
             const detail = compactTargetLabel(r.name, r.did, state);
             const definition = fullConfig?.receivers.find((item) => item.id === r.did);
             const mapped = Boolean(definition && settingsTargetIds(definition, state).length);
-            const available = r.status === "running" && mapped;
+            const local = definition?.target_type === "dlna";
+            const offline = local && (!fullConfig?.network_discovery_enabled || !localDevice(definition?.target_id || "")?.online);
+            const available = r.status === "running" && mapped && !offline;
             return `
               <div class="receiver-card">
                 <div class="receiver-heading">
@@ -56,12 +59,12 @@ export function renderReceiversView(state: State): string {
                     <div class="device-name">${escapeHtml(r.name)}</div>
                     <div class="receiver-protocols">
                       <span class="protocol-badge protocol-airplay">经典 AirPlay</span>
-                      ${dlnaEnabled ? `<span class="protocol-badge protocol-dlna">DLNA</span>` : ""}
+                      ${dlnaEnabled && definition?.target_type !== "dlna" && definition?.dlna_enabled !== false ? `<span class="protocol-badge protocol-dlna">DLNA</span>` : ""}${definition?.target_type === "dlna" ? `<span class="protocol-badge protocol-dlna">本地桥接</span>` : ""}
                     </div>
                     ${detail ? `<span class="caption">${escapeHtml(detail)}</span>` : ""}
                   </div>
                 <span class="status-pill ${available ? "running" : r.status === "error" ? "error" : ""}">
-                  ${!mapped ? "未设置" : casting ? "投送中" : paused ? "已暂停" : available ? "可连接" : r.status === "error" ? "不可用" : "准备中"}
+                  ${offline ? fullConfig?.network_discovery_enabled ? "目标离线" : "发现已暂停" : !mapped ? "未设置" : casting ? "投送中" : paused ? "已暂停" : available ? "可连接" : r.status === "error" ? "不可用" : "准备中"}
                 </span>
                 </div>
               </div>
@@ -88,6 +91,7 @@ export function renderReceiversView(state: State): string {
     <div class="group-header">经典 AirPlay${dlnaEnabled ? " / DLNA" : ""} · ${receivers.length} 个入口</div>
     ${content}
     ${state.airplay2?.enabled ? renderAirPlay2Entries(state) : ""}
+    ${renderLocalBridge(state)}
     ${renderManagement(state)}
   `;
 }
@@ -96,7 +100,7 @@ function renderAirPlay2Entries(state: State): string {
   const entries = state.airplay2?.instances ?? [];
   if (!entries.length) return "";
   return `
-    <div class="group-header">AirPlay 2 · ${entries.length} 个入口 <span class="feature-badge">实验性</span></div>
+    <div class="group-header with-action">AirPlay 2 · ${entries.length} 个入口 <span class="feature-badge">实验性</span><button class="button plain" type="button" data-open-airplay2-manage>管理</button></div>
     <div class="receiver-grid">${entries.map((item) => {
       const available = item.enabled && item.status === "running";
       return `<div class="receiver-card">
@@ -116,7 +120,7 @@ function renderManagement(state: State): string {
   const config = state.fullConfig;
   if (!config) return "";
   const publishedReceivers = config.receivers.filter(
-    (item) => config.sync_groups_enabled || item.target_type !== "group"
+    (item) => item.target_type !== "dlna" && (config.sync_groups_enabled || item.target_type !== "group")
   );
   const usedTargets = new Set(
     config.receivers
@@ -203,7 +207,10 @@ function renderManagement(state: State): string {
     </div></div></details>`;
 }
 
-export function bindReceiversView(container: HTMLElement, rerender: () => void) {  bindNetworkSections(container);
+export function bindReceiversView(container: HTMLElement, rerender: () => void, onOpenAirPlay2?: () => void) {
+  bindNetworkSections(container);
+  bindLocalBridge(container, rerender);
+  container.querySelector("[data-open-airplay2-manage]")?.addEventListener("click", () => onOpenAirPlay2?.());
   container.querySelector<HTMLFormElement>("[data-create-receiver]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (store.get().saving) {

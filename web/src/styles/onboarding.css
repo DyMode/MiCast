@@ -145,3 +145,7 @@
  .setup-shell { grid-template-columns: 9rem minmax(0,1fr); max-width: 60rem; gap: .75rem; }
  .setup-steps { padding: 0; }
 }
+
+/* Discovery lists can grow: scroll inside setup without clipping its actions. */
+.setup-content { max-height: calc(100dvh - 112px); overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 639px) { .setup-content { max-height: calc(100dvh - 160px); } }

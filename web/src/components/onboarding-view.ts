@@ -1,3 +1,4 @@
+import { renderLocalBridge } from "./local-bridge";
 import type { State, Theme } from "../state";
 import { brandIcon, brandMark } from "../icons";
 import { renderThemeControl } from "./app-shell";
@@ -46,7 +47,10 @@ export function renderOnboarding(state: State): string {
   const backButton = showBack
     ? `<button class="button plain" type="button" data-setup-back="${backTargets[step]}">上一步</button>`
     : "";
-  const targetOptions = state.devices.map((item) => `<option value="speaker:${escapeHtml(item.did)}">${escapeHtml(item.alias || item.name)}</option>`).join("");
+  const targetOptions = [
+    ...state.devices.map((item) => `<option value="speaker:${escapeHtml(item.did)}">${escapeHtml(item.alias || item.name)}</option>`),
+    ...(state.fullConfig?.receivers ?? []).filter(item => item.target_type === "dlna").map(item => `<option value="dlna:${escapeHtml(item.target_id || "")}">本地 · ${escapeHtml(item.target_name || item.name)}</option>`),
+  ].join("");
   const addableSpeakers = state.devices.filter(
     (item) => !state.fullConfig?.receivers.some((r) => r.target_type === "speaker" && r.target_id === item.did)
   );
@@ -55,9 +59,9 @@ export function renderOnboarding(state: State): string {
     <div class="setup-shell">
       <nav class="setup-steps" aria-label="部署进度" style="--setup-step-count:${orderedSteps.length}">
         <div class="setup-step ${stepState("access")}" ${step === "access" ? `aria-current="step"` : ""}><span>${stepNumber("access")}</span><div><strong>管理访问</strong><small>设置进入 MiCast 的方式</small></div></div>
-        <div class="setup-step ${stepState("xiaomi")}" ${step === "xiaomi" ? `aria-current="step"` : ""}><span>${stepNumber("xiaomi")}</span><div><strong>连接米家</strong><small>同步并控制你的音箱</small></div></div>
-        <div class="setup-step ${stepState("receivers")}" ${step === "receivers" ? `aria-current="step"` : ""}><span>${stepNumber("receivers")}</span><div><strong>播放入口</strong><small>一键添加全部音箱${stepIndex("receivers") > currentIndex && !xiaomiReady ? ` <em class="step-tag">需先连接米家</em>` : ""}</small></div></div>
-        ${supportsAirPlay2 ? `<div class="setup-step ${stepState("airplay2")}" ${step === "airplay2" ? `aria-current="step"` : ""}><span>${stepNumber("airplay2")}</span><div><strong>AirPlay 2 <em class="feature-badge">实验性</em></strong><small>按需开启独立入口${stepIndex("airplay2") > currentIndex && !xiaomiReady ? ` <em class="step-tag">需先连接米家</em>` : ""}</small></div></div>` : ""}
+        <div class="setup-step ${stepState("xiaomi")}" ${step === "xiaomi" ? `aria-current="step"` : ""}><span>${stepNumber("xiaomi")}</span><div><strong>添加播放设备</strong><small>米家音箱或局域网设备</small></div></div>
+        <div class="setup-step ${stepState("receivers")}" ${step === "receivers" ? `aria-current="step"` : ""}><span>${stepNumber("receivers")}</span><div><strong>播放入口</strong><small>创建手机中可见的名称</small></div></div>
+        ${supportsAirPlay2 ? `<div class="setup-step ${stepState("airplay2")}" ${step === "airplay2" ? `aria-current="step"` : ""}><span>${stepNumber("airplay2")}</span><div><strong>AirPlay 2 <em class="feature-badge">实验性</em></strong><small>按需开启独立入口</small></div></div>` : ""}
       </nav>
       <section class="setup-content">
         ${step === "access" ? `<div class="setup-copy"><h1>管理访问</h1><p>选择谁可以打开和管理这台 MiCast。</p></div>
@@ -71,21 +75,23 @@ export function renderOnboarding(state: State): string {
             <label class="choice-row warning-choice"><input type="radio" name="access_mode" value="open"><span><strong>不设置管理账号</strong><small>局域网内无需登录</small></span></label>
             <p class="form-error" data-setup-error aria-live="polite" hidden></p>
             <div class="setup-actions"><button class="button primary" type="submit">下一步</button></div>
-          </form>` : step === "xiaomi" ? `<div class="setup-copy"><h1>连接米家</h1><p>连接后会自动发现账号中的小爱音箱。</p></div>
+          </form>` : step === "xiaomi" ? `<div class="setup-copy"><h1>添加播放设备</h1><p>选择设备来源；米家音箱和局域网设备可以同时使用。</p></div>
           ${state.xiaomi.logged_in || state.qr.state === "confirmed"
             ? `<div class="setup-success"><span>✓</span><div><strong>米家已连接</strong><p>${state.qr.state === "confirmed" ? "正在进入下一步…" : "音箱将在进入应用后自动同步。"}</p></div></div>`
             : state.qr.open ? qrPanel(state) : `<div class="setup-provider"><img src="assets/brands/mijia-app.png" alt=""><div><strong>米家</strong><p>使用米家 App 扫码连接</p></div><button class="button primary" type="button" data-setup-xiaomi>开始连接</button></div>`}
+          ${!xiaomiReady ? `<div class="setup-provider"><span class="cell-icon">${brandMark()}</span><div><strong>局域网 DLNA 设备</strong><p>无需米家登录，添加 AirPlay 播放入口</p></div><button class="button primary" type="button" data-setup-local>发现设备</button></div>` : ""}
           ${state.qr.state === "confirmed" ? "" : `<div class="setup-actions split">${backButton}${state.xiaomi.logged_in
             ? `<button class="button primary" type="button" data-setup-skip>继续</button>`
             : `<button class="button plain" type="button" data-setup-skip>暂时跳过</button>`}${state.qr.state === "expired" ? `<button class="button primary" type="button" data-setup-xiaomi>刷新二维码</button>` : ""}</div>`}`
-          : step === "receivers" ? `<div class="setup-copy"><h1>播放入口</h1><p>把音箱添加为 AirPlay 播放入口，即可在手机 AirPlay 列表选择。</p></div>
-          ${addableSpeakers.length
+          : step === "receivers" ? `<div class="setup-copy"><h1>播放入口</h1><p>把播放设备添加为 AirPlay 播放入口，即可在手机 AirPlay 列表选择。</p></div>
+          ${!xiaomiReady && !state.devices.length ? "" : addableSpeakers.length
             ? `<div class="setup-provider"><span class="cell-icon device-brand xiaomi">${brandIcon("xiaomi")}</span><div><strong>发现 ${addableSpeakers.length} 台音箱</strong><p>${escapeHtml(addableSpeakers.slice(0, 4).map((item) => item.alias || item.name).join("、"))}${addableSpeakers.length > 4 ? ` 等` : ""}</p></div></div>`
             : state.deviceLoadError
               ? `<div class="setup-provider"><span class="cell-icon">⚠</span><div><strong>音箱列表加载失败</strong><p>${escapeHtml(state.deviceLoadError)}</p></div><button class="button primary" type="button" data-receivers-refresh>重新扫描</button></div>`
               : `<div class="setup-success"><span>✓</span><div><strong>${state.devices.length ? "音箱都已有播放入口" : "暂未发现音箱"}</strong><p>之后可以在「播放」页随时添加。</p></div></div>${state.devices.length ? "" : `<div class="setup-actions"><button class="button plain" type="button" data-receivers-refresh>重新扫描</button></div>`}`}
+          ${renderLocalBridge(state)}
           <div class="setup-actions split">${backButton}<button class="button plain" type="button" data-receivers-skip>${addableSpeakers.length ? "暂不添加" : "继续"}</button>${addableSpeakers.length ? `<button class="button primary" type="button" data-receivers-add-all>一键添加 ${addableSpeakers.length} 台音箱</button>` : ""}</div>`
-          : step === "airplay2" ? `<div class="setup-copy"><h1>AirPlay 2 <span class="feature-badge">实验性</span></h1><p>开启后会增加一个独立播放入口，并占用少量系统资源。${xiaomiReady ? "" : "选择播放目标需要先连接米家。"}</p></div>
+          : step === "airplay2" ? `<div class="setup-copy"><h1>AirPlay 2 <span class="feature-badge">实验性</span></h1><p>开启后会增加一个独立播放入口，并占用少量系统资源。${targetOptions ? "" : "添加播放设备后即可绑定目标。"}</p></div>
           <form class="setup-form" data-setup-airplay2>
             <label class="choice-row selected"><input type="radio" name="airplay2_enabled" value="false" checked><span><strong>暂不开启</strong><small>之后可随时在设置中开启</small></span></label>
             <label class="choice-row"><input type="radio" name="airplay2_enabled" value="true"><span><strong>开启 AirPlay 2</strong><small>创建一个独立的 AirPlay 2 播放入口</small></span></label>
@@ -104,6 +110,7 @@ export function renderOnboarding(state: State): string {
 export function bindOnboarding(container: HTMLElement, handlers: {
   onAccess: (payload: { auth_enabled: boolean; username: string; password: string; password_confirm: string }) => Promise<void>;
   onXiaomi: () => void;
+  onLocal: () => void;
   onReview: () => Promise<void>;
   onBack: (step: string) => void;
   onAddReceivers: () => Promise<void>;
@@ -113,6 +120,7 @@ export function bindOnboarding(container: HTMLElement, handlers: {
   onTheme: (theme: Theme) => void;
   onComplete: () => Promise<void>;
 }) {
+  container.querySelector("[data-setup-local]")?.addEventListener("click", handlers.onLocal);
   const form = container.querySelector<HTMLFormElement>("[data-setup-access]");
   const syncMode = () => {
     const protectedMode = form?.querySelector<HTMLInputElement>('input[name="access_mode"]:checked')?.value === "protected";

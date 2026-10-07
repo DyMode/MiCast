@@ -5,6 +5,7 @@ import { setVolume } from "../volume-service";
 import type { State } from "../state";
 import { EQ_PRESET_LABELS } from "./devices-view";
 import { getTestMedia, setTestMedia } from "../test-media";
+import { renderControlRuntime, bindControlRuntime } from "./device-capabilities";
 
 export type { DebugState, LogQuery };
 
@@ -303,7 +304,7 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       if (linkDecodeErr) parts.push(`解码失败 ${linkDecodeErr} 次`);
       return {
         severity: heavyLoss ? "bad" : "warn",
-        text: `投送端到本机之间丢包（${parts.join(" · ")}）。`,
+        text: `接收端记录到音频包跳过或重传（${parts.join(" · ")}）。`,
       };
     }
     if (ourLossBlocks > 0 && (loopWin.ms_max >= 200 || cpuPercent >= 80)) {
@@ -383,7 +384,7 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
         : [
             sessions.airplay2 && sessions.classic ? `手机 ${sessions.classic} · AP2 ${sessions.airplay2}` : "",
             stalledNow ? "已停滞" : "",
-            linkSkip ? `投送丢包 ${linkSkip}` : "",
+            linkSkip ? `接收跳包 ${linkSkip}` : "",
           ].filter(Boolean).join(" · "),
     },
     {
@@ -412,7 +413,7 @@ export function renderStatusOverview(debug: DebugState | null, state: State): st
       note: !playing
         ? ""
         : [
-            linkSkip ? `投送丢包 ${linkSkip}` : "",
+            linkSkip ? `接收跳包 ${linkSkip}` : "",
             ourLossBlocks ? `丢弃 ${ourLossBlocks} 块` : "",
             teeDepths.length ? `缓冲 ${Math.round(Math.max(...teeDepths.map((item) => item.depth_ms)))}ms` : "",
           ].filter(Boolean).join(" · ") || "取流中",
@@ -808,6 +809,8 @@ export function renderDebugPanel(state: State, debug: DebugState | null): string
       </div>
     </details>
 
+    ${renderControlRuntime(openSections.has("control"))}
+
     <details class="diagnostic-details" data-debug-section="log" ${openSections.has("log") ? "open" : ""}>
       <summary><span><strong>运行记录</strong><small>最近的连接与播放情况</small></span></summary>
       <section class="runtime-log-panel" aria-label="运行记录">
@@ -1005,6 +1008,7 @@ export function bindDebugPanel(container: HTMLElement, showToast: (msg: string) 
 
   };
   bindStreamKicks(container, showToast);
+  bindControlRuntime(container, rerenderTestPanel);
   const refreshBtn = container.querySelector<HTMLButtonElement>("[data-refresh-pipelines]");
   refreshBtn?.addEventListener("click", async () => {
     refreshBtn.disabled = true;

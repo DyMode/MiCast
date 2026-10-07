@@ -7,7 +7,7 @@ import type { AccessStatus, AirPlay2State, AudioConfig, Device, FullConfig, Play
 import type { DebugState } from "./components/debug-panel";
 
 export type Theme = "light" | "dark" | "auto";
-export type Section = "receivers" | "devices" | "account" | "settings" | "debug" | "airplay2" | "topology";
+export type Section = "receivers" | "devices" | "account" | "settings" | "advanced" | "debug" | "airplay2" | "topology";
 export type AirPlay2Tab = "overview" | "instances" | "mappings";
 export type ReceiverMode = "single" | "multi";
 
@@ -69,7 +69,7 @@ function loadUiState(): State["ui"] {
       const parsed = JSON.parse(raw);
       return {
         theme: ["light", "dark", "auto"].includes(parsed.theme) ? parsed.theme : "auto",
-        activeSection: ["receivers", "devices", "account", "settings", "debug", "airplay2", "topology"].includes(
+        activeSection: ["receivers", "devices", "account", "settings", "advanced", "debug", "airplay2", "topology"].includes(
           parsed.activeSection
         )
           ? parsed.activeSection

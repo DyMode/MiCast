@@ -1,5 +1,5 @@
 import { renderProtocolRow, bindProtocolRecovery } from './protocol-settings';
-import type { AccessStatus, AirPlayProtocol, AudioConfig, FullConfig, PortStatus } from "../api";
+import type { AccessStatus, AirPlayProtocol, AudioConfig, FullConfig } from "../api";
 import { api } from "../api";
 import { store, type Theme } from "../state";
 import { icon } from "../icons";
@@ -19,8 +19,6 @@ interface SettingsProps {
   config: FullConfig | null;
   appName: string;
   protocol: AirPlayProtocol;
-  airplay2Enabled: boolean;
-  airplay2Available: boolean;
   dlnaEnabled: boolean;
   dlnaStatus: { status: string; detail: string } | null;
   syncGroupsEnabled: boolean;
@@ -45,7 +43,7 @@ let lastConfirmedAudio: AudioConfig | null = null;
 
 export function renderSettingsView(props: SettingsProps): string {
   const {
-    audio, config, appName, airplay2Enabled, airplay2Available, dlnaEnabled, dlnaStatus,
+    audio, config, appName, dlnaEnabled, dlnaStatus,
     syncGroupsEnabled, theme, status, xiaomiLoggedIn, cloudDegraded, deviceCount, access,
   } = props;
   if (audio && (!lastConfirmedAudio || !audioBusy)) lastConfirmedAudio = audio;
@@ -58,6 +56,7 @@ export function renderSettingsView(props: SettingsProps): string {
         : "正在准备";
 
   const transcoding = audio?.auto_transcode ?? true;
+  const portErrorCount = config?.ports?.filter(port => port.status === "error").length ?? 0;
 
   const formatHtml = audio
     ? renderSegments(
@@ -86,7 +85,7 @@ export function renderSettingsView(props: SettingsProps): string {
   return `
     <div class="page-heading">
       <h2 class="page-title">设置</h2>
-      <p>管理播放方式、音质与实验功能。</p>
+      <p>播放、账号与高级选项。</p>
     </div>
 
     <div class="hero-card ${status === "error" ? "error" : status === "degraded" ? "warning" : ""}">
@@ -95,7 +94,7 @@ export function renderSettingsView(props: SettingsProps): string {
       <span class="caption">${audio ? (transcoding ? `${audio.format.toUpperCase()} · ${audio.bitrate} · ${audio.sample_rate / 1000} kHz` : "PCM 直出 · 不转码") : "加载中…"}</span>
     </div>
 
-    <div class="group-header">音频编码</div>
+    <div class="group-header">播放</div>
     <p class="group-header-hint">AirPlay、AirPlay 2 和 DLNA 共用音频处理；编码、EQ、组合延迟与左右声道按输出目标应用。</p>
     <div class="group">
       <div class="cell">
@@ -108,9 +107,12 @@ export function renderSettingsView(props: SettingsProps): string {
       ${renderCell("格式", transcoding ? "MP3 兼容性最好，FLAC/WAV 为无损" : "转码已关闭，此项不生效", formatHtml)}
       ${renderCell("码率", !transcoding ? "转码已关闭，此项不生效" : audio?.format === "mp3" ? "仅对 MP3 生效" : "当前格式不使用码率", bitrateHtml)}
       ${renderCell("采样率", transcoding ? "AirPlay 默认 48 kHz" : "转码已关闭，此项不生效", sampleRateHtml)}
+      ${renderProtocolRow(config, 'airplay')}
+      ${renderProtocolRow(config, 'dlna')}
     </div>
+    ${dlnaEnabled && dlnaStatus?.status === "error" ? `<div class="inline-notice error"><strong>DLNA 暂不可用</strong><span>请检查 MiCast 的网络访问权限后重试。</span></div>` : ""}
 
-    <div class="group-header">外观</div>
+    <div class="group-header">通用</div>
     <div class="group">
       <div class="cell">
         <div class="cell-content">
@@ -119,10 +121,6 @@ export function renderSettingsView(props: SettingsProps): string {
         </div>
         ${renderThemeControl(theme)}
       </div>
-    </div>
-
-    <div class="group-header">应用</div>
-    <div class="group">
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">应用名称</span>
@@ -130,10 +128,6 @@ export function renderSettingsView(props: SettingsProps): string {
         </div>
         <input type="text" class="input" id="app-name-input" value="${escapeHtml(appName)}" placeholder="MiCast" style="max-width: 160px;">
       </div>
-    </div>
-
-    <div class="group-header">服务</div>
-    <div class="group">
       <button class="cell settings-link" type="button" data-open-account>
         <div class="cell-icon blue">${icon("link")}</div>
         <div class="cell-content">
@@ -147,9 +141,6 @@ export function renderSettingsView(props: SettingsProps): string {
         <span class="settings-link-arrow" aria-hidden="true">›</span>
       </button>
     </div>
-
-
-    <div class="group-header">管理访问</div>
     <div class="group">
       <button class="cell settings-link" type="button" data-access-settings-toggle>
         <div class="cell-icon blue">${icon("lock")}</div>
@@ -181,14 +172,6 @@ export function renderSettingsView(props: SettingsProps): string {
       ` : ""}
     </div>
 
-    <div class="group-header">播放方式</div>
-    <div class="group">
-      ${renderProtocolRow(config, 'airplay')}
-      ${renderProtocolRow(config, 'dlna')}
-    </div>
-    ${dlnaEnabled && dlnaStatus?.status === "error" ? `<div class="inline-notice error"><strong>DLNA 暂不可用</strong><span>请检查 MiCast 的网络访问权限后重试。</span></div>` : ""}
-    ${dlnaEnabled && dlnaStatus?.status !== "error" ? `<div class="inline-notice"><strong>DLNA 生效方式</strong><span>开关立即生效；投放音量控制会在下次投放媒体时生效。若正在播放，请先在播放器中停止，再重新选择音箱并投放。</span></div>` : ""}
-
     <div class="group-header">播放增强</div>
     <div class="group">
       <div class="cell">
@@ -207,31 +190,6 @@ export function renderSettingsView(props: SettingsProps): string {
           <input type="checkbox" class="switch" id="default-volume-enabled" ${config?.default_volume_enabled ? "checked" : ""} aria-label="启用起播音量">
           <input type="number" class="input settings-number" id="default-volume" min="0" max="100" step="5" value="${config?.default_volume ?? 0}" ${config?.default_volume_enabled ? "" : "disabled"} aria-label="起播音量">
         </div>
-      </div>
-      <div class="cell">
-        <div class="cell-content">
-          <span class="cell-title">暂停会话过期</span>
-          <span class="cell-subtitle">AirPlay 暂停超过该时长后自动结束会话并停止音箱播放；0 表示不自动结束（秒）</span>
-        </div>
-        <input type="number" class="input settings-number" id="stale-session-timeout" min="0" max="3600" step="10" value="${config?.stale_session_timeout ?? 60}" aria-label="暂停会话过期时间（秒）">
-      </div>
-      <div class="cell">
-        <div class="cell-content">
-          <span class="cell-title">投放音量控制</span>
-            <span class="cell-subtitle">独立音量保留音箱设置；音量联动直接控制音箱。AirPlay 下次连接生效，DLNA 下次投放生效</span>
-        </div>
-        <select class="input" id="sender-volume-mode" aria-label="投放音量控制" style="max-width: 10rem">
-          <option value="independent" ${config?.sender_volume_mode !== "linked" ? "selected" : ""}>独立音量</option>
-          <option value="linked" ${config?.sender_volume_mode === "linked" ? "selected" : ""}>音量联动</option>
-        </select>
-      </div>
-      <div class="cell settings-input-cell">
-        <div class="cell-content">
-          <span class="cell-title">登录失效通知</span>
-          <span class="cell-subtitle">小米登录失效时发送提醒；留空关闭</span>
-        </div>
-        <input type="url" class="input" id="notify-webhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…" value="${escapeHtml(config?.notify_webhook_url ?? "")}" aria-label="通知 Webhook 地址">
-        <div class="settings-save-row"><span class="caption" id="notify-webhook-status" aria-live="polite"></span><button class="button secondary" id="notify-webhook-save" type="button">保存通知地址</button></div>
       </div>
     </div>
 
@@ -252,18 +210,10 @@ export function renderSettingsView(props: SettingsProps): string {
         <input type="checkbox" class="switch" id="large-delay-enabled" ${config?.large_delay_enabled ? "checked" : ""} aria-label="开启大延迟范围">
       </div>
       ${renderProtocolRow(config, 'airplay2')}
-      ${airplay2Available && airplay2Enabled ? `<button class="cell settings-link" type="button" data-open-airplay2>
-        <div class="cell-icon blue">${icon("airplay")}</div>
-        <div class="cell-content">
-          <span class="cell-title">AirPlay 2 管理</span>
-          <span class="cell-subtitle">${config?.airplay2_mode === "single" ? "设置播放名称、状态和目标音箱" : "管理播放入口及其对应音箱"}</span>
-        </div>
-        <span class="settings-link-arrow" aria-hidden="true">›</span>
-      </button>` : ""}
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">网络发现 <span class="feature-badge">实验性</span></span>
-          <span class="cell-subtitle">扫描局域网中的 AirPlay / DLNA 播放设备</span>
+          <span class="cell-subtitle">扫描局域网中的 AirPlay / DLNA 播放设备；关闭会停止网络目标播放，已保存的入口仍会保留</span>
         </div>
         <input type="checkbox" class="switch" id="network-discovery-enabled" ${config?.network_discovery_enabled ? "checked" : ""} aria-label="开启网络发现">
       </div>
@@ -271,12 +221,16 @@ export function renderSettingsView(props: SettingsProps): string {
     ${config && !config.network_discovery_enabled
       ? `<div class="inline-notice"><strong>网络发现已关闭</strong><span>不会扫描局域网播放设备，也无法把音频投放到外部设备。</span></div>`
       : ""}
-    ${config?.ports?.length ? `
-    <div class="group-header">高级设置 · 服务端口</div>
     <div class="group">
-      ${config.ports.map(renderPortRow).join("")}
+      <button class="cell settings-link" type="button" data-open-advanced>
+        <div class="cell-icon">${icon("settings")}</div>
+        <div class="cell-content">
+          <span class="cell-title">高级设置</span>
+          <span class="cell-subtitle">${portErrorCount ? `${portErrorCount} 个端口异常` : "端口、控制通道与播放行为"}</span>
+        </div>
+        <span class="settings-link-arrow" aria-hidden="true">›</span>
+      </button>
     </div>
-    ` : ""}
 
     <div class="group-header">数据与版本</div>
     <div class="group">
@@ -330,65 +284,6 @@ export function renderSettingsView(props: SettingsProps): string {
   `;
 }
 
-const portModeLabels: Record<PortStatus["mode"], string> = {
-  auto: "自动",
-  custom: "自定义",
-  env: "环境固定",
-  fixed: "固定端口",
-};
-
-function portActualText(p: PortStatus): string {
-  // Only a bound socket earns a chip. "未监听" is a state word, not a port, and
-  // it already reads in the status column.
-  if (p.actual == null) return "";
-  if (Array.isArray(p.actual)) {
-    if (!p.actual.length) return "";
-    // A scanned range can hold four sockets; listing them all wrapped the
-    // status onto a second line and dwarfed the port it belongs to.
-    return p.actual.length <= 2
-      ? p.actual.join("、")
-      : `${p.actual[0]}–${p.actual[p.actual.length - 1]}`;
-  }
-  return String(p.actual);
-}
-
-function portActualTitle(p: PortStatus): string {
-  if (Array.isArray(p.actual) && p.actual.length) return `已绑定 ${p.actual.join("、")}`;
-  return "";
-}
-
-function renderPortRow(p: PortStatus): string {
-  const actual = portActualText(p);
-  const stateClass = p.status === "error" ? "error" : p.status === "listening" ? "success" : "";
-  const stateText = p.status === "error" ? "异常" : p.status === "listening" ? "监听中" : p.status === "hosted" ? "已托管" : "未监听";
-  // Only render the slots this row actually needs: non-editable rows are a
-  // plain right-aligned status (like the toggle rows above); editable rows
-  // add a wide-enough input; 恢复 appears only for custom ports.
-  const inputSlot = p.editable
-    ? `<input type="number" class="input settings-number" data-port-input="${p.id}" min="1024" max="65535"
-          placeholder="${p.preferred ?? ""}" value="${p.mode === "custom" ? p.preferred ?? "" : ""}"
-          data-committed="${p.mode === "custom" ? p.preferred ?? "" : ""}"
-          aria-label="${escapeHtml(p.name)}首选端口">`
-    : "";
-  const actionSlot = p.editable && p.mode === "custom"
-    ? `<button class="button compact secondary" type="button" data-port-reset="${p.id}">恢复</button>`
-    : "";
-  return `
-    <div class="cell port-row">
-      <div class="cell-content">
-        <span class="cell-title">${escapeHtml(p.name)} <span class="feature-badge">${portModeLabels[p.mode]}</span></span>
-        <span class="cell-subtitle">${escapeHtml(p.detail)}</span>
-      </div>
-      <div class="port-control">
-        <span class="plain-state ${stateClass}" data-port-status="${p.id}" aria-live="polite" title="${escapeHtml(portActualTitle(p))}">${stateText}</span>
-        ${actual ? `<span class="meta-chip port-actual">${escapeHtml(actual)}</span>` : ""}
-        ${inputSlot}
-        ${actionSlot ? `<span class="port-actions">${actionSlot}</span>` : ""}
-      </div>
-    </div>
-  `;
-}
-
 function renderCell(title: string, subtitle: string, control: string): string {
   return `
     <div class="cell">
@@ -434,14 +329,14 @@ export function bindSettingsView(
   container: HTMLElement,
   onThemeChange: (theme: Theme) => void,
   onStateChange: () => void,
-  onOpenAirPlay2: () => void,
+  onOpenAdvanced: () => void,
   onOpenAccount: () => void
 ) {
   disposeSettingsView();
   const scope = settingsScope = new SurfaceScope();
   bindFeatureSwitch(container, "#airplay-enabled", "airplay_enabled", api.setAirplayEnabled, onStateChange);
   bindProtocolRecovery(container, scope, onStateChange);
-  container.querySelector("[data-open-airplay2]")?.addEventListener("click", onOpenAirPlay2);
+  container.querySelector("[data-open-advanced]")?.addEventListener("click", onOpenAdvanced);
   container.querySelector("[data-open-account]")?.addEventListener("click", onOpenAccount);
   const accessForm = container.querySelector<HTMLFormElement>("[data-access-settings]");
   container.querySelector("[data-access-settings-toggle]")?.addEventListener("click", () => {
@@ -605,20 +500,6 @@ export function bindSettingsView(
       store.showToast(`保存失败: ${e instanceof Error ? e.message : "未知错误"}`);
     }
   });
-  container.querySelector<HTMLSelectElement>("#sender-volume-mode")?.addEventListener("change", async (event) => {
-    const select = event.currentTarget as HTMLSelectElement;
-    try {
-      const result = await api.setSenderVolumeMode(select.value as "independent" | "linked");
-      const config = store.get().fullConfig;
-      if (config) store.set({ fullConfig: { ...config, ...result } });
-      store.showToast(result.dlna_recast_required
-        ? "已保存；当前 DLNA 媒体仍使用原设置，请停止并重新投放"
-        : "已保存；AirPlay 下次连接、DLNA 下次投放时生效");
-    } catch (e) {
-      select.value = store.get().fullConfig?.sender_volume_mode ?? "independent";
-      store.showToast(`保存失败: ${e instanceof Error ? e.message : "未知错误"}`);
-    }
-  });
   if (defaultVolumeInput) {
     defaultVolumeInput.addEventListener("input", () => {
       scope.debounce('volume', async () => {
@@ -634,73 +515,6 @@ export function bindSettingsView(
       }, 500);
     });
   }
-
-  const staleTimeoutInput = container.querySelector<HTMLInputElement>("#stale-session-timeout");
-  if (staleTimeoutInput) {
-    staleTimeoutInput.addEventListener("input", () => {
-      scope.debounce('timeout', async () => {
-        const seconds = Math.max(0, Math.min(3600, parseInt(staleTimeoutInput.value || "0", 10) || 0));
-        try {
-          await api.setStaleSessionTimeout(seconds);
-          const config = store.get().fullConfig;
-          if (config) store.set({ fullConfig: { ...config, stale_session_timeout: seconds } });
-          store.showToast(seconds === 0 ? "已关闭暂停会话自动过期" : `暂停会话 ${seconds} 秒后自动结束`);
-        } catch (e) {
-          store.showToast(`保存失败: ${e instanceof Error ? e.message : "未知错误"}`);
-        }
-      }, 500);
-    });
-  }
-
-  const webhookInput = container.querySelector<HTMLInputElement>("#notify-webhook");
-  if (webhookInput) {
-    webhookInput.addEventListener("input", () => {
-      scope.debounce('webhook', async () => {
-        const url = webhookInput.value.trim();
-        try {
-          await api.setNotifyWebhook(url);
-          const config = store.get().fullConfig;
-          if (config) store.set({ fullConfig: { ...config, notify_webhook_url: url } });
-          store.showToast(url ? "通知地址已保存" : "登录失效通知已关闭");
-        } catch (e) {
-          store.showToast(`保存失败: ${e instanceof Error ? e.message : "未知错误"}`);
-        }
-      }, 600);
-    });
-  }
-
-  const applyPortChange = async (id: string, value: number | null) => {
-    const statusEl = container.querySelector<HTMLElement>(`[data-port-status="${id}"]`);
-    try {
-      const result = await api.setPort(id, value);
-      const config = store.get().fullConfig;
-      if (config) store.set({ fullConfig: { ...config, ports: result.ports } });
-      onStateChange();
-      store.showToast(result.restart_required ? "已保存，重启应用后生效" : "已保存并重新应用");
-    } catch (e) {
-      if (statusEl) statusEl.textContent = "保存失败";
-      store.showToast(`保存失败: ${e instanceof Error ? e.message : "未知错误"}`);
-    }
-  };
-  // Port inputs auto-save on commit (change fires on blur/Enter) — no save
-  // button; an unchanged value or a failed validation never hits the server.
-  container.querySelectorAll<HTMLInputElement>("[data-port-input]").forEach((input) => {
-    input.addEventListener("change", () => {
-      const id = input.dataset.portInput ?? "";
-      const raw = input.value.trim();
-      if (raw && !/^\d+$/.test(raw)) {
-        store.showToast("端口必须是 1024-65535 的数字");
-        input.value = input.dataset.committed ?? "";
-        return;
-      }
-      if (raw === (input.dataset.committed ?? "")) return;
-      input.dataset.committed = raw;
-      void applyPortChange(id, raw ? Number(raw) : null);
-    });
-  });
-  container.querySelectorAll<HTMLElement>("[data-port-reset]").forEach((el) => {
-    el.addEventListener("click", () => void applyPortChange(el.dataset.portReset ?? "", null));
-  });
 
   container.querySelectorAll("[data-theme]").forEach((el) => {
     el.addEventListener("click", () => {

@@ -1,9 +1,4 @@
-import {
-  Airplay, AudioWaveform, Cast, Check, ChevronDown, ChevronRight, ChevronUp, Download, FileText, Link2, Moon,
-  Maximize2, Projector, RadioTower, Server, SlidersHorizontal, Smartphone, Square, Trash2,
-  Clock3, FolderOpen, LockKeyhole, Minimize2, Monitor, Pause, Play, Settings, Share2, Speaker, SquareTerminal, Sun, Tv, Undo2, User, Volume2, VolumeX, X,
-} from "lucide";
-import { siXiaomi } from "simple-icons";
+import { lucideIcons, siXiaomi } from "./icon-data";
 
 export type IconName = "airplay" | "antenna" | "speaker" | "settings" |
   "person" | "terminal" | "sun" | "moon" | "appearance" | "wave" | "check" |
@@ -11,30 +6,9 @@ export type IconName = "airplay" | "antenna" | "speaker" | "settings" |
   "tv" | "loudspeaker" | "projector" | "chevron" | "chevron-up" | "chevron-down" | "minimize" | "maximize" | "mute" | "lock" | "folder" |
   "download" | "undo" | "file" | "trash" | "phone" | "server" | "square" | "sliders";
 
-const lucideIcons: Record<IconName, unknown> = {
-  airplay: Airplay, antenna: RadioTower, speaker: Volume2,
-  settings: Settings, person: User, terminal: SquareTerminal,
-  sun: Sun, moon: Moon, appearance: Monitor,
-  wave: AudioWaveform, check: Check, play: Play, pause: Pause, close: X,
-  cast: Cast, link: Link2, clock: Clock3, topology: Share2,
-  tv: Tv, loudspeaker: Speaker, projector: Projector, chevron: ChevronRight,
-  "chevron-up": ChevronUp, "chevron-down": ChevronDown,
-  minimize: Minimize2, maximize: Maximize2,
-  square: Square,
-  sliders: SlidersHorizontal,
-  mute: VolumeX,
-  lock: LockKeyhole,
-  folder: FolderOpen,
-  download: Download,
-  undo: Undo2,
-  file: FileText,
-  trash: Trash2,
-  phone: Smartphone,
-  server: Server,
-};
 
 export function icon(name: IconName, className = "symbol"): string {
-  const [, baseAttrs, children] = lucideIcons[name] as [string, Record<string, unknown>, unknown[]];
+  const [, baseAttrs, children] = lucideIcons[name];
   const attrs = { ...baseAttrs, class: className, "aria-hidden": "true", width: undefined, height: undefined, "stroke-width": 1.9 };
   return `<svg${renderAttrs(attrs)}>${children.map(renderNode).join("")}</svg>`;
 }

@@ -171,6 +171,9 @@ export function targetLabel(receiverId: string, state: State): string {
     const name = selected ? speakerName(selected, state) : "";
     return name && name !== selected ? name : "尚未指定播放目标";
   }
+  if (definition.target_type === "dlna") {
+    return `本地 DLNA · ${definition.target_name || "局域网设备"}`;
+  }
   if (definition.target_type === "group") {
     const group = state.fullConfig?.groups.find((item) => item.id === definition.target_id);
     return `组合 · ${group?.name || "未知分组"}`;

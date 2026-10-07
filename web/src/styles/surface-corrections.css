@@ -137,3 +137,39 @@
  .header-playback-state.is-paused::after { content: ''; position: absolute; inset: 3px; border-inline: 2px solid var(--text-secondary); }
  .header-playback-trigger.visible { touch-action: none; }
 }
+/* Shared page rhythm: one gap between sections, without stacked margins. */
+.main-content .page-heading {
+  margin-bottom: var(--space-sm);
+}
+
+.main-content .group-header {
+  margin-top: 0;
+  padding-top: var(--space-xs);
+  padding-bottom: var(--space-xs);
+}
+
+.main-content .page-heading + .group-header {
+  padding-top: 0;
+}
+
+.main-content .group,
+.main-content .hero-card {
+  margin-bottom: var(--space-xs);
+}
+
+.main-content .receiver-grid + .group-header {
+  padding-top: var(--space-md);
+}
+
+.main-content .local-bridge,
+.main-content .receiver-management {
+  margin-top: var(--space-md);
+}
+
+.main-content .local-bridge > .group-header:first-child {
+  padding-top: 0;
+}
+
+.main-content .section-note {
+  margin: 0 var(--space-sm) var(--space-sm);
+}

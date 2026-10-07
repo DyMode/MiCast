@@ -10,3 +10,53 @@
 @import "./styles/onboarding.css";
 @import "./styles/accessibility.css";
 @import "./styles/surface-corrections.css";
+
+/* Local AirPlay → DLNA setup shares the existing grouped settings language. */
+.local-bridge { margin-top: 28px; }
+.group-header.with-action { display: flex; align-items: center; gap: 8px; }
+.group-header.with-action > .button { margin-left: auto; }
+/* Control-channel selects sit in a flex cell; unconstrained they squeeze the
+   title column into a vertical strip. */
+.cell > select[data-cap-policy], .cell > select[data-cap-target] { width: 100%; max-width: 16rem; }
+@media (max-width: 600px) {
+  .cell:has(> select[data-cap-policy]), .cell:has(> select[data-cap-target]) { flex-wrap: wrap; }
+  .cell > select[data-cap-policy], .cell > select[data-cap-target] { max-width: none; }
+}
+.local-bridge .group-header { display: flex; align-items: center; gap: 8px; }
+
+.local-device-row + .local-device-row { border-top: 1px solid var(--separator); }
+.local-bridge .local-device-row > .cell { display: grid; grid-template-columns: 24px minmax(0,1fr) auto auto; align-items: start; gap: 12px 16px; border-bottom: 0; }
+.local-device-row .cell-icon { margin-top: 3px; }
+.local-bridge .local-device-row .cell-content { min-width: 0; width: auto; grid-column: 2; }
+.local-device-row .receiver-visibility { grid-column: 3; align-self: center; white-space: nowrap; }
+.local-device-row .cell > .button { grid-column: 4; align-self: center; white-space: nowrap; margin: 0; }
+.local-device-row .cell:not(:has(.receiver-visibility)) > .button { grid-column: 3 / 5; }
+.local-bridge .cell-title { overflow-wrap: break-word; }
+.local-bridge .cell-subtitle { overflow-wrap: anywhere; line-height: 1.5; }
+.local-bridge-editor { display: grid; gap: 10px; padding: 0 20px 20px 64px; min-width: 0; }
+.local-bridge-editor label { display: grid; gap: 6px; font-size: 13px; min-width: 0; }
+.local-bridge-editor .input { width: 100%; min-width: 0; }
+.local-bridge-editor .caption { margin: 0; line-height: 1.5; }
+.local-bridge-editor .local-bridge-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 0; }
+.local-bridge-editor .local-bridge-actions:last-child { justify-content: space-between; padding-top: 6px; }
+.local-bridge-actions:last-child > .primary { margin-left: auto; }
+.local-feedback { padding: 12px 20px; font-size: 13px; }
+@media (max-width: 600px) {
+  .local-bridge .local-device-row > .cell { grid-template-columns: 24px minmax(0,1fr) auto; gap: 10px 12px; }
+  .local-bridge .local-device-row .cell-content { grid-column: 2 / -1; }
+  .local-device-row .receiver-visibility { grid-column: 2; grid-row: 2; justify-self: start; }
+  .local-device-row .cell > .button { grid-column: 3; grid-row: 2; justify-self: end; }
+  .local-device-row .cell:not(:has(.receiver-visibility)) > .button { grid-column: 2 / -1; justify-self: start; }
+  .local-bridge-editor { padding: 0 16px 20px; }
+  .local-bridge-actions .button { min-height: 44px; }
+  body:has(.local-bridge-editor) .header-playback-trigger.visible { display: none; }
+  .main-content:has(.local-bridge) { padding-bottom: calc(var(--tab-bar-clearance, 6rem) + 3rem); }
+}
+
+.protocol-title { display: flex; align-items: center; gap: 8px; }
+.protocol-help { position: relative; display: inline-block; font-size: 14px; }
+.protocol-help > summary { display: grid; place-items: center; width: 28px; height: 28px; color: var(--secondary-label); cursor: pointer; list-style: none; border-radius: 50%; }
+.protocol-help > summary::-webkit-details-marker { display: none; }
+.protocol-help-content { display: none; position: absolute; top: calc(100% + 4px); left: -48px; z-index: 30; width: min(300px,calc(100vw - 64px)); padding: 12px 14px; background: var(--elevated); color: var(--label); border: 1px solid var(--separator); border-radius: 12px; box-shadow: 0 4px 18px rgba(0,0,0,.12); font-size: 13px; font-weight: 400; line-height: 1.6; }
+.protocol-help[open] > .protocol-help-content { display: block; }
+@media (hover: hover) { .protocol-help:hover > .protocol-help-content { display: block; } }

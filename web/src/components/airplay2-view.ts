@@ -7,7 +7,7 @@ export function renderAirPlay2View(state: AirPlay2State | null, tab: AirPlay2Tab
   if (!state) return `<div class="page-heading"><h2 class="page-title">AirPlay 2</h2><p>正在读取服务和播放入口…</p></div>`;
   return `
     <div class="page-heading airplay2-heading">
-      <button class="button plain back-link" data-airplay2-back>‹ 返回设置</button>
+      <button class="button plain back-link" data-airplay2-back>‹ 返回播放</button>
       <h2 class="page-title">AirPlay 2 <span class="feature-badge">实验性</span></h2>
       <p>管理 AirPlay 2 播放入口及其对应音箱。</p>
     </div>
@@ -114,7 +114,7 @@ export function bindAirPlay2View(container: HTMLElement, handlers: { onBack: () 
     const data = new FormData(form);
     const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     const buttonLabel = button?.textContent || "创建播放入口";
-    const [target_type, target_id] = String(data.get("target") || ":").split(":", 2) as ["speaker" | "group", string];
+    const [target_type, target_id] = String(data.get("target") || ":").match(/^([^:]+):(.*)$/)!.slice(1) as ["speaker" | "group" | "dlna", string];
     if (button) { button.disabled = true; button.textContent = "正在创建…"; }
     try {
       await api.saveAirPlay2Instance({ name: String(data.get("name") || ""), target_type, target_id });
@@ -128,7 +128,7 @@ export function bindAirPlay2View(container: HTMLElement, handlers: { onBack: () 
   container.querySelectorAll<HTMLFormElement>("[data-instance-mapping]").forEach((form) => form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = new FormData(form);
-    const [target_type, target_id] = String(data.get("target") || ":").split(":", 2) as ["speaker" | "group", string];
+    const [target_type, target_id] = String(data.get("target") || ":").match(/^([^:]+):(.*)$/)!.slice(1) as ["speaker" | "group" | "dlna", string];
     try {
       await api.saveAirPlay2Instance({ id: form.dataset.instanceMapping, name: form.dataset.instanceName || "AirPlay 2", target_type, target_id, enabled: form.dataset.mappingEnabled === "true" });
       await handlers.onRefresh(); store.showToast("播放映射已保存");

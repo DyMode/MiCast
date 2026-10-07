@@ -1,3 +1,4 @@
+import { disposeAccountView } from "./components/account-view";
 let debugInteraction = false;
 import { api } from "./api";
 import "./volume-actions";
@@ -16,6 +17,8 @@ import { bindTuningView, disposeTuningView, renderTuningView } from "./component
 import { renderQRSheet, bindQRSheet } from "./components/qr-sheet";
 import { bindReceiversView, renderReceiversView } from "./components/receivers-view";
 import { bindSettingsView, disposeSettingsView, renderSettingsView } from "./components/settings-view";
+import { bindAdvancedView, disposeAdvancedView, renderAdvancedView } from "./components/advanced-view";
+import { refreshCapabilities } from "./components/device-capabilities";
 import { bindAirPlay2View, renderAirPlay2View } from "./components/airplay2-view";
 import { renderToast } from "./components/toast";
 import { bindAccessLogin, bindOnboarding, renderAccessLogin, renderOnboarding, renderXiaomiRecovery } from "./components/onboarding-view";
@@ -26,6 +29,7 @@ import { store, type Section, type State, type Theme } from "./state";
 import type { PlaybackState, Status } from "./api";
 import { RealtimeConnection } from "./realtime";
 import "./styles.css";
+import { bindLocalBridge } from "./components/local-bridge";
 import { safeUserMessage } from "./errors";
 import { bindRoutes } from './navigation';
 import { bindConnectivity } from './connectivity';
@@ -57,6 +61,8 @@ function disposeMain() {
   topologyCleanup?.();
   topologyCleanup = null;
   disposeSettingsView();
+  disposeAccountView();
+  disposeAdvancedView();
   if (lastRenderedTuningDid) disposeTuningView();
   lastMainMarkup = '';
 }
@@ -72,6 +78,7 @@ function render(state: State) {
       ? `<h1 class="title-2">暂时无法连接 MiCast</h1><p role="alert">${escapeHtml(bootError)}</p><button class="button primary" data-boot-retry>重新连接</button>`
       : `<span class="setup-progress" aria-label="正在加载"></span><p>正在连接 MiCast…</p>`}</div></main>${renderToast(state.toast)}`;
     app.querySelector('[data-boot-retry]')?.addEventListener('click', () => { bootError = ''; void init(); });
+    bindLocalBridge(app, () => render(store.get()));
     shellMounted = false;
     return;
   }
@@ -103,6 +110,10 @@ function render(state: State) {
         }
       },
       onXiaomi: startQRLogin,
+      onLocal: () => {
+        store.set({ onboardingStep: "receivers" });
+        render(store.get());
+      },
       onReview: advanceFromXiaomi,
       onBack: (step) => {
         window.clearTimeout(xiaomiAutoTimer);
@@ -139,7 +150,9 @@ function render(state: State) {
         render(store.get());
       },
       onSkipReceivers: () => {
-        store.set({ onboardingStep: store.get().fullConfig?.airplay2_available ? "airplay2" : "complete" });
+        const config = store.get().fullConfig;
+        const localAirPlay2Ready = config?.airplay2_enabled && config.airplay2_instances?.some(item => item.target_type === "dlna");
+        store.set({ onboardingStep: config?.airplay2_available && !localAirPlay2Ready ? "airplay2" : "complete" });
         render(store.get());
       },
       onRefreshReceivers: async () => {
@@ -151,7 +164,7 @@ function render(state: State) {
         const current = store.beginRead('onboarding-airplay2', true);
         const valid = () => applicationScope.active && current() && store.get().onboardingStep === 'airplay2';
         if (enabled && target) {
-          const [target_type, target_id] = target.split(":", 2) as ["speaker" | "group", string];
+          const [target_type, target_id] = target.match(/^([^:]+):(.*)$/)!.slice(1) as ["speaker" | "group" | "dlna", string];
           await api.saveAirPlay2Instance({ id: "airplay2", name: "MiCast", target_type, target_id, enabled: true });
           if (!valid()) return;
         }
@@ -218,8 +231,6 @@ function render(state: State) {
         config: state.fullConfig,
         appName,
         protocol: state.fullConfig?.airplay_protocol ?? "auto",
-        airplay2Enabled: state.fullConfig?.airplay2_enabled ?? false,
-        airplay2Available: state.fullConfig?.airplay2_available ?? false,
         dlnaEnabled: state.fullConfig?.dlna_enabled ?? false,
         dlnaStatus: state.fullConfig?.dlna_status ?? null,
         syncGroupsEnabled: state.fullConfig?.sync_groups_enabled ?? true,
@@ -231,6 +242,9 @@ function render(state: State) {
         access: state.access,
         saving: state.saving,
       });
+      break;
+    case "advanced":
+      mainContent = renderAdvancedView({ config: state.fullConfig });
       break;
     case "account":
       mainContent = renderAccountView(state);
@@ -443,8 +457,12 @@ function bindGlobalUI(container: HTMLElement) {
       loadAirPlay2State();
     } else if (section === "account" && store.get().xiaomi.logged_in) {
       loadDevices();
+      refreshCapabilities();
     } else if (section === "debug") {
       loadDebugState();
+      refreshCapabilities();
+    } else if (section === "advanced") {
+      refreshCapabilities();
     }
   });
 
@@ -472,7 +490,11 @@ function bindSectionUI(container: HTMLElement) {
     return;
   }
   if (activeSection === "receivers") {
-    bindReceiversView(container, () => render(store.get()));
+    bindReceiversView(container, () => render(store.get()), () => {
+      store.setUi({ activeSection: "airplay2" });
+      render(store.get());
+      loadAirPlay2State();
+    });
   } else if (activeSection === "settings") {
     bindSettingsView(
       container,
@@ -483,15 +505,23 @@ function bindSectionUI(container: HTMLElement) {
       },
       () => render(store.get()),
       () => {
-        store.setUi({ activeSection: "airplay2" });
+        store.setUi({ activeSection: "advanced" });
         render(store.get());
-        loadAirPlay2State();
       },
       () => {
         store.setUi({ activeSection: "account" });
         render(store.get());
         if (store.get().xiaomi.logged_in) loadDevices();
       }
+    );
+  } else if (activeSection === "advanced") {
+    bindAdvancedView(
+      container,
+      () => {
+        store.setUi({ activeSection: "settings" });
+        render(store.get());
+      },
+      () => render(store.get())
     );
   } else if (activeSection === "devices") {
     bindDevicesView(
@@ -527,11 +557,11 @@ function bindSectionUI(container: HTMLElement) {
           await api.logoutXiaomi();
           if (!applicationScope.active || !current()) return;
           store.set({ xiaomi: { logged_in: false, user_id: null }, devices: [] });
-          store.showToast("已退出登录");
+          store.showToast("已退出米家账号，音箱配置已保留");
           render(store.get());
         } catch (e) {
           if (!applicationScope.active || !current()) return;
-          store.showToast(`退出失败: ${e instanceof Error ? e.message : "未知错误"}`);
+          store.showToast(`退出米家账号失败: ${e instanceof Error ? e.message : "未知错误"}`);
         }
       },
       onQRLogin: startQRLogin,
@@ -560,7 +590,7 @@ function bindSectionUI(container: HTMLElement) {
   } else if (activeSection === "airplay2") {
     bindAirPlay2View(container, {
       onBack: () => {
-        store.setUi({ activeSection: "settings" });
+        store.setUi({ activeSection: "receivers" });
         render(store.get());
       },
       onTab: (airplay2Tab) => {
@@ -657,9 +687,7 @@ async function advanceFromXiaomi() {
     }
   }
   if (!valid()) return;
-  const nextStep = xiaomi.logged_in
-    ? "receivers"
-    : fullConfig.airplay2_available ? "airplay2" : "complete";
+  const nextStep = "receivers";
   store.set({
     fullConfig,
     xiaomi,
@@ -830,6 +858,10 @@ async function pollQR(scanToken: string, validAttempt: () => boolean) {
 }
 
 async function loadDevices(forceRefresh = false) {
+  if (!store.get().xiaomi.logged_in) {
+    store.set({ devices: [], deviceLoadError: null });
+    return;
+  }
   const current = store.beginRead('devices', true);
   try {
     const devices = await api.getDevices(forceRefresh);

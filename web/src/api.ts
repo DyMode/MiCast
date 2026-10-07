@@ -126,7 +126,7 @@ export interface FullConfig {
   selected_device_id: string | null;
   ports?: PortStatus[];
   /** Present on newer backends; AirPlay 2 instances are entries too. */
-  airplay2_instances?: Array<{ id: string; name: string }>;
+  airplay2_instances?: Array<{ id: string; name: string; target_type?: "speaker" | "group" | "dlna"; target_id?: string; enabled?: boolean; target_name?: string; target_model?: string }>;
   receivers: ReceiverDefinition[];
   groups: SpeakerGroup[];
   speaker_names: Record<string, string>;
@@ -170,7 +170,7 @@ export interface AirPlay2Instance {
   enabled: boolean;
   status: string;
   detail: string;
-  target_type: "speaker" | "group";
+  target_type: "speaker" | "group" | "dlna";
   target_id: string | null;
   target_name: string;
 }
@@ -191,15 +191,18 @@ export interface AirPlay2State {
     mappings_healthy: number;
     mappings_total: number;
   };
-  targets: Array<{ type: "speaker" | "group"; id: string; name: string }>;
+  targets: Array<{ type: "speaker" | "group" | "dlna"; id: string; name: string }>;
 }
 
 export interface ReceiverDefinition {
   id: string;
   name: string;
-  target_type: "selected" | "speaker" | "group";
+  target_type: "selected" | "speaker" | "group" | "dlna";
   target_id: string | null;
   enabled: boolean;
+  dlna_enabled?: boolean | null;
+  target_name?: string;
+  target_model?: string;
 }
 
 export interface SpeakerGroup {
@@ -246,6 +249,8 @@ export interface NetworkDevice {
   supported: boolean;
   unsupported_reason: string;
   attached_group: string | null;
+  attached_receiver?: string | null;
+  test_result?: { mode?: string; status: string; detail: string } | null;
   stream_status: string;
   stream_detail: string;
 }
@@ -404,6 +409,7 @@ export interface PlaybackState {
     paused: boolean;
     muted: boolean;
     state: "playing" | "paused" | "idle";
+    player_observation?: { status: number | null; checked_at: number | null; fresh: boolean } | null;
   }>;
 }
 
@@ -645,6 +651,18 @@ export interface Topology {
 }
 
 export const api = {
+  retryLocalPlayback(id: string): Promise<{ ok: boolean }> {
+    return apiFetch(`/api/capabilities/retry/${encodeURIComponent(id)}`, { method: 'POST' });
+  },
+  getCapabilities(): Promise<import('./components/device-capabilities').CapabilityData> {
+    return apiFetch('/api/capabilities');
+  },
+  setControlPolicy(kind: string, id: string, policy: string, local_target_id: string | null): Promise<{ ok: boolean }> {
+    return apiFetch(`/api/capabilities/${kind}/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ policy, local_target_id }) });
+  },
+  confirmCapability(payload: { device_id: string; revision: number; action: string; format: string; pulled_at: number }): Promise<{ ok: boolean }> {
+    return apiFetch('/api/capabilities/confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  },
   getAccessStatus(): Promise<AccessStatus> {
     return apiFetch("/api/access/status");
   },
@@ -786,7 +804,7 @@ export const api = {
     dlna_recast_required: boolean;
   }> {
     return apiFetch("/api/config/sender-volume", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }),
+      method: "POST", body: JSON.stringify({ mode }),
     });
   },
 
@@ -815,7 +833,7 @@ export const api = {
     return apiFetch("/api/airplay2");
   },
 
-  saveAirPlay2Instance(instance: { id?: string; name: string; target_type: "speaker" | "group"; target_id: string; enabled?: boolean }): Promise<AirPlay2Instance> {
+  saveAirPlay2Instance(instance: { id?: string; name: string; target_type: "speaker" | "group" | "dlna"; target_id: string; enabled?: boolean }): Promise<AirPlay2Instance> {
     return apiFetch("/api/airplay2/instances", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(instance),
     });
@@ -1092,6 +1110,18 @@ export const api = {
     return apiFetch("/api/airplay-devices");
   },
 
+  rescanDlnaDevices(): Promise<{ ok: boolean }> {
+    return apiFetch("/api/dlna-devices/rescan", { method: "POST" });
+  },
+
+  testDlnaDevice(id: string, mode: "sample" | "stream"): Promise<{ status: string; detail: string }> {
+    return apiFetch(`/api/dlna-devices/${encodeURIComponent(id)}/test`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
+  },
+
+  stopDlnaTest(id: string): Promise<{ ok: boolean }> {
+    return apiFetch(`/api/dlna-devices/${encodeURIComponent(id)}/test`, { method: "DELETE" });
+  },
+
   getDlnaDevices(): Promise<NetworkDevice[]> {
     return apiFetch("/api/dlna-devices");
   },
@@ -1220,8 +1250,13 @@ export const api = {
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = filename;
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    // Embedded browsers may resolve the download after the click returns.
+    // Keep the URL alive long enough for them to read the response.
+    const objectUrl = link.href;
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
     return { filename, size: blob.size, count };
   },
 
