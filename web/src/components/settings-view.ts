@@ -5,6 +5,7 @@ import { store, type Theme } from "../state";
 import { icon } from "../icons";
 import { renderThemeControl } from "./app-shell";
 import { SurfaceScope } from '../ui/lifecycle';
+import { openSupportDialog } from './support-dialog';
 
 let settingsScope: SurfaceScope | null = null;
 export function disposeSettingsView() {
@@ -281,6 +282,11 @@ export function renderSettingsView(props: SettingsProps): string {
     </div>
 
 
+    <div class="group-header">关于与支持</div>
+    <div class="group">
+      <button class="cell settings-link" type="button" data-support="donate"><div class="cell-content"><span class="cell-title">支持开发 ♡</span><span class="cell-subtitle">如果 MiCast 让听歌更方便，欢迎支持它继续完善</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
+      <button class="cell settings-link" type="button" data-support="contact"><div class="cell-content"><span class="cell-title">联系支持</span><span class="cell-subtitle">使用反馈与建议</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
+    </div>
   `;
 }
 
@@ -334,6 +340,14 @@ export function bindSettingsView(
 ) {
   disposeSettingsView();
   const scope = settingsScope = new SurfaceScope();
+  let closeSupport: (() => void) | undefined;
+  scope.own(() => closeSupport?.());
+  container.querySelectorAll<HTMLElement>('[data-support]').forEach(button => {
+    scope.listen(button, 'click', () => {
+      closeSupport?.();
+      closeSupport = openSupportDialog(button.dataset.support === 'donate' ? 'donate' : 'contact');
+    });
+  });
   bindFeatureSwitch(container, "#airplay-enabled", "airplay_enabled", api.setAirplayEnabled, onStateChange);
   bindProtocolRecovery(container, scope, onStateChange);
   container.querySelector("[data-open-advanced]")?.addEventListener("click", onOpenAdvanced);

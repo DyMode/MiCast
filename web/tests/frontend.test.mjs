@@ -1,6 +1,37 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
+for (const viewport of [{width:1280,height:900}, {width:390,height:844}, {width:320,height:740}]) {
+  test(`Support dialogs work at ${viewport.width}px under the fnOS base path`, async t => {
+    const {page, requests} = await open(t, {viewport});
+    await navigate(page, 'settings');
+    const entry = page.locator('[data-support="donate"]');
+    await entry.click();
+    const dialog = page.getByRole('dialog', {name:'支持开发'});
+    await dialog.waitFor();
+    for (const name of ['微信赞赏', '支付宝']) {
+      const img = dialog.getByRole('img', {name:`${name}收款二维码`});
+      assert.equal(await img.evaluate(el => el.complete && el.naturalWidth > 0), true);
+      assert.match(await img.getAttribute('src'), /\/app\/micast\/assets\/support\//);
+      assert.equal(await dialog.locator(`a[download="MiCast-${name}.jpg"]`).count(), 1);
+    }
+    assert.equal(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await dialog.count(), 0);
+    assert.equal(await entry.evaluate(el => el === document.activeElement), true);
+    await page.locator('[data-support="contact"]').click();
+    const contact = page.getByRole('dialog', {name:'联系支持'});
+    const href = await contact.getByRole('link', {name:'打开邮件应用'}).getAttribute('href');
+    assert.match(decodeURIComponent(href), /mailto:support@dymode.com\?subject=MiCast 使用反馈/);
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText:async () => {throw new Error('denied');}}}));
+    await contact.getByRole('button', {name:'复制邮箱'}).click();
+    await contact.getByRole('status').getByText('请长按或选中上方邮箱地址复制。').waitFor();
+    await contact.getByRole('button', {name:'关闭', exact:true}).click();
+    assert.equal(await contact.count(), 0);
+    assert.equal(requests.some(r => /\/api\/.*(play|stop|pause)/.test(r.path) && r.method === 'POST'), false);
+  });
+}
+
 for (const [device, viewport] of [['desktop', {width:1280,height:900}], ['mobile', {width:390,height:844}]]) {
   test(`AirPlay 2 onboarding reports save/start failures and can continue on ${device}`, async t => {
     const {page} = await open(t, {viewport}, {'/api/config': async () => ({...config, airplay2_available:true})});

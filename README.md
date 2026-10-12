@@ -139,6 +139,21 @@ tests/       自动化测试
 
 完整文档入口：[docs/README.md](docs/README.md)。
 
+## 支持开发与联系支持
+
+如果 MiCast 让你的音箱更好用了，欢迎随心赞赏，支持后续开发与维护。微信赞赏与支付宝收款图为 DyMode 各项目通用。
+
+<table>
+<tr><th>微信赞赏</th><th>支付宝</th></tr>
+<tr><td align="center"><img src="web/public/assets/support/wechat-appreciation.jpg" width="240" alt="微信赞赏收款图"></td><td align="center"><img src="web/public/assets/support/alipay-support.jpg" width="240" alt="支付宝收款图"></td></tr>
+</table>
+
+使用对应应用扫码，或保存二维码后从相册识别：[微信赞赏收款图](web/public/assets/support/wechat-appreciation.jpg) · [支付宝收款图](web/public/assets/support/alipay-support.jpg)。赞赏完全自愿，不影响任何功能的使用，不对应功能开通或优先支持。
+
+使用反馈与建议可发送至 [support@dymode.com](mailto:support@dymode.com)。请附上应用版本、部署方式、发生步骤与必要截图或脱敏诊断报告，发送前遮挡私人信息，请勿发送密码或米家登录凭证。误付或重复付款也可通过此邮箱联系核实处理。
+
+源码中的设置页已提供「支持开发」与「联系支持」入口，将随后续版本提供。
+
 ## 致谢
 
 本项目在开发过程中参照了以下开源项目：

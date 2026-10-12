@@ -10,6 +10,7 @@
 @import "./styles/onboarding.css";
 @import "./styles/accessibility.css";
 @import "./styles/surface-corrections.css";
+@import "./styles/support.css";
 
 /* Local AirPlay → DLNA setup shares the existing grouped settings language. */
 .local-bridge { margin-top: 28px; }
