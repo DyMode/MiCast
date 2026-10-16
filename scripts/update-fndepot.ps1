@@ -58,10 +58,11 @@ $source = if (Test-Path $path) {
 }
 $app = $source.apps.micast
 $app.icon_url = "$base/assets/icons/web/icon-256.png"
-$app.preview_urls = @( '01-player', '02-speakers', '03-eq', '04-links', '05-stereo' | ForEach-Object { "$base/docs/screenshots/$_.png" })
+$app.preview_urls = @( '01-player', '02-speakers', '03-eq', '04-links', '05-stereo', '06-mobile' | ForEach-Object { "$base/docs/screenshots/$_.png" })
 $app.readme_url = "$base/README.md"
+$packageChangelog = [regex]::Match($manifest, '(?m)^changelog=([^\r\n]+)').Groups[1].Value
 $app.releases[$version] = [ordered]@{
-    changelog = $release.body
+    changelog = $(if ($packageChangelog) { $packageChangelog -replace '(?i)<br\s*/?>', "`n" } else { $release.body })
     updated_at = ([datetimeoffset]$release.published_at).ToString('o')
     os_min_version = $minimum
     run_as = $privilege.defaults.'run-as'

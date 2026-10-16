@@ -7,6 +7,23 @@
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-green.svg">
 </p>
 
+<p align="center">
+  <a href="https://github.com/DyMode/MiCast/releases/latest">📦 下载 MiCast</a> ·
+  <a href="https://github.com/DyMode/MiCast/issues">💬 问题反馈</a> ·
+  <a href="https://github.com/DyMode/MiCast-Go">🍃 了解 MiCast Go</a>
+</p>
+
+## 🍃 MiCast 与 MiCast Go 怎么选
+
+MiCast 适合需要音箱组合、左右声道分配和逐台调音的用户。如果主要想把手机或电脑的声音投到单台音箱，或让全屋音箱一起播放，可以选择 [MiCast Go](https://github.com/DyMode/MiCast-Go)。
+
+| 产品 | 主要功能 | 使用平台 |
+| --- | --- | --- |
+| MiCast | 经典 AirPlay、DLNA、音箱组合、左右声道分配、逐台 EQ、夜间模式与播放诊断；部分版本提供可选的实验性 AirPlay 2 | Windows、飞牛 fnOS、Docker |
+| [MiCast Go](https://github.com/DyMode/MiCast-Go) | 每台音箱独立入口、全屋播放、经典 AirPlay、DLNA、音量与延迟调节 | 飞牛 fnOS |
+
+两个应用使用独立配置和登录信息，可以同时安装；这不代表配置或登录状态会自动同步。同一台音箱同时接收两个应用的控制时，播放会被新指令切换。
+
 ## 核心能力
 
 - **AirPlay 接收**：提供经典 AirPlay 入口，把 iPhone、iPad 或 Mac 的音频送到小米音箱。
@@ -163,5 +180,7 @@ tests/       自动化测试
 - [python-miio](https://github.com/rytilahti/python-miio) — 小米设备通信协议与设备发现的参考。
 
 ## License
+
+[用户协议](docs/user-agreement.md) · [隐私政策](docs/privacy-policy.md)
 
 [MIT](LICENSE)

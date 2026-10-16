@@ -94,7 +94,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          generate_release_notes: true
+          body_path: docs/release-notes-0.4.0.md
+          generate_release_notes: false
           files: |
             dist/MiCast-Portable.zip
             dist/installer/MiCast-Setup.exe
