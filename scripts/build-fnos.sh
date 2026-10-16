@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE_DIR="${MICAST_FNOS_STAGE_DIR:-${ROOT_DIR}/build/fnos/micast}"
 OUTPUT_DIR="${MICAST_FNOS_OUTPUT_DIR:-${ROOT_DIR}/dist/fnos}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/sync-legal.py" --check
+"$PYTHON_BIN" "$ROOT_DIR/scripts/check-fnos-package.py" \
+  --package "$ROOT_DIR/packaging/fnos" --repo-root "$ROOT_DIR"
 PLATFORM="${1:-${MICAST_FNOS_PLATFORM:-x86}}"
 
 case "$PLATFORM" in
@@ -59,6 +62,9 @@ command -v npm >/dev/null 2>&1 || {
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/app/vendor" "$STAGE_DIR/app/web" "$STAGE_DIR/app/ui/images" "$OUTPUT_DIR"
 cp -a "$ROOT_DIR/packaging/fnos/." "$STAGE_DIR/"
+# Python-based packaging checks can leave host-version bytecode beside cmd
+# helpers. Drop it before text normalization and do not ship it in the FPK.
+find "$STAGE_DIR/cmd" -type d -name '__pycache__' -prune -exec rm -rf {} +
 # Normalize executable scripts even when the checkout was made on Windows.
 find "$STAGE_DIR/cmd" -type f -exec sed -i 's/\r$//' {} +
 if [ -f "$STAGE_DIR/app/airplay2-runtime/run-shairport" ]; then
@@ -98,16 +104,33 @@ fi
 # directory, and vendor comes first on PYTHONPATH, so a vendored micast would
 # shadow the app source and run stale code.
 # shellcheck disable=SC2086
-"$PYTHON_BIN" -m pip install \
-  --disable-pip-version-check \
-  --no-compile \
-  --only-binary=:all: \
-  $WHEEL_PLATFORMS \
-  --implementation cp \
-  --python-version 3.12 \
-  --abi cp312 \
-  --target "$STAGE_DIR/app/vendor" \
-  --requirement "$ROOT_DIR/requirements.txt"
+install_vendor() {
+  "$PYTHON_BIN" -m pip install \
+    --disable-pip-version-check \
+    --no-compile \
+    --only-binary=:all: \
+    $WHEEL_PLATFORMS \
+    --implementation cp \
+    --python-version 3.12 \
+    --abi cp312 \
+    --target "$STAGE_DIR/app/vendor" \
+    --requirement "$ROOT_DIR/requirements.txt"
+}
+
+# The package index intermittently drops connections ("Could not find a version
+# that satisfies the requirement ..."), which aborted whole builds. Retry a few
+# times before giving up, keeping the failure loud.
+VENDOR_ATTEMPTS="${MICAST_FNOS_VENDOR_ATTEMPTS:-3}"
+attempt=1
+until install_vendor; do
+  if [ "$attempt" -ge "$VENDOR_ATTEMPTS" ]; then
+    echo "vendor 依赖下载失败（已尝试 ${attempt} 次）；请检查网络或包索引后重试" >&2
+    exit 1
+  fi
+  echo "vendor 依赖下载第 ${attempt} 次失败，20 秒后重试" >&2
+  attempt=$((attempt + 1))
+  sleep 20
+done
 
 sed -i "s/^platform=.*/platform=$PLATFORM/" "$STAGE_DIR/manifest"
 
@@ -122,17 +145,44 @@ find "$STAGE_DIR/app" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 find "$STAGE_DIR/app/vendor" -type d \( -name tests -o -name test -o -name __pycache__ \) -prune -exec rm -rf {} +
 find "$STAGE_DIR/app/vendor" -type f -name '*.pyi' -delete
 
+# fnpack prints "Packing failed" on content problems but still exits 0, which
+# once left a stale .fpk in dist/ looking like a fresh build. Validate the
+# staged tree first, then require both the success marker and a package that is
+# newer than this build started.
+"$PYTHON_BIN" "$ROOT_DIR/scripts/check-fnos-package.py" --package "$STAGE_DIR" --staged
+
+PACK_STARTED="$(date +%s)"
+# Keep the log out of the staging tree: fnpack packs the directory it runs in.
+PACK_LOG="$(mktemp -t fnpack-build.XXXXXX.log)"
 (
   cd "$STAGE_DIR"
   fnpack build
-)
+) 2>&1 | tee "$PACK_LOG"
+PACKED="$STAGE_DIR/micast.fpk"
+if [ ! -f "$PACKED" ]; then
+  echo "fnpack 未产出 ${PACKED}；fnpack 输出见上方日志" >&2
+  exit 1
+fi
+if ! grep -q "Packing successfully" "$PACK_LOG"; then
+  echo "fnpack 报告打包失败（退出码可能仍为 0）；fnpack 输出见上方日志" >&2
+  exit 1
+fi
+if [ "$(date -r "$PACKED" +%s)" -lt "$PACK_STARTED" ]; then
+  echo "${PACKED} 早于本次打包开始时间，说明产物未真正重建" >&2
+  exit 1
+fi
 
-find "$STAGE_DIR" -maxdepth 1 -type f -name '*.fpk' -exec cp {} "$OUTPUT_DIR/" \;
+cp "$PACKED" "$OUTPUT_DIR/"
 
 # Rename to the versioned artifact name, matching the Windows build script.
 VERSION="$(sed -n 's/^version=//p' "$STAGE_DIR/manifest" | tr -d '\r')"
 PLATFORM="$(sed -n 's/^platform=//p' "$STAGE_DIR/manifest" | tr -d '\r')"
+ARTIFACT="$OUTPUT_DIR/micast-$PLATFORM-$VERSION.fpk"
 if [ -f "$OUTPUT_DIR/micast.fpk" ]; then
-  mv "$OUTPUT_DIR/micast.fpk" "$OUTPUT_DIR/micast-$PLATFORM-$VERSION.fpk"
+  mv "$OUTPUT_DIR/micast.fpk" "$ARTIFACT"
 fi
-echo "fnOS package: $OUTPUT_DIR"
+if [ ! -f "$ARTIFACT" ]; then
+  echo "未找到最终的 fnOS 包：${ARTIFACT}" >&2
+  exit 1
+fi
+echo "fnOS package: $ARTIFACT ($(du -h "$ARTIFACT" | cut -f1))"

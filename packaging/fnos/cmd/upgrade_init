@@ -1,16 +1,10 @@
 #!/bin/bash
-set -u
+set -eu
+umask 077
+/var/apps/python312/target/bin/python3 "$(dirname "$0")/lifecycle.py" check-consent >> "$TRIM_TEMP_LOGFILE" 2>&1 || exit 1
 
 mkdir -p "$TRIM_PKGVAR"
-backup="${TRIM_PKGVAR}/upgrade-backup.tgz"
-files=""
-for name in micast.json access.json xiaomi-account.json xiaomi-tokens.enc; do
-  [ -f "${TRIM_PKGVAR}/${name}" ] && files="$files $name"
-done
-if [ -n "$files" ]; then
-  # shellcheck disable=SC2086
-  tar -czf "$backup" -C "$TRIM_PKGVAR" $files || {
-    echo "升级前备份 MiCast 配置失败。" > "$TRIM_TEMP_LOGFILE"
-    exit 1
-  }
-fi
+/var/apps/python312/target/bin/python3 "$(dirname "$0")/lifecycle.py" backup >> "$TRIM_TEMP_LOGFILE" 2>&1 || {
+  echo "升级前备份 MiCast 配置失败，已停止升级。" >> "$TRIM_TEMP_LOGFILE"
+  exit 1
+}

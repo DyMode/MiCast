@@ -113,8 +113,8 @@ def test_fnos_upgrade_restores_the_pre_upgrade_backup():
     upgrade = (FNOS / "cmd" / "upgrade_callback").read_text(encoding="utf-8")
     # The backup written by upgrade_init must actually be restored, otherwise
     # the Xiaomi login and settings are lost on every package upgrade.
-    assert 'tar -xzf "$backup" -C "$TRIM_PKGVAR"' in upgrade
-    assert 'rm -f "$backup"' in upgrade
+    assert 'lifecycle.py" restore' in upgrade
+    assert "exit 1" in upgrade.split('lifecycle.py" restore', 1)[1]
     assert "chown" in upgrade
 
 
@@ -162,15 +162,166 @@ def test_fnos_lifecycle_handles_health_upgrade_and_uninstall_policies():
 
     assert "GET /health" in main
     assert "5242880" in main
-    assert "upgrade-backup.tgz" in upgrade
-    assert 'find "$TRIM_PKGVAR" -mindepth 1 -maxdepth 1' in uninstall
+    assert 'lifecycle.py" backup' in upgrade
+    assert 'lifecycle.py" uninstall' in uninstall
     assert '[ "$TRIM_PKGVAR" != "/" ]' in uninstall
-    assert "keep_all)" in uninstall
-    assert "remove_all)" in uninstall
-    assert "! -name micast.json" in uninstall
+    assert "共享目录与浏览器数据需另行清理" in uninstall
 
 
 def test_fnos_launcher_has_linux_shebang_and_line_endings():
     contents = (FNOS / "app" / "airplay2-runtime" / "run-shairport").read_bytes()
     assert contents.startswith(b"#!/bin/sh\n")
     assert b"\r" not in contents
+
+
+def _package_validator():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "check_fnos_package", ROOT / "scripts" / "check-fnos-package.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_fnos_package_validator_accepts_the_shipped_package():
+    module = _package_validator()
+
+    assert module.validate(FNOS, repo_root=ROOT) == []
+
+
+def _validator_fixture(tmp_path: Path):
+    """Copy packaging/fnos so a single mutation can be validated."""
+    import shutil
+
+    target = tmp_path / "fnos"
+    shutil.copytree(FNOS, target, ignore=shutil.ignore_patterns("__pycache__"))
+    return target
+
+
+def _wizard(package: Path, name: str) -> list:
+    return json.loads((package / "wizard" / name).read_text(encoding="utf-8"))
+
+
+def _save_wizard(package: Path, name: str, payload: list) -> None:
+    (package / "wizard" / name).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def test_fnos_package_validator_rejects_list_init_value_on_checkbox(tmp_path):
+    """fnpack rejects a checkbox whose initValue is a list with a generic JSON
+    error that silently skipped a whole release build, so the value shape has to
+    be caught before staging."""
+    module = _package_validator()
+    package = _validator_fixture(tmp_path)
+    payload = _wizard(package, "install")
+    payload[-1]["items"][-1]["initValue"] = []
+    _save_wizard(package, "install", payload)
+
+    problems = module.validate(package)
+
+    assert any("initValue 必须是字符串" in problem for problem in problems)
+    assert all("wizard/install" in problem for problem in problems)
+
+
+def test_fnos_package_validator_rejects_empty_options_and_unknown_types(tmp_path):
+    module = _package_validator()
+    package = _validator_fixture(tmp_path)
+    payload = _wizard(package, "upgrade")
+    payload[-1]["items"][-1]["options"] = []
+    payload[-1]["items"].append({"type": "slider", "field": "wizard_x", "label": "x"})
+    _save_wizard(package, "upgrade", payload)
+
+    problems = module.validate(package)
+
+    assert any("options 为空" in problem for problem in problems)
+    assert any("未知控件类型" in problem for problem in problems)
+
+
+def test_fnos_package_validator_rejects_empty_step_title_and_long_text(tmp_path):
+    module = _package_validator()
+    package = _validator_fixture(tmp_path)
+    payload = _wizard(package, "uninstall")
+    payload[0]["stepTitle"] = "  "
+    payload[0]["items"].append(
+        {
+            "type": "text",
+            "field": "wizard_note",
+            "label": "备注",
+            "initValue": "x" * (module.TEXT_INIT_VALUE_LIMIT + 1),
+        }
+    )
+    _save_wizard(package, "uninstall", payload)
+
+    problems = module.validate(package)
+
+    assert any("stepTitle 为空" in problem for problem in problems)
+    assert any("超过" in problem and "字符上限" in problem for problem in problems)
+
+
+def test_fnos_package_validator_rejects_version_drift(tmp_path):
+    import re
+
+    module = _package_validator()
+    package = _validator_fixture(tmp_path)
+    manifest_path = package / "manifest"
+    manifest = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(
+        re.sub(r"^version=.*$", "version=9.9.9", manifest, count=1, flags=re.MULTILINE),
+        encoding="utf-8",
+    )
+
+    problems = module.validate(package, repo_root=ROOT)
+
+    assert any("不一致" in problem for problem in problems)
+
+
+def test_fnos_package_validator_requires_generated_icons_only_when_staged(tmp_path):
+    module = _package_validator()
+    package = _validator_fixture(tmp_path)
+
+    assert module.validate(package) == []
+    assert any("ICON" in problem for problem in module.validate(package, staged=True))
+
+
+def test_fnos_builder_fails_loudly_when_fnpack_reports_failure():
+    shell = (ROOT / "scripts" / "build-fnos.sh").read_text(encoding="utf-8")
+
+    # fnpack exits 0 even when packing failed: the builder must inspect the
+    # output and the artifact instead of trusting the exit code.
+    assert "check-fnos-package.py" in shell
+    assert "Packing successfully" in shell
+    assert "fnpack 报告打包失败" in shell
+    assert "未真正重建" in shell
+    # vendor download retries instead of aborting the whole build.
+    assert "MICAST_FNOS_VENDOR_ATTEMPTS" in shell
+    assert "vendor 依赖下载失败" in shell
+
+
+def test_fnos_health_probe_avoids_a_python_process_per_poll():
+    """cmd/main polls /health while enabling; a Python interpreter per probe
+    cost ~0.5s each on the NAS and dominated the perceived "enable" time."""
+    main = (FNOS / "cmd" / "main").read_text(encoding="utf-8")
+
+    assert "--unix-socket" in main
+    assert 'command -v curl' in main
+    # The Python fallback must stay for images without curl.
+    assert '"$PYTHON_BIN" - "$SOCKET_FILE"' in main
+    # curl branch has to come first.
+    assert main.index("--unix-socket") < main.index('"$PYTHON_BIN" - "$SOCKET_FILE"')
+
+
+def test_fnos_startup_grace_survives_a_racy_liveness_scan():
+    """The grace window must not kill a starting instance because a single
+    process scan failed: the PID file and the scan are both best-effort."""
+    main = (FNOS / "cmd" / "main").read_text(encoding="utf-8")
+
+    assert "service_alive()" in main
+    # wait_ready consults service_alive instead of a bare scan...
+    assert "service_alive || return 1" in main
+    # ...and start_service probes health once more before giving up on it.
+    grace = main.split("if is_running; then", 1)[1].split("stop_airplay2_runtime", 1)[0]
+    assert "is_healthy" in grace
+    assert "stop_service_internal" in grace

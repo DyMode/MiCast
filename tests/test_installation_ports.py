@@ -346,6 +346,48 @@ def test_preflight_keeps_dotenv_defaults_automatic(monkeypatch):
     assert "port" not in observed["strict"]
 
 
+def test_reinstall_without_wizard_preserves_saved_choices(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    path = tmp_path / "micast.json"
+    original = {
+        "stream_port": 42408, "airplay_rtsp_port": 42508,
+        "strict_ports": ["stream_port"], "airplay_enabled": False,
+        "airplay2_enabled": False, "dlna_enabled": True,
+        "app": {"name": "Home"}, "xiaomi": {"token": "retained"},
+    }
+    path.write_text(json.dumps(original), encoding="utf-8")
+    for key in list(installation.os.environ):
+        if key.startswith("wizard_") or key.startswith("MICAST_"):
+            monkeypatch.delenv(key)
+    mocked_preflight(monkeypatch, set())
+    monkeypatch.setattr(sys, "argv", ["preflight", "--fnos", "--write-config", str(path)])
+    assert installation.main() == 0
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in original.items():
+        assert saved[key] == value
+    assert saved["airplay2_port"] == 7000
+
+
+def test_fresh_install_without_wizard_uses_automatic_defaults(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    for key in list(installation.os.environ):
+        if key.startswith("wizard_") or key.startswith("MICAST_"):
+            monkeypatch.delenv(key)
+    mocked_preflight(monkeypatch, set())
+    path = tmp_path / "micast.json"
+    monkeypatch.setattr(sys, "argv", ["preflight", "--fnos", "--write-config", str(path)])
+    assert installation.main() == 0
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["strict_ports"] == []
+    assert all(saved[f"{protocol}_enabled"] for protocol in ("airplay", "airplay2", "dlna"))
+    assert saved["port"] == 42300
+    assert saved["stream_port"] == 42400
+
+
 @pytest.mark.asyncio
 async def test_udp_pool_failure_does_not_advertise_unusable_classic_input(monkeypatch):
     from micast import ports

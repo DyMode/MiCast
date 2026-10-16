@@ -1,17 +1,80 @@
 #!/bin/bash
 set -u
+umask 077
 
 PID_FILE="${TRIM_PKGVAR}/micast.pid"
 LOG_FILE="${TRIM_PKGVAR}/micast.log"
 OLD_LOG_FILE="${TRIM_PKGVAR}/micast.log.1"
 SOCKET_FILE="${TRIM_APPDEST}/app.sock"
+LOCK_FILE="${TRIM_PKGVAR}/service.lock"
 PYTHON_BIN="/var/apps/python312/target/bin/python3"
 export PATH="/var/apps/python312/target/bin:$PATH"
+PROCESS_HELPER="$(cd "$(dirname "$0")" && pwd)/service-process.py"
+# Startup takes roughly ten seconds on a busy NAS. Both windows are deliberately
+# generous: killing an instance that is still initializing was what turned a slow
+# start into a restart loop, and every restart left another process behind.
+STARTUP_GRACE_SECONDS="${MICAST_FNOS_STARTUP_GRACE:-25}"
+LOCK_WAIT_SECONDS="${MICAST_FNOS_LOCK_WAIT:-90}"
+
+service_pids() {
+  "$PYTHON_BIN" "$PROCESS_HELPER" --username "$TRIM_USERNAME"
+}
+
+# Serialise start/stop so two "enable" clicks cannot each launch an instance.
+# Without flock (unusual on fnOS) the script still works, just without the
+# mutual exclusion.
+acquire_lock() {
+  command -v flock >/dev/null 2>&1 || return 0
+  exec 9>"$LOCK_FILE" || return 1
+  flock -w "$LOCK_WAIT_SECONDS" 9 || return 1
+}
+
+release_lock() {
+  command -v flock >/dev/null 2>&1 || return 0
+  flock -u 9 2>/dev/null || true
+}
+
+# Liveness for the startup grace window: the PID file written by the launch and
+# the process scan are both best-effort (the scan spawns Python and can fail on
+# a busy box), so either one claiming alive keeps the window open. Treating a
+# single failed scan as "dead" resurrected the kill-a-starting-instance flap.
+service_alive() {
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null)"
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *) kill -0 "$pid" 2>/dev/null && return 0 ;;
+    esac
+  fi
+  is_running
+}
+
+# Wait for /health, tolerating the window where runuser/nohup is still exec'ing.
+# $1 = seconds, $2 = optional launcher PID to watch instead of the process scan.
+wait_ready() {
+  seconds="$1"
+  watch_pid="${2:-}"
+  deadline=$(( $(date +%s) + seconds ))
+  while :; do
+    if [ -S "$SOCKET_FILE" ] && is_healthy; then
+      return 0
+    fi
+    if [ -n "$watch_pid" ]; then
+      kill -0 "$watch_pid" 2>/dev/null || return 1
+    else
+      service_alive || return 1
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 0.1
+  done
+}
 
 is_running() {
-  [ -f "$PID_FILE" ] || return 1
-  pid="$(cat "$PID_FILE" 2>/dev/null)"
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  # /proc/<pid>/cwd can be unreadable after runuser changes identity, even
+  # from a restricted root context. The service identity comes from its UID
+  # and exact argv instead; scan also recovers children orphaned by old scripts.
+  managed_pids="$(service_pids)" || return 1
+  [ -n "$managed_pids" ]
 }
 
 rotate_log() {
@@ -24,6 +87,13 @@ rotate_log() {
 }
 
 is_healthy() {
+  # curl can speak to a unix socket directly; spawning a Python interpreter per
+  # probe cost 0.3-0.6s each on the NAS and the loop probes repeatedly, which
+  # showed up as a slow "enable" even though the app answered instantly.
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf --max-time 2 --unix-socket "$SOCKET_FILE" http://localhost/health >/dev/null 2>&1
+    return $?
+  fi
   "$PYTHON_BIN" - "$SOCKET_FILE" <<'PY'
 import socket
 import sys
@@ -34,6 +104,8 @@ try:
     sock.connect(sys.argv[1])
     sock.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
     response = sock.recv(256)
+except OSError:
+    raise SystemExit(1) from None
 finally:
     sock.close()
 raise SystemExit(0 if b" 200 " in response else 1)
@@ -66,8 +138,29 @@ stop_airplay2_runtime() {
 }
 
 start_service() {
+  if [ ! -f "$PROCESS_HELPER" ]; then
+    echo "应用包缺少服务进程管理程序，请重新构建安装包。" > "$TRIM_TEMP_LOGFILE"
+    return 1
+  fi
+  acquire_lock || {
+    echo "等待其他启停操作完成超时，请稍后重试。" > "$TRIM_TEMP_LOGFILE"
+    return 1
+  }
   if is_running; then
-    return 0
+    # An instance exists. It may simply still be initializing (startup takes
+    # ~10s, and "enable" is often clicked while it runs), so give it the full
+    # startup budget before concluding it is broken. Killing it here used to
+    # turn every start into a kill/restart flap that left extra processes.
+    if wait_ready "$STARTUP_GRACE_SECONDS"; then
+      release_lock
+      return 0
+    fi
+    # Final probe before giving up on it: the liveness scan can race.
+    if is_healthy; then
+      release_lock
+      return 0
+    fi
+    stop_service_internal || { release_lock; return 1; }
   fi
   stop_airplay2_runtime
   rm -f "$PID_FILE" "$SOCKET_FILE"
@@ -112,38 +205,58 @@ start_service() {
   export MICAST_AIRPLAY_NAME="MiCast"
   cd "$TRIM_APPDEST" || return 1
   rotate_log
-  nohup runuser -u "$TRIM_USERNAME" --preserve-environment -- \
-    "$PYTHON_BIN" -m micast >>"$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
-  for _ in $(seq 1 300); do
-    if [ -S "$SOCKET_FILE" ] && is_healthy; then
-      return 0
-    fi
-    is_running || break
-    sleep 0.1
-  done
+  # setsid puts the service in its own session/process group so a teardown of
+  # the caller's group (the app centre's per-request session) cannot take the
+  # service down with it; that tear-down shows up as "Session terminated,
+  # killing shell" and used to look like a random startup failure.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup runuser -u "$TRIM_USERNAME" --preserve-environment -- \
+      "$PYTHON_BIN" -m micast >>"$LOG_FILE" 2>&1 &
+  else
+    nohup runuser -u "$TRIM_USERNAME" --preserve-environment -- \
+      "$PYTHON_BIN" -m micast >>"$LOG_FILE" 2>&1 &
+  fi
+  # This PID comes from this launch, not a stale file. runuser/nohup may still
+  # be exec'ing when the first probe runs, so strict cmdline/cwd matching is
+  # only appropriate for status/stop, not for this startup liveness probe.
+  launch_pid=$!
+  echo "$launch_pid" > "$PID_FILE"
+  startup_failure="等待服务就绪超时"
+  if wait_ready "$STARTUP_GRACE_SECONDS" "$launch_pid"; then
+    release_lock
+    return 0
+  fi
+  kill -0 "$launch_pid" 2>/dev/null || startup_failure="启动进程提前退出"
   {
-    echo "MiCast 启动失败。"
+    echo "MiCast 启动失败：${startup_failure}。"
     echo "请稍后重试；如果仍无法启动，请在反馈时附上日志文件：${LOG_FILE}"
   } > "$TRIM_TEMP_LOGFILE"
+  stop_service_internal
+  release_lock
   return 1
 }
 
-stop_service() {
-  if ! is_running; then
-    stop_airplay2_runtime
-    rm -f "$PID_FILE" "$SOCKET_FILE"
-    return 0
-  fi
-  pid="$(cat "$PID_FILE")"
-  kill "$pid" 2>/dev/null || true
+# Caller holds the lock (start_service) or this wrapper takes it (stop).
+stop_service_internal() {
+  managed_pids="$(service_pids)" || return 1
+  for pid in $managed_pids; do kill "$pid" 2>/dev/null || true; done
   for _ in $(seq 1 50); do
-    kill -0 "$pid" 2>/dev/null || break
+    is_running || break
     sleep 0.1
   done
-  kill -9 "$pid" 2>/dev/null || true
+  # Re-read identities before escalation; never trust an old PID file.
+  managed_pids="$(service_pids)" || return 1
+  for pid in $managed_pids; do kill -9 "$pid" 2>/dev/null || true; done
   stop_airplay2_runtime
   rm -f "$PID_FILE" "$SOCKET_FILE"
+}
+
+stop_service() {
+  acquire_lock || return 1
+  stop_service_internal
+  status=$?
+  release_lock
+  return "$status"
 }
 
 case "${1:-}" in

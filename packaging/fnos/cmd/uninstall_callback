@@ -1,21 +1,12 @@
 #!/bin/bash
-set -u
+set -eu
+umask 077
 
 # The uninstall wizard supplies one of three explicit retention policies.
 # Unknown/missing values fail safe by retaining only non-sensitive settings.
 if [ -n "${TRIM_PKGVAR:-}" ] && [ "$TRIM_PKGVAR" != "/" ] && [ -d "$TRIM_PKGVAR" ]; then
-  case "${wizard_data_policy:-keep_config}" in
-    keep_all)
-      find "$TRIM_PKGVAR" -mindepth 1 -maxdepth 1 \
-        ! -name micast.json ! -name access.json ! -name xiaomi-account.json \
-        ! -name xiaomi-tokens.enc -exec rm -rf -- {} +
-      ;;
-    remove_all)
-      find "$TRIM_PKGVAR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-      ;;
-    *)
-      find "$TRIM_PKGVAR" -mindepth 1 -maxdepth 1 \
-        ! -name micast.json ! -name access.json -exec rm -rf -- {} +
-      ;;
-  esac
+  /var/apps/python312/target/bin/python3 "$(dirname "$0")/lifecycle.py" uninstall >> "$TRIM_TEMP_LOGFILE" 2>&1 || {
+    echo "清理私有数据失败，请检查目录权限。共享目录与浏览器数据需另行清理。" >> "$TRIM_TEMP_LOGFILE"
+    exit 1
+  }
 fi

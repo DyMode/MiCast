@@ -205,9 +205,11 @@ def main():
     parser.add_argument("--username", default="")
     parser.add_argument("--automatic-env-ports", default="")
     args = parser.parse_args()
+    # A reinstall without wizard fields must retain saved protocol/port choices.
+    profile_path = args.profile or args.write_config
     profile = (
-        json.loads(args.profile.read_text(encoding="utf-8"))
-        if (args.profile and args.profile.exists())
+        json.loads(profile_path.read_text(encoding="utf-8"))
+        if profile_path and profile_path.exists()
         else {}
     )
     preferred = {
@@ -295,6 +297,7 @@ def main():
             if args.write_config.exists()
             else {}
         )
+        data.update(preferred)
         data.update(
             {
                 key: value
@@ -302,7 +305,6 @@ def main():
                 if key in {"port", "stream_port"}
             }
         )
-        data.update(preferred)
         if args.fnos:
             # Migrate old auto/custom selections without clearing user data.
             data["airplay2_port"] = AIRPLAY2_RECEIVER_PORT

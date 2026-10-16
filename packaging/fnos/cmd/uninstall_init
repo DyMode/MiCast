@@ -1,5 +1,11 @@
 #!/bin/bash
 set -u
 
+# Do not assume the framework has stopped a failed/unhealthy service.
+"$(dirname "$0")/main" stop || {
+  echo "停止 MiCast 失败，已取消卸载清理。" > "$TRIM_TEMP_LOGFILE"
+  exit 1
+}
+
 # Stop artifacts are disposable even when fnOS has already stopped the service.
 rm -f "${TRIM_PKGVAR}/micast.pid" "${TRIM_APPDEST}/app.sock"
