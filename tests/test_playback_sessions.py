@@ -211,21 +211,22 @@ def test_callback_retry_or_late_stop_cannot_override_a_newer_event():
     assert not _verify_callback_epoch(bridge, {"device_id": "ap2", "epoch": "process", "event_seq": 20})
 
 
-async def test_dlna_replace_pause_stop_and_disable_release_scoped_resources(monkeypatch):
+async def test_dlna_replace_pause_stop_and_disable_release_scoped_resources(monkeypatch, cached_audio):
     monkeypatch.setattr(settings, "receivers", [ReceiverConfig(
         id="r1", name="r1", target_type="speaker", target_id="a",
     )])
     monkeypatch.setattr(settings, "dlna_enabled", True)
+    monkeypatch.setattr(settings, "sender_volume_mode", "linked")
     manager = SimpleNamespace(play_stream=AsyncMock(return_value=True),
                               stop_playback=AsyncMock(), stop=AsyncMock())
     sessions, _ = registry()
     dlna = DlnaService(manager, sessions)
-    await dlna.set_uri("r1", "http://media/song1")
+    await dlna.set_uri("r1", "http://media/song1.mp3")
     await dlna.play("r1")
     old = sessions.current("dlna:r1")
     proxy = Mock()
     sessions.register(old.token, "media:old", proxy, "media")
-    await dlna.set_uri("r1", "http://media/song2")
+    await dlna.set_uri("r1", "http://media/song2.mp3")
     proxy.assert_called_once()
     manager.stop_playback.assert_awaited_with("a", owner="dlna:r1")
     await dlna.play("r1")
@@ -234,6 +235,9 @@ async def test_dlna_replace_pause_stop_and_disable_release_scoped_resources(monk
     assert dlna.media_token("r1", old.identity) is None
     await dlna.pause("r1")
     assert new.state == SessionState.PAUSED
+    # This stripped registry fixture has no decoder; exercise lease reuse at
+    # the start of the cached file. Accurate resume is covered with real PCM.
+    await dlna.seek("r1", 0)
     await dlna.play("r1")
     await dlna.stop()
     assert dlna.state_for("r1").state == "STOPPED"
@@ -245,6 +249,7 @@ async def test_proxy_is_aborted_by_session_close_even_if_http_client_stays_conne
         def __init__(self, *args):
             self._done = Mock(is_set=lambda: True)
             self.stopped = False
+            self.errors = []
 
         def start(self):
             return self
@@ -393,3 +398,68 @@ async def test_naturally_finished_dlna_is_not_replayed_by_watchdog(monkeypatch):
     assert manager.owner_of("a") is None
     assert manager.stream_url_of("a") is None
     assert sessions.current(lease.token.owner) is None
+
+
+async def test_end_reason_distinguishes_stop_from_media_end():
+    from micast.playback_sessions import PlaybackSessions, SessionToken
+
+    sessions = PlaybackSessions(lambda: 60)
+    lease = sessions.begin("dlna:living", "dlna", "id-1")
+    assert sessions.end_reason(lease.token) is None  # still active
+    sessions.end(lease.token, "stopped", immediate=True)
+    assert sessions.end_reason(lease.token) == "stopped"
+
+    lease2 = sessions.begin("dlna:living", "dlna", "id-2")
+    sessions.end(lease2.token, "media_finished", immediate=True)
+    assert sessions.end_reason(lease2.token) == "media_finished"
+
+    # Once fully collected the generation is unknown again: callers treat
+    # that as the conservative stop-won path.
+    await sessions.tick()
+    assert sessions.end_reason(lease2.token) is None
+    assert sessions.end_reason(SessionToken("dlna:living", 9999)) is None
+
+
+async def test_proxy_pump_failure_does_not_finish_session(monkeypatch):
+    """A dead transcode must not end the lease as media_finished: that raced
+    in-flight play_stream commands into a false "speaker rejected". Only a
+    clean EOF (no pump errors) marks the media finished."""
+    import micast.stream_server as stream_server_mod
+    from micast.playback_sessions import PlaybackSessions
+
+    sessions = PlaybackSessions(lambda: 60)
+    lease = sessions.begin("dlna:living", "dlna", "id-1")
+
+    class Pump:
+        def __init__(self, errors):
+            self.errors = errors
+            self._done = Mock(is_set=lambda: True)
+
+        def start(self):
+            return self
+
+        async def read(self):
+            return b""
+
+        def abort(self):
+            pass
+
+        async def close(self):
+            pass
+
+    async def make_pump(errors, token):
+        monkeypatch.setattr(stream_server_mod, "MediaProxyPump", lambda *a, **k: Pump(errors))
+        response = await stream_server_mod._serve_seekable_media(
+            "http://x/y.mp3", 0, sessions=sessions, session_token=token
+        )
+        async for _chunk in response.body_iterator:
+            pass
+
+    await make_pump(errors=[RuntimeError("transcode dead")], token=lease.token)
+    assert sessions.valid(lease.token), "pump failure must not end the session"
+
+    sessions.end(lease.token, "stopped", immediate=True)
+    await sessions.tick()
+    lease2 = sessions.begin("dlna:living", "dlna", "id-2")
+    await make_pump(errors=[], token=lease2.token)
+    assert not sessions.valid(lease2.token), "clean EOF still ends the session"

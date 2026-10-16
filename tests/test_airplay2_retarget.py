@@ -7,6 +7,7 @@ about the INGRESS had changed. Only name/port/command are baked into shairport;
 the target speaker, EQ and delay are egress concerns of our own pipelines.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -38,6 +39,9 @@ def _bridge(monkeypatch, instance: AirPlay2InstanceConfig) -> AudioBridge:
     bridge._dlna_targets = None
     bridge._stream_server = SimpleNamespace(kick_clients=lambda *a, **k: 0, unregister_stream=lambda *a: None)
     bridge._airplay2_targets = {}
+    # Startup defers AirPlay 2 behind a lock; a partial bridge built without
+    # __init__ still has to provide it.
+    bridge._airplay2_lock = asyncio.Lock()
     return bridge
 
 

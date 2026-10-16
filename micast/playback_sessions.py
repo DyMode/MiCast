@@ -76,6 +76,22 @@ class PlaybackSessions:
     def current(self, owner: str) -> PlaybackSession | None:
         return self._current.get(owner)
 
+    def end_reason(self, token: SessionToken) -> str | None:
+        """The recorded end reason for this exact session generation.
+
+        None when the token matches nothing (already collected) or the
+        session is still active. Callers use this to tell "a stop replaced
+        the session" apart from "the media path ended it".
+        """
+        session = self._current.get(token.owner)
+        if session is None or session.token != token:
+            session = self._retiring.get(token)
+        if session is None or session.token != token:
+            return None
+        if session.state == SessionState.ACTIVE:
+            return None
+        return session.reason
+
     def valid(self, token: SessionToken) -> bool:
         session = self.current(token.owner)
         return bool(session and session.token == token and session.state == SessionState.ACTIVE)

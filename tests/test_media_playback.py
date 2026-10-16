@@ -75,6 +75,15 @@ def setup_media(monkeypatch, tmp_path, seconds=0.4):
     bridge.pipeline_for_stream = lambda sid: bridge._pipelines.get(sid)
     manager = SimpleNamespace(play_stream=AsyncMock(return_value=True))
     media = MediaPlayback(bridge, manager)
+    from micast.media_cache import MediaDownload
+    async def download(entry):
+        entry.path = tmp_path / entry.token
+        entry.path.write_bytes(path.read_bytes())
+        entry.size = entry.path.stat().st_size
+        entry.cache.bytes += entry.size
+        entry.mime = "audio/wav"
+        entry.ready.set()
+    monkeypatch.setattr(MediaDownload, "_download", download)
     state = DlnaTransportState(
         uri="http://media.invalid/source.wav",
         session_id="first",

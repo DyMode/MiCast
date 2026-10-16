@@ -130,6 +130,9 @@ class ReceiverConfig(BaseModel):
     enabled: bool = True
     # None preserves legacy AirPlay + global DLNA behavior.
     dlna_enabled: bool | None = None
+    # Legacy preference retained for saved configs: auto chooses raw MP3 or DSP.
+    # "direct" now uses the shared local cache; "local" requests DSP.
+    dlna_delivery: str = Field(default="auto", pattern=r"^(auto|local|direct)$")
     target_name: str = Field(default="", max_length=128)
     target_model: str = Field(default="", max_length=128)
     control_policy: str = Field(default="legacy", pattern=r"^(legacy|auto|local|cloud)$")

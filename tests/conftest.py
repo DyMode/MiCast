@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 # These suites exercise real codec output or timed audio delivery. Keep cheap
 # planning, ownership and protocol regressions in the default development suite.
 _AUDIO_FILES = {
@@ -28,3 +30,19 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.audio)
         if filename in _PACKAGING_FILES:
             item.add_marker(pytest.mark.packaging)
+
+
+@pytest.fixture
+def cached_audio(monkeypatch, tmp_path):
+    """Control-only protocol tests use a completed file instead of real DNS."""
+    from micast.media_cache import MediaDownload
+
+    async def download(entry):
+        entry.path = tmp_path / entry.token
+        entry.path.write_bytes(b"ID3audio")
+        entry.size = 8
+        entry.cache.bytes += entry.size
+        entry.mime = "audio/mpeg"
+        entry.ready.set()
+
+    monkeypatch.setattr(MediaDownload, "_download", download)

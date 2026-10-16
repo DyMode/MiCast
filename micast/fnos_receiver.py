@@ -84,7 +84,13 @@ def write_json(path, value):
 def configuration(port, name, callback, python, receiver_id):
     def quoted(value):
         return json.dumps(str(value), ensure_ascii=False)
-    return f"""general = {{
+    metadata_pipe = os.environ.get("MICAST_METADATA_PIPE", "")
+    metadata = (
+        f'metadata = {{ enabled = "yes"; include_cover_art = "yes"; '
+        f'pipe_name = {quoted(metadata_pipe)}; }};\n'
+        if metadata_pipe else ""
+    )
+    return metadata + f"""general = {{
  name = {quoted(name)}; port = {port}; output_backend = "stdout";
  service_type = "airplay2"; ignore_volume_control = "yes";
  audio_decoded_buffer_desired_length_in_seconds = 1.5;

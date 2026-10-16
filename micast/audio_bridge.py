@@ -69,6 +69,12 @@ class AudioBridge:
         self._status = "idle"
         self._error_count = 0
         self._restart_lock = asyncio.Lock()
+        # Serialises engine bring-up: startup now runs in the background, so a
+        # config change arriving during it must not start the engine twice.
+        self._engine_lock = asyncio.Lock()
+        # AirPlay 2 pipelining is deferred out of startup, so its recovery
+        # callers and the deferred start must not overlap.
+        self._airplay2_lock = asyncio.Lock()
         self._restart_requested = False
         self._audio_restart_requested = False
         self._stall_recovery_requested = False
@@ -241,12 +247,18 @@ class AudioBridge:
         registry = getattr(self, "track_metadata", None)
         matched = getattr(self, "lyrics_matched", {}) or {}
         now = {}
-        for receiver_id, item in self._local_provider.receivers.items():
+        from types import SimpleNamespace
+
+        entries = dict(self._local_provider.receivers)
+        for receiver_id, source in getattr(self, "_airplay2_sources", {}).items():
+            if getattr(source, "metadata", None) is not None:
+                entries[receiver_id] = SimpleNamespace(server=source.metadata)
+        for receiver_id, item in entries.items():
             sessions = getattr(self, "sessions", None)
             lease = sessions.current(receiver_id) if sessions is not None else None
             if sessions is not None and (
                 lease is None
-                or lease.protocol != "airplay"
+                or lease.protocol not in ("airplay", "airplay2")
                 or lease.state.value not in ("active", "quiet", "paused")
             ):
                 continue
@@ -1095,13 +1107,21 @@ class AudioBridge:
                 self._error_count += 1
 
     async def _start_engine(self) -> None:
+        async with self._engine_lock:
+            await self._start_engine_locked()
+
+    async def _start_engine_locked(self) -> None:
+        started = time.monotonic()
         if settings.airplay_engine == "local":
+            logger.info("Startup: starting audio stream HTTP server")
             await self._stream_server.start()
             desired = (
                 [(item.id, item.name) for item in settings.active_receivers()]
                 if settings.airplay_enabled and classic_ingress_available()
                 else []
             )
+            logger.info("Startup: starting %s classic AirPlay receivers", len(desired))
+            receivers_started = time.monotonic()
             await self._local_provider.start(
                 desired,
                 settings.effective_stream_host,
@@ -1109,18 +1129,46 @@ class AudioBridge:
                 self._local_session_stop,
                 self._local_volume,
             )
+            # Startup time is what makes the app centre give up on "enable", so
+            # keep this line: it shows exactly how long the receivers took.
+            logger.info(
+                "Startup: classic AirPlay receivers up in %.2fs",
+                time.monotonic() - receivers_started,
+            )
+            logger.info("Startup: checking optional network discovery")
             await self._ensure_airplay_discovery()
-            for item in self._local_provider.receivers.values():
-                if item.status != "running" or not item.server:
-                    continue
-                await self._create_local_pipelines(item)
+            # Pipelines are per receiver (own PCM branch + encoder process), so
+            # build them concurrently for the same reason the receivers are: the
+            # serial version dominated the remaining startup time.
+            running = [
+                item
+                for item in self._local_provider.receivers.values()
+                if item.status == "running" and item.server
+            ]
+            pipelines_started = time.monotonic()
+            if running:
+                await asyncio.gather(
+                    *(self._create_local_pipelines(item) for item in running)
+                )
+            logger.info(
+                "Startup: %s local pipelines ready in %.2fs",
+                len(running),
+                time.monotonic() - pipelines_started,
+            )
             if settings.airplay2_enabled:
-                await self._start_airplay2_pipelines()
+                # AirPlay 2 brings up the bundled shairport runtime (~1s). It is
+                # experimental and independent of the classic/DLNA path, so it
+                # finishes while the rest of the app is already serving.
+                await self._defer_airplay2_startup()
+            logger.info(
+                "Startup: audio engine ready in %.2fs", time.monotonic() - started
+            )
             return
         await self._stream_server.start()
         await self._receiver_manager.start()
         await self._ensure_airplay_discovery()
         await self._start_pipelines()
+        logger.info("Startup: audio engine ready in %.2fs", time.monotonic() - started)
 
     async def _ensure_airplay_discovery(self) -> None:
         """(Re)bind LAN AirPlay discovery to the provider's shared Zeroconf."""
@@ -1200,6 +1248,13 @@ class AudioBridge:
         item = self._local_provider.receivers.get(receiver_id)
         return item.server if item else None
 
+    def metadata_source(self, receiver_id: str):
+        server = self.local_server(receiver_id)
+        if server is not None:
+            return server
+        source = getattr(self, "_airplay2_sources", {}).get(receiver_id)
+        return getattr(source, "metadata", None)
+
     @property
     def airplay_target_manager(self):
         return self._airplay_targets
@@ -1259,7 +1314,48 @@ class AudioBridge:
         if self._airplay_targets:
             await self._airplay_targets.stop_targets(receiver_id)
 
+    async def _defer_airplay2_startup(self) -> None:
+        """Bring AirPlay 2 up behind the scenes, never in the startup path.
+
+        A rebuild can start the engine again while this is still running, so any
+        in-flight attempt is cancelled first: two concurrent attempts would race
+        on the same shairport source and pipeline.
+        """
+        pending = getattr(self, "_airplay2_startup_task", None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await pending
+
+        # Publish "starting" synchronously: the plan/reconcile paths treat a
+        # missing runtime entry as "not running" and would start a second
+        # attempt while this one is still queued.
+        for item in settings.airplay2_instances:
+            if item.enabled:
+                self._airplay2_runtime.setdefault(
+                    item.id, {"id": item.id, "status": "starting", "detail": "正在启动"}
+                )
+
+        async def start() -> None:
+            logger.info("Startup: initializing AirPlay 2 pipelines")
+            started = time.monotonic()
+            try:
+                await self._start_airplay2_pipelines()
+            finally:
+                logger.info(
+                    "Startup: AirPlay 2 pipelines ready in %.2fs",
+                    time.monotonic() - started,
+                )
+
+        self._airplay2_startup_task = self._spawn_aux(start(), "airplay2-startup")
+
     async def _start_airplay2_pipelines(self) -> None:
+        # Recovery and reconcile paths call this too, now that startup can run it
+        # concurrently; serialise so two callers cannot race on one source.
+        async with self._airplay2_lock:
+            await self._start_airplay2_pipelines_locked()
+
+    async def _start_airplay2_pipelines_locked(self) -> None:
         active_instances = {item.id: item for item in settings.airplay2_instances if item.enabled}
         tracked = set(self._airplay2_runtime) | set(self._airplay2_sources)
         for instance_id in list(tracked):
@@ -2143,17 +2239,26 @@ class AudioBridge:
             else:
                 logger.warning("session_start called without device_id in multi-receiver mode")
                 return
-        pipeline = self._pipelines.get(device_id) or self._airplay2_pipelines.get(device_id)
-        if (
-            pipeline
-            and device_id in self._airplay2_pipelines
-            and self._pipeline_needs_rebuild(pipeline)
-        ):
+
+        def airplay2_branches() -> list[SpeakerPipeline]:
+            # Callback ids identify the ingress, while pipeline keys identify
+            # published DSP streams. An EQ/stereo entry may have no base stream.
+            return [
+                pipeline
+                for stream_id, pipeline in self._airplay2_pipelines.items()
+                if stream_id == device_id or stream_id.startswith(f"{device_id}-")
+            ]
+
+        branches = airplay2_branches()
+        is_airplay2 = bool(branches)
+        pipeline = self._pipelines.get(device_id) or (branches[0] if branches else None)
+        if is_airplay2 and any(self._pipeline_needs_rebuild(item) for item in branches):
             # Same revival rule as classic receivers: a pipeline whose reader
             # finished needs a rebuild, not a start() that reuses it.
             async with self._restart_lock:
                 await self._rebuild_airplay2_instances_locked({device_id})
-            pipeline = self._airplay2_pipelines.get(device_id) or pipeline
+            branches = airplay2_branches()
+            pipeline = branches[0] if branches else None
         if pipeline:
             self._active_sessions.add(device_id)
             lease = self.sessions.current(device_id)
@@ -2200,7 +2305,7 @@ class AudioBridge:
                 self.sessions.register(lease.token, "sender", release_ingress, kind="transport")
             self._volume_modes[device_id] = settings.sender_volume_mode
             await pipeline.session_start()
-            if device_id in self._airplay2_pipelines:
+            if is_airplay2:
                 # AirPlay 2 ingress: start the mapped group's external
                 # AirPlay/DLNA members too (classic sessions do this in
                 # _local_session_start; this callback is their only trigger).

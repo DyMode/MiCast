@@ -66,39 +66,73 @@ class LocalAirPlayProvider:
                 await item.server.stop()
             del self.receivers[receiver_id]
 
+        pending_items = []
         for receiver_id, name in desired:
             if receiver_id in self.receivers and self.receivers[receiver_id].status == "running":
                 continue
             item = LocalReceiver(id=receiver_id, name=name)
             self.receivers[receiver_id] = item
-            server = None
-            try:
-                self.ensure_zeroconf()
-                if self._server_factory is None:
-                    from micast.ports import probe_udp_group
-                    from micast.raop.server import udp_pool
+            pending_items.append((item, name))
 
-                    base, top = udp_pool()
-                    probe_udp_group(base, top - base + 1)
-                server = self._create_server(hostname, name)
-                server.playback_sessions = self.sessions
-                server.receiver_id = receiver_id
-                server.on_play_start = self._start_handler(receiver_id, on_start, server)
-                server.on_play_stop = self._stop_handler(receiver_id, on_stop, server)
-                server.on_volume = self._volume_handler(receiver_id, on_volume)
-                await server.start()
-                item.server = server
-                item.status = "running"
-                item.detail = "经典 AirPlay · 可连接"
-            except Exception as exc:
-                if server is not None:
-                    try:
-                        await server.stop()
-                    except Exception:
-                        logger.exception("Unable to clean up failed receiver %s", name)
+        # Receivers are independent (own ports, own RTSP server), so start them
+        # concurrently: sequentially they cost ~1.5s each, and startup latency is
+        # what makes "enable" in the app centre look like a failure. Shared
+        # one-time setup runs first so the coroutines never race for it, and a
+        # failure there marks every pending receiver instead of raising — a
+        # broken mDNS or UDP pool must stay retryable, not fatal.
+        try:
+            self.ensure_zeroconf()
+            if self._server_factory is None:
+                from micast.ports import probe_udp_group
+                from micast.raop.server import udp_pool
+
+                base, top = udp_pool()
+                probe_udp_group(base, top - base + 1)
+        except Exception as exc:
+            for item, _ in pending_items:
                 item.status = "error"
                 item.detail = str(exc)
-                logger.exception("Local AirPlay receiver %s failed", name)
+            logger.exception("Local AirPlay preparation failed")
+            return
+
+        pending = [
+            self._start_receiver(item, name, hostname, on_start, on_stop, on_volume)
+            for item, name in pending_items
+        ]
+        if pending:
+            await asyncio.gather(*pending)
+
+    async def _start_receiver(
+        self,
+        item: LocalReceiver,
+        name: str,
+        hostname: str,
+        on_start: Callable[[str], Awaitable[None]] | None,
+        on_stop: Callable[[str], Awaitable[None]] | None,
+        on_volume: Callable[[str, int], Awaitable[None]] | None,
+    ) -> None:
+        receiver_id = item.id
+        server = None
+        try:
+            server = self._create_server(hostname, name)
+            server.playback_sessions = self.sessions
+            server.receiver_id = receiver_id
+            server.on_play_start = self._start_handler(receiver_id, on_start, server)
+            server.on_play_stop = self._stop_handler(receiver_id, on_stop, server)
+            server.on_volume = self._volume_handler(receiver_id, on_volume)
+            await server.start()
+            item.server = server
+            item.status = "running"
+            item.detail = "经典 AirPlay · 可连接"
+        except Exception as exc:
+            if server is not None:
+                try:
+                    await server.stop()
+                except Exception:
+                    logger.exception("Unable to clean up failed receiver %s", name)
+            item.status = "error"
+            item.detail = str(exc)
+            logger.exception("Local AirPlay receiver %s failed", name)
 
     async def stop(self) -> None:
         for item in list(self.receivers.values()):

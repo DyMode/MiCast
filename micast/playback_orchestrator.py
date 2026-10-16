@@ -136,7 +136,7 @@ class PlaybackOrchestrator:
             url = self.device_manager.stream_url_of(did)
             if url:
                 await self.device_manager.play_stream(
-                    did, url, owner=receiver_id, force=True, audio_id=audio_id
+                    did, url, owner=receiver_id, force=True, audio_id=audio_id, steal=False
                 )
 
     async def start_lyrics_session(self, receiver_id: str) -> None:
@@ -145,18 +145,26 @@ class PlaybackOrchestrator:
             return
         if not settings.touchscreen_lyrics:
             return
-        server = self.bridge.local_server(receiver_id)
+        metadata_source = getattr(self.bridge, "metadata_source", self.bridge.local_server)
+        server = metadata_source(receiver_id)
         if server is None:
+            logger.info(
+                "Track display unavailable for %s: no receiver metadata source",
+                receiver_id,
+            )
             return
         old = self._lyrics_sessions.pop(receiver_id, None)
         if old:
             await old.stop()
-        session = LyricsSession(
-            receiver_id,
-            server,
-            self.device_manager,
-            lambda hit: self.resend_with_match(receiver_id, hit),
-        )
+        lease = self.bridge.sessions.current(receiver_id)
+        token = lease.token if lease else None
+
+        async def resend(hit):
+            if token is not None and not self.bridge.sessions.valid(token):
+                return
+            await self.resend_with_match(receiver_id, hit)
+
+        session = LyricsSession(receiver_id, server, self.device_manager, resend)
         self._lyrics_sessions[receiver_id] = session
         session.start()
 

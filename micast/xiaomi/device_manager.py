@@ -392,6 +392,10 @@ class DeviceManager:
                 return True
             if owner is not None and current_owner and current_owner != owner:
                 logger.info("Speaker %s ownership: %s -> %s", device_id, current_owner, owner)
+            # Recovery and URL changes must retain the current track's screen
+            # identity. Explicit matches override this owner-scoped fallback.
+            if not audio_id and owner and settings.touchscreen_lyrics:
+                audio_id = self._display_audio_id(owner, lease)
             api = self.cloud_api(device_id)
             try:
                 await api.play_music_url(url, audio_id=audio_id)
@@ -399,10 +403,16 @@ class DeviceManager:
                 logger.warning("play_music_url failed for %s, falling back to play_url", device_id)
                 await api.play_url(url)
             if lease is not None and not self.sessions.valid(lease.token):
-                # Stop won while the cloud play was in flight; do not publish a
-                # resurrected speaker or leave its acknowledged URL running.
-                await asyncio.gather(api.pause(), api.stop(), return_exceptions=True)
-                return False
+                # A stop or a session replacement won while the cloud play was
+                # in flight; do not publish a resurrected speaker or leave its
+                # acknowledged URL running. A lease the media path ended
+                # (EOF/media error, reason media_*) is neither: the command
+                # outcome stands on its own and killing here would turn a
+                # media-side failure into a false "speaker rejected".
+                reason = self.sessions.end_reason(lease.token)
+                if reason is None or not reason.startswith("media_"):
+                    await asyncio.gather(api.pause(), api.stop(), return_exceptions=True)
+                    return False
             self._playing.add(device_id)
             self._paused.discard(device_id)
             self._stream_urls[device_id] = url
@@ -426,6 +436,16 @@ class DeviceManager:
                 )
             self._start_watchdog(device_id)
             return True
+
+    def _display_audio_id(self, owner, lease):
+        bridge = getattr(self, "bridge", None)
+        if owner.startswith("dlna:"):
+            service = getattr(bridge, "dlna_service", None)
+            state = getattr(service, "states", {}).get(owner.removeprefix("dlna:"))
+            if state is not None and (lease is None or lease.identity == state.session_id):
+                return getattr(state, "display_audio_id", "") or None
+            return None
+        return getattr(bridge, "lyrics_matched", {}).get(owner) or None
 
     async def search_track(
         self, title: str, artist: str = "", fuzzy_fallback: bool = True
@@ -1059,6 +1079,14 @@ class DeviceManager:
                     continue
                 failures = 0
                 owner = self._owners.get(device_id, "")
+                dlna = getattr(getattr(self, "bridge", None), "dlna_service", None)
+                transport = getattr(dlna, "states", {}).get(owner.removeprefix("dlna:"))
+                if owner.startswith("dlna:") and getattr(transport, "state", "") == "TRANSITIONING":
+                    # A finite cached download may still be preparing. An idle
+                    # speaker here is not EOF; the bounded startup task owns
+                    # success/failure until it reports PLAYING or STOPPED.
+                    inactive_checks = 0
+                    continue
                 finite_media = owner == MANUAL_PLAY_OWNER or owner.startswith("dlna:")
                 media = getattr(getattr(self, "bridge", None), "media_playback", None)
                 if media is not None and owner in media.sources:

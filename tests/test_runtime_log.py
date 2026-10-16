@@ -37,6 +37,36 @@ def test_runtime_log_is_bounded():
     assert handler.capacity == 3
 
 
+def test_fnos_logs_startup_to_stderr_once(monkeypatch):
+    import io
+
+    from micast.runtime_log import install_runtime_log
+
+    stream = io.StringIO()
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    monkeypatch.setattr("sys.stderr", stream)
+    monkeypatch.setenv("MICAST_DEPLOYMENT", "fnos")
+    install_runtime_log()
+    install_runtime_log()
+    logging.getLogger("micast.startup.test").info("startup-stage-visible")
+    assert stream.getvalue().count("startup-stage-visible") == 1
+    assert "micast.startup.test" in stream.getvalue()
+    assert len([h for h in root.handlers if h.name == "micast-fnos-console"]) == 1
+
+
+def test_other_deployments_do_not_gain_a_console_handler(monkeypatch):
+    from micast.runtime_log import install_runtime_log
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    monkeypatch.setenv("MICAST_DEPLOYMENT", "development")
+    install_runtime_log()
+    assert not any(h.name == "micast-fnos-console" for h in root.handlers)
+
+
 def test_selection_hands_out_copies_not_the_live_records():
     # Callers sanitize what they hand out; that must not rewrite the buffer.
     handler = RuntimeLogHandler(capacity=5)

@@ -120,3 +120,64 @@ async def test_eq_change_can_rebuild_multiple_mapped_groups_in_one_pass(monkeypa
     stopped = {call.args[0] for call in bridge._stop_airplay2_pipeline.await_args_list}
     assert stopped == {"ap2-a", "ap2-b"}
     bridge._start_airplay2_pipelines.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streams", [("ap2-q1",), ("ap2-Lq1", "ap2-Rq2"), ("ap2",)])
+async def test_session_callback_resolves_airplay2_dsp_variants(monkeypatch, streams):
+    """A callback names the ingress even when no unprocessed stream exists."""
+    cfg = AirPlay2InstanceConfig(id="ap2", name="MiCast", target_type="speaker", target_id="a")
+    monkeypatch.setattr("micast.audio_bridge.settings", _settings_with(cfg, []))
+    bridge = object.__new__(AudioBridge)
+    bridge._pipelines = {}
+    bridge._airplay2_pipelines = {stream: AsyncMock() for stream in streams}
+    unrelated = AsyncMock()
+    bridge._airplay2_pipelines["ap20-q1"] = unrelated
+    bridge._active_sessions = set()
+    bridge._volume_modes = {}
+    bridge._sender_volumes = {}
+    bridge._target_taps = {"ap2": object()}
+    bridge._start_entry_targets = AsyncMock()
+    bridge._local_volume = AsyncMock()
+    hook = AsyncMock()
+
+    async def start_hook():
+        await hook("ap2")
+
+    for pipeline in bridge._airplay2_pipelines.values():
+        pipeline.session_start.side_effect = start_hook
+
+    await bridge.session_start("ap2")
+
+    hook.assert_awaited_once_with("ap2")
+    assert bridge.is_session_active("ap2")
+    bridge._start_entry_targets.assert_awaited_once_with("ap2", resume=False)
+    unrelated.session_start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_callback_rebuilds_stale_airplay2_variant(monkeypatch):
+    cfg = AirPlay2InstanceConfig(id="ap2", name="MiCast", target_type="speaker", target_id="a")
+    monkeypatch.setattr("micast.audio_bridge.settings", _settings_with(cfg, []))
+    bridge = object.__new__(AudioBridge)
+    bridge._pipelines = {}
+    healthy, stale, replacement = AsyncMock(), AsyncMock(), AsyncMock()
+    stale.running = False
+    bridge._airplay2_pipelines = {"ap2-Lq1": healthy, "ap2-Rq2": stale}
+    bridge._active_sessions = set()
+    bridge._volume_modes = {}
+    bridge._sender_volumes = {}
+    bridge._target_taps = {"ap2": object()}
+    bridge._start_entry_targets = AsyncMock()
+    bridge._restart_lock = asyncio.Lock()
+
+    async def rebuild(ids):
+        assert ids == {"ap2"}
+        bridge._airplay2_pipelines = {"ap2-q1": replacement}
+
+    bridge._rebuild_airplay2_instances_locked = AsyncMock(side_effect=rebuild)
+    await bridge.session_start("ap2")
+    bridge._rebuild_airplay2_instances_locked.assert_awaited_once_with({"ap2"})
+    replacement.session_start.assert_awaited_once()
+    healthy.session_start.assert_not_awaited()
+    stale.session_start.assert_not_awaited()

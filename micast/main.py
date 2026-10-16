@@ -108,6 +108,8 @@ async def lifespan(app: FastAPI):
     start_background = runtime_tasks.start
 
     try:
+        logger.info("MiCast %s startup: initializing audio services", __version__)
+        logger.info("Startup: invoked by %s", _invocation_chain())
         start_background(verify_saved_xiaomi_login(), name="verify-xiaomi-login")
         # Runtime health for the diagnostics page: CPU load of this process and how
         # late the event loop runs its own timer. A stutter report with every drop
@@ -138,27 +140,41 @@ async def lifespan(app: FastAPI):
         app.state.audio_supervisor = supervisor
         start_background(_run_audio_supervisor(supervisor), name="audio-supervisor")
 
-        await bridge.start()
-        if os.environ.get("MICAST_UNIX_SOCKET", "").strip():
-            from micast.dlna_listener import DlnaHttpListener
+        # The audio path takes ~10s (receivers, discovery, pipelines). Running it
+        # inline delayed /health, so a slow or retried "enable" in the app centre
+        # looked like a failed start and could get the process killed. Serve HTTP
+        # first and bring the audio path up in the background; /ready reports that
+        # part separately from /health.
+        async def start_audio_path() -> None:
+            await bridge.start()
+            logger.info("Startup: audio bridge ready")
+            if os.environ.get("MICAST_UNIX_SOCKET", "").strip():
+                from micast.dlna_listener import DlnaHttpListener
 
-            app.state.dlna_listener = DlnaHttpListener(dlna_service)
-            dlna_service.http_listener = app.state.dlna_listener
-            if settings.dlna_enabled:
-                await app.state.dlna_listener.start()
-        await dlna_service.start()
-        runtime_file = default_runtime_dir() / "runtime-ports.json"
-        write_json(
-            runtime_file,
-            {
-                "pid": os.getpid(),
-                "port": settings.port,
-                "stream_port": settings.stream_port,
-            },
-        )
-        # Silently rotate Xiaomi serviceTokens in the background so the stored
-        # passToken keeps the login alive past the ~30-day serviceToken expiry.
-        start_background(app.state.auth.run_token_renewal(), name="xiaomi-token-renewal")
+                app.state.dlna_listener = DlnaHttpListener(dlna_service)
+                dlna_service.http_listener = app.state.dlna_listener
+                if settings.dlna_enabled:
+                    logger.info("Startup: starting DLNA HTTP listener")
+                    await app.state.dlna_listener.start()
+            logger.info("Startup: starting DLNA discovery")
+            await dlna_service.start()
+            runtime_file = default_runtime_dir() / "runtime-ports.json"
+            write_json(
+                runtime_file,
+                {
+                    "pid": os.getpid(),
+                    "port": settings.port,
+                    "stream_port": settings.stream_port,
+                },
+            )
+            # Silently rotate Xiaomi serviceTokens in the background so the stored
+            # passToken keeps the login alive past the ~30-day serviceToken expiry.
+            start_background(app.state.auth.run_token_renewal(), name="xiaomi-token-renewal")
+            logger.info("Startup: audio path ready")
+
+        audio_startup = start_background(start_audio_path(), name="audio-startup")
+        app.state.audio_startup = audio_startup
+        logger.info("Startup: management application ready")
         yield
     finally:
         app.state.auth.unsubscribe_expiry(expiry_notice)
@@ -177,6 +193,33 @@ async def lifespan(app: FastAPI):
 
 logger = logging.getLogger(__name__)
 install_runtime_log()
+
+
+def _invocation_chain(depth: int = 4) -> str:
+    """Describe who launched this process.
+
+    Repeated "enable" clicks used to look like random startup failures, and the
+    caller (the app centre's lifecycle script) leaves no trace in the app log.
+    Walking /proc's parent chain makes the next log answer "who started me and
+    how often" without guessing.
+    """
+    try:
+        pid = os.getpid()
+        chain = []
+        for _ in range(depth):
+            status = Path(f"/proc/{pid}/status").read_text()
+            ppid = next(
+                int(line.split()[1]) for line in status.splitlines() if line.startswith("PPid:")
+            )
+            if ppid <= 1:
+                break
+            raw = Path(f"/proc/{ppid}/cmdline").read_bytes()
+            argv = [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+            chain.append(f"{ppid}:{' '.join(argv)[:120]}")
+            pid = ppid
+        return " <- ".join(chain) if chain else "unknown (no /proc)"
+    except (OSError, StopIteration, ValueError):
+        return "unknown (no /proc)"
 
 
 app = FastAPI(
@@ -202,6 +245,9 @@ app.state.device_manager.sessions = app.state.bridge.sessions
 app.state.bridge.stream_server.sessions = app.state.bridge.sessions
 app.state.bridge.stream_server.media_volume = app.state.dlna.media_volume
 app.state.bridge.stream_server.media_session = app.state.dlna.media_token
+# Shared downloaded files behind the speaker-facing local short URLs.
+app.state.dlna.stream_server = app.state.bridge.stream_server
+app.state.bridge.stream_server.media_cache = app.state.dlna.cache
 app.state.notifier = Notifier()
 
 
@@ -298,7 +344,9 @@ async def legacy_health() -> dict[str, str]:
 async def readiness():
     """Report whether the audio core can currently accept sessions."""
     state = app.state.bridge.status.get("status", "error")
-    ready = state not in {"error", "idle", "stopping"}
+    # "starting" is deliberately not ready: /health answers as soon as HTTP is
+    # up, while receivers and pipelines come up right after in the background.
+    ready = state not in {"error", "idle", "stopping", "starting"}
     return JSONResponse(
         status_code=200 if ready else 503,
         content={"status": "ready" if ready else "not_ready", "audio": state},

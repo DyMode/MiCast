@@ -133,6 +133,7 @@ class LocalPCMSource(PCMSource):
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
         self._stderr_tail = deque(maxlen=16)
+        self.metadata = None
 
     @property
     def alive(self) -> bool:
@@ -160,6 +161,11 @@ class LocalPCMSource(PCMSource):
                 raise RuntimeError("AirPlay 2 启动脚本缺失，请重新安装修复版")
             if launcher.read_bytes().split(b"\n", 1)[0] != b"#!/bin/sh":
                 raise RuntimeError("AirPlay 2 启动脚本格式错误，请重新安装修复版（需要 LF 换行）")
+        if args and Path(args[0]).name == "run-shairport" and sys.platform != "win32":
+            from micast.shairport_metadata import ShairportMetadata
+
+            self.metadata = ShairportMetadata()
+            self.env["MICAST_METADATA_PIPE"] = self.metadata.start()
         ready_path = self.env.get("MICAST_AIRPLAY2_READY_FILE")
         if ready_path:
             Path(ready_path).unlink(missing_ok=True)
@@ -215,6 +221,8 @@ class LocalPCMSource(PCMSource):
             pass
 
     async def stop(self) -> None:
+        if self.metadata is not None:
+            await self.metadata.stop()
         if self._process and self._process.returncode is None:
             self._process.terminate()
             try:

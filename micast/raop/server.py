@@ -72,6 +72,9 @@ class RaopServer:
         self.lyric_lines: list[str] = []
         self.playback_sessions = None
         self.receiver_id = name
+        # mDNS publication is awaited in stop(): see start() for why it does not
+        # block startup.
+        self._announce_future: asyncio.Future | None = None
 
     @property
     def pcm_reader(self) -> asyncio.StreamReader:
@@ -152,13 +155,47 @@ class RaopServer:
             },
             server=f"micast-{self.mac.hex()}.local.",
         )
-        await asyncio.to_thread(self.zeroconf.register_service, self._service)
         logger.info("Native RAOP receiver %s listening on %s", self.name, self.port)
+        # Announce in the background: blocking here added 1-5s per receiver to
+        # startup (see announce()).
+        self.announce()
+
+    def announce(self) -> asyncio.Future:
+        """Publish the mDNS record without blocking the caller.
+
+        ``zeroconf.register_service`` blocks until the announcement round
+        completes, which costs 1-5s per receiver on a busy LAN. The RTSP socket
+        is already bound and reachable at that point, and senders need a moment
+        to discover the receiver anyway, so publication runs in a thread while
+        startup continues. ``stop()`` waits for it before unregistering, so a
+        cancelled announcement cannot leave a stale record behind.
+        """
+        if self._announce_future is not None:
+            return self._announce_future
+
+        def publish() -> None:
+            try:
+                self.zeroconf.register_service(self._service)
+            except Exception:
+                logger.exception("Unable to announce receiver %s", self.name)
+
+        self._announce_future = asyncio.get_running_loop().run_in_executor(None, publish)
+        return self._announce_future
+
+    async def wait_announced(self, timeout: float = 5.0) -> None:
+        if self._announce_future is None:
+            return
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(asyncio.shield(self._announce_future), timeout)
 
     async def stop(self) -> None:
         if self._service:
+            # A background announcement must finish before we unregister,
+            # otherwise the record would be published again after teardown.
+            await self.wait_announced()
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self.zeroconf.unregister_service, self._service)
+            self._announce_future = None
         if self._server:
             self._server.close()
             await self._server.wait_closed()

@@ -19,12 +19,14 @@ import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 import av
 from av.filter import Graph
 
 from micast.audio_metrics import metrics
 from micast.config import settings
+from micast.pyav_compat import DLNA_USER_AGENT, dlna_headers_string, open_input
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,20 @@ _CODECS = {"mp3": "libmp3lame", "flac": "flac", "wav": "pcm_s16le"}
 # A remote media server that stops answering must not hold the DLNA proxy's
 # worker thread forever: the speaker on the other end would just stall.
 DLNA_MEDIA_READ_TIMEOUT_SECONDS = 15.0
+# Interrupt-callback deadline for ffmpeg's open/probe phase (see
+# micast.media_source.OPEN_TIMEOUT_SECONDS): per-read timeouts alone do not
+# bound a peer that dribbles bytes during stream probing.
+DLNA_MEDIA_OPEN_TIMEOUT_SECONDS = 10.0
+
+
+def _log_url(url: str) -> str:
+    """scheme://host/path without the query: controller URLs carry per-session
+    keys that would only add noise (and leak) in logs."""
+    try:
+        parts = urlsplit(url)
+        return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.netloc else url
+    except ValueError:
+        return url
 
 
 def raw_pcm_format(sample_rate: int = 44100) -> StreamFormat:
@@ -548,13 +564,16 @@ def stream_media_as_mp3(
     seek_seconds: float,
     emit,
     stop: threading.Event,
-    user_agent: str,
     volume_provider=None,
+    errors: list | None = None,
 ) -> None:
     """Decode a remote URL from `seek_seconds` and emit MP3 (192k) chunks.
 
     Runs on a worker thread; `emit(chunk)` hands bytes to the async side and
-    `stop` aborts promptly when the HTTP client goes away mid-stream.
+    `stop` aborts promptly when the HTTP client goes away mid-stream. A caught
+    failure is appended to `errors` (when given) so the caller can tell a
+    clean EOF apart from a dead transcode. The request always carries the
+    DLNA client fingerprint (see pyav_compat.dlna_headers_string).
     """
     container = None
     out = None
@@ -565,14 +584,29 @@ def stream_media_as_mp3(
         #
         # rw_timeout bounds the network read: without it an unresponsive media
         # server holds this worker thread (and the speaker's stream) forever.
-        container = av.open(
+        # The DLNA fingerprint (see pyav_compat) is required by
+        # controller-hosted media servers — a plain-UA GET gets a 4XX.
+        container = open_input(
             url,
             options={
-                "user_agent": user_agent,
                 "rw_timeout": str(int(DLNA_MEDIA_READ_TIMEOUT_SECONDS * 1_000_000)),
                 "reconnect": "1",
+                # user_agent is the primary User-Agent header (see
+                # MediaPCMSource): WMP media sharing rejects the Lavf default.
+                "user_agent": DLNA_USER_AGENT,
+                "headers": dlna_headers_string(url),
             },
-            metadata_errors="ignore",
+            # Same interrupt-callback deadline as MediaPCMSource: rw_timeout
+            # guards individual socket reads, but a dribbling origin (WMP
+            # MDEServer) can hold avformat_open_input/find_stream_info
+            # indefinitely without ever tripping it.
+            timeout=(DLNA_MEDIA_OPEN_TIMEOUT_SECONDS, None),
+        )
+        logger.info(
+            "DLNA media source opened: %s (format=%s, streams=%d)",
+            _log_url(url),
+            container.format.name,
+            len(container.streams),
         )
         if seek_seconds > 0:
             container.seek(int(seek_seconds * 1_000_000), backward=True)
@@ -584,6 +618,7 @@ def stream_media_as_mp3(
         samples_sent = 0
         for frame in container.decode(audio):
             if stop.is_set():
+                logger.info("DLNA media source aborted mid-stream: %s", _log_url(url))
                 return
             for resampled in resampler.resample(frame):
                 if volume_provider is not None:
@@ -606,8 +641,13 @@ def stream_media_as_mp3(
                 out.mux(packet)
         for packet in stream.encode(None):
             out.mux(packet)
-    except Exception:
-        logger.exception("Media proxy transcode failed for %s", url)
+        logger.info("DLNA media source reached end: %s", _log_url(url))
+    except Exception as exc:
+        # Covers open failures (403, timeouts, unreadable formats) and
+        # mid-stream decode errors; the 10s open deadline lands here too.
+        if errors is not None:
+            errors.append(exc)
+        logger.exception("Media proxy transcode failed for %s", _log_url(url))
     finally:
         with contextlib.suppress(Exception):
             if out is not None:
@@ -620,18 +660,24 @@ def stream_media_as_mp3(
 class MediaProxyPump:
     """Async-side harness for stream_media_as_mp3: bounded queue, prompt abort."""
 
-    def __init__(self, url: str, seek_seconds: float, user_agent: str, volume_provider=None):
+    def __init__(self, url: str, seek_seconds: float, volume_provider=None):
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=8)
         self._done = threading.Event()
         self._volume_provider = volume_provider
         self._stop = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
-        self._args = (url, seek_seconds, user_agent)
+        self._args = (url, seek_seconds)
+        # Failures caught by the worker (open errors, decode errors); a clean
+        # EOF leaves this empty.
+        self.errors: list = []
 
     def start(self) -> "MediaProxyPump":
         self._loop = asyncio.get_running_loop()
-        url, seek_seconds, user_agent = self._args
+        url, seek_seconds = self._args
+        logger.info(
+            "DLNA media pump starting: %s (ss=%.1f)", _log_url(url), seek_seconds
+        )
 
         def emit(chunk: bytes) -> None:
             # Bounded queue = real backpressure; the short spin lets a dead
@@ -646,7 +692,12 @@ class MediaProxyPump:
         def work() -> None:
             try:
                 stream_media_as_mp3(
-                    url, seek_seconds, emit, self._stop, user_agent, self._volume_provider
+                    url,
+                    seek_seconds,
+                    emit,
+                    self._stop,
+                    self._volume_provider,
+                    self.errors,
                 )
             finally:
                 self._done.set()
@@ -674,4 +725,8 @@ class MediaProxyPump:
         if self._thread is not None:
             await asyncio.to_thread(self._thread.join, 1.0)
             if self._thread.is_alive():
+                logger.warning(
+                    "DLNA media pump worker still stuck on %s after abort; leaking thread",
+                    _log_url(self._args[0]),
+                )
                 raise TimeoutError("Media proxy worker is still releasing its input")

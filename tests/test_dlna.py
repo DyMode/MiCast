@@ -19,7 +19,7 @@ class FakeDeviceManager:
     async def stop(self, did, owner=None):
         self.calls.append(("pause", did, owner))
 
-    async def stop_playback(self, did):
+    async def stop_playback(self, did, owner=None):
         self.calls.append(("stop", did))
 
     async def set_volume(self, did, volume):
@@ -78,19 +78,18 @@ def test_dlna_service_descriptions_declare_action_arguments_and_state_variables(
     assert transport.findall("upnp:serviceStateTable/upnp:stateVariable", namespace)
 
 
-async def test_dlna_routes_group_media_to_every_speaker(monkeypatch):
+async def test_group_requires_processing_service_instead_of_bypassing_it(monkeypatch):
+    import pytest
     configure(monkeypatch)
     manager = FakeDeviceManager()
     service = DlnaService(manager)
-
-    await service.set_uri("whole", "http://media.local/song.mp3")
-    await service.play("whole")
-
-    assert manager.calls == [
-        ("play", "a", "http://media.local/song.mp3", "dlna:whole", True),
-        ("play", "b", "http://media.local/song.mp3", "dlna:whole", True),
-    ]
-    assert service.state_for("whole").state == "PLAYING"
+    try:
+        await service.set_uri("whole", "http://media.local/song.mp3")
+        with pytest.raises(ValueError, match="音频处理"):
+            await service.play("whole")
+        assert not manager.calls
+    finally:
+        await service.stop()
 
 
 async def test_dlna_does_not_report_playing_when_every_speaker_rejects(monkeypatch):
@@ -118,6 +117,7 @@ async def test_dlna_soap_transport_and_volume(monkeypatch):
 
     await _dispatch(service, "living", "AVTransport", "SetAVTransportURI", body)
     await _dispatch(service, "living", "AVTransport", "Play", b"")
+    await service._play_tasks["living"]
     info = await _dispatch(service, "living", "AVTransport", "GetTransportInfo", b"")
     await _dispatch(
         service,
@@ -182,14 +182,17 @@ async def test_dlna_seek_without_playing_does_not_acquire_outputs(monkeypatch):
     await service.seek("living", 42)
     assert not manager.calls
     assert service.state_for("living").state == "STOPPED"
-    await service.play("living")
-    assert "ss=42" in manager.calls[-1][2]
+    import pytest
+    with pytest.raises(ValueError, match="音频处理"):
+        await service.play("living")
+    assert not manager.calls
     await service.stop()
 
 
 async def test_dlna_resume_does_not_promote_queued_track(monkeypatch):
     configure(monkeypatch)
-    service = DlnaService(FakeDeviceManager())
+    from tests.test_dlna_delivery import FakeMedia
+    service = DlnaService(FakeDeviceManager(), media=FakeMedia())
     await service.set_uri("living", "http://media.local/first.mp3")
     await service.play("living")
     await service.set_next_uri("living", "http://media.local/second.mp3")
@@ -341,3 +344,6 @@ async def test_dlna_duration_selects_current_resource_and_clears_on_replacement(
     assert service.duration_time("living") == "00:00:00"
     await service.set_uri("living", "http://media.local/bad.mp3", '<item><res duration="0:01:00">')
     assert service.duration_time("living") == "00:00:00"
+
+
+pytestmark = __import__("pytest").mark.usefixtures("cached_audio")

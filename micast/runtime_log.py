@@ -14,6 +14,8 @@ one on screen.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -248,6 +250,18 @@ def install_runtime_log() -> None:
     if runtime_logs not in root.handlers:
         root.addHandler(runtime_logs)
     root.setLevel(min(root.level or logging.INFO, logging.INFO))
+    # fnOS redirects stderr to micast.log. The ring buffer alone consumes log
+    # records without printing them, hiding every application startup stage.
+    if os.environ.get("MICAST_DEPLOYMENT") == "fnos" and not any(
+        handler.get_name() == "micast-fnos-console" for handler in root.handlers
+    ):
+        console = logging.StreamHandler(sys.stderr)
+        console.set_name("micast-fnos-console")
+        console.setLevel(logging.INFO)
+        console.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"
+        ))
+        root.addHandler(console)
     # miservice logs every cloud request at INFO — that is every poll of
     # device_list and every ubus command, which drowns real events in the
     # diagnostics view. Warnings and errors still come through.

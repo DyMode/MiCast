@@ -1,8 +1,7 @@
-"""Small local UPnP/DLNA MediaRenderer implementation.
+"""UPnP renderer with one bounded local download and generation-owned output.
 
-The renderer is deliberately a control bridge: a controller supplies an HTTP
-media URI, and MiCast asks the receiver's Xiaomi speaker target(s) to fetch it.
-No third-party renderer process is required.
+Every speaker receives a local URL. Raw MP3 and processed audio share the same
+cache; network failures are reported without switching to external URLs.
 """
 
 from __future__ import annotations
@@ -16,10 +15,13 @@ import uuid
 from copy import copy
 from dataclasses import dataclass
 from email.utils import formatdate
+from urllib.parse import urlsplit
 from xml.etree import ElementTree as ET
 
 from micast.config import ReceiverConfig, settings
+from micast.dlna_delivery import DeliverySuperseded, DlnaDelivery
 from micast.dlna_events import DlnaEvents
+from micast.media_cache import MediaCache
 from micast.playback_sessions import PlaybackSessions, SessionState
 from micast.xiaomi.device_manager import DeviceManager
 
@@ -40,6 +42,9 @@ DLNA_SINK_PROTOCOLS = ",".join(
 
 @dataclass
 class DlnaTransportState:
+    display_audio_id: str = ""
+    display_match_key: tuple | None = None
+    display_cover_url: str = ""
     uri: str = ""
     metadata: str = ""
     next_uri: str = ""
@@ -53,6 +58,7 @@ class DlnaTransportState:
     volume_received: bool = False
     finished: bool = False
     error: str = ""
+    source_path: str = ""
 
 
 class _SsdpProtocol(asyncio.DatagramProtocol):
@@ -85,6 +91,11 @@ class DlnaService:
         self.sessions = sessions or PlaybackSessions(lambda: settings.stale_session_timeout)
         self.sessions.on_state.append(self._session_changed)
         self.media = media
+        self.cache = MediaCache()
+        self._play_tasks: dict[str, asyncio.Task] = {}
+        # Wired to the speaker-facing server in main.py.
+        self.stream_server = None
+        self.delivery = DlnaDelivery(self)
         self._positions = {}
         self.states: dict[str, DlnaTransportState] = {}
         self.events = DlnaEvents(self.event_snapshot)
@@ -170,6 +181,16 @@ class DlnaService:
             logger.exception("Unable to start DLNA discovery")
 
     async def stop(self) -> None:
+        for receiver_id in self.states:
+            self.delivery.cancel(receiver_id)
+        pending = list({
+            task for task in [*self._play_tasks.values(), *self.delivery._tasks.values()]
+            if task is not asyncio.current_task() and not task.done()
+        })
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._play_tasks.clear()
         await self.events.close()
         tasks = list(self._next_tasks.values())
         self._next_tasks.clear()
@@ -180,6 +201,7 @@ class DlnaService:
             lease = self.sessions.current(self._owner(receiver_id))
             if lease:
                 await self.sessions.close(lease.token, "dlna_disabled")
+        await self.cache.close()
         if self._transport:
             await self.announce("ssdp:byebye", self._advertised.values())
         if self._announce_task:
@@ -199,19 +221,22 @@ class DlnaService:
         if not settings.dlna_enabled:
             await self.stop()
             return
-        if not self._transport:
-            await self.start()
-            return
         active = {item.id: item for item in self.active_receivers()}
         removed = [item for key, item in self._advertised.items() if key not in active]
         if removed:
             await self.announce("ssdp:byebye", removed)
         valid = set(active)
         for receiver_id in set(self.states) - valid:
+            await self.cancel_next(receiver_id)
             lease = self.sessions.current(self._owner(receiver_id))
             if lease:
                 await self.sessions.close(lease.token, "receiver_removed")
+            await self.cache.release(receiver_id)
+            self.delivery.reset(receiver_id)
         self.states = {key: value for key, value in self.states.items() if key in valid}
+        if not self._transport:
+            await self.start()
+            return
         self._advertised = active
         self.detail = f"DLNA · {len(valid)} 个播放入口"
         await self.announce("ssdp:alive")
@@ -336,6 +361,11 @@ class DlnaService:
         return f"dlna:{receiver_id}"
 
     async def set_uri(self, receiver_id: str, uri: str, metadata: str = "") -> None:
+        # An empty CurrentURI must fault (701) before touching state: some
+        # controllers probe with it first, and wiping the transport state here
+        # leaves the control point polling a renderer that has nothing to play.
+        if not uri or not uri.strip():
+            raise ValueError("媒体地址不能为空")
         self._validate_uri(uri)
         await self.cancel_next(receiver_id)
         lease = self.sessions.current(self._owner(receiver_id))
@@ -344,16 +374,22 @@ class DlnaService:
         state = self.state_for(receiver_id)
         state.uri = uri
         state.metadata = metadata
+        state.display_audio_id = ""
+        state.display_cover_url = ""
+        state.display_match_key = None
         state.next_uri = state.next_metadata = ""
         state.finished = False
         state.error = ""
         state.state = "STOPPED"
         state.volume_mode = settings.sender_volume_mode
         state.session_id = uuid.uuid4().hex
+        state.source_path = ""
+        self.delivery.reset(receiver_id)
         self._positions[receiver_id] = 0
         if self.media is not None:
             self.media.set_position(receiver_id, 0)
-        logger.info("DLNA %s received media URI: %s", receiver_id, uri)
+        await self.cache.prepare(receiver_id, uri, state.session_id)
+        logger.info("DLNA %s media received; background download scheduled", receiver_id)
 
     async def set_next_uri(self, receiver_id: str, uri: str, metadata: str = "") -> None:
         self._validate_uri(uri)
@@ -364,10 +400,53 @@ class DlnaService:
 
     @staticmethod
     def _validate_uri(uri):
-        from urllib.parse import urlsplit
-
         if uri and (urlsplit(uri).scheme not in ("http", "https") or not urlsplit(uri).hostname):
             raise ValueError("媒体地址必须是 HTTP 或 HTTPS")
+
+    async def match_track_display(self, receiver_id, state):
+        """Attach a library song before either raw or DSP playback is issued."""
+        if not settings.touchscreen_lyrics:
+            state.display_audio_id = ""
+            state.display_cover_url = ""
+            return
+        values, _ = self._media_metadata(state)
+        title = values.get("title") or ""
+        artist = values.get("artist") or values.get("creator") or ""
+        # Reuse sender-title normalization (e.g. "song - artist") while
+        # keeping the controller's original metadata for display.
+        from micast.raop.dmap import track_meta
+
+        body = b""
+        for tag, value in (("minm", title), ("asar", artist)):
+            encoded = value.encode("utf-8")
+            body += tag.encode() + len(encoded).to_bytes(4, "big") + encoded
+        normalized = track_meta(body)
+        title = normalized.get("derived") or normalized.get("title") or title
+        artist = normalized.get("artist") or artist
+        key = (state.uri, title, artist)
+        if state.display_match_key == key:
+            return
+        state.display_audio_id = ""
+        state.display_cover_url = ""
+        if not title:
+            return
+        identity = state.session_id
+        try:
+            hit = await asyncio.wait_for(
+                self.device_manager.search_track(title, artist, fuzzy_fallback=False), timeout=5
+            )
+        except Exception as exc:
+            logger.warning("DLNA track display lookup failed for %s: %s", receiver_id, exc)
+            return
+        if state.session_id != identity:
+            return
+        state.display_match_key = key
+        state.display_audio_id = str((hit or {}).get("audio_id") or "")
+        state.display_cover_url = str((hit or {}).get("cover_url") or "")
+        logger.info(
+            "DLNA track display for %s: %s",
+            receiver_id, "matched" if state.display_audio_id else "no library match",
+        )
 
     def media_volume(self, receiver_id: str, session_id: str) -> int:
         state = self.states.get(receiver_id)
@@ -375,28 +454,50 @@ class DlnaService:
             return 0
         return state.volume if state.volume_mode == "independent" else 100
 
-    def _media_url(self, receiver_id: str, seek_seconds: float = 0) -> str:
-        from urllib.parse import urlencode
-
+    def request_play(self, receiver_id: str, *, advance_next: bool = False) -> None:
+        """Accept SOAP Play promptly; preparation reports TRANSITIONING."""
         state = self.state_for(receiver_id)
-        return (
-            f"http://{settings.effective_stream_host}:{settings.stream_port}/dlna-media?"
-            + urlencode(
-                {
-                    "url": state.uri,
-                    "ss": seek_seconds,
-                    "receiver": receiver_id,
-                    "session": state.session_id,
-                }
-            )
+        if self.receiver(receiver_id) is None or not state.uri:
+            raise ValueError("No media URI or playback target")
+        pending = self._play_tasks.get(receiver_id)
+        if pending and not pending.done():
+            return
+        active = self.delivery._tasks.get(receiver_id)
+        if active is not None and not active.done():
+            return
+        if state.state == "PLAYING" and not advance_next:
+            return
+        resume = state.state == "PAUSED_PLAYBACK"
+        identity = state.session_id
+        state.state = "TRANSITIONING"
+        state.error = ""
+
+        async def start():
+            try:
+                await self.play(receiver_id, advance_next=advance_next, resume=resume)
+            except (asyncio.CancelledError, DeliverySuperseded):
+                pass
+            except Exception:
+                if state.session_id == identity:
+                    state.state = "STOPPED"
+                    state.error = "播放启动失败"
+                    await self.cache.release(receiver_id)
+                logger.exception("DLNA %s background playback failed", receiver_id)
+            finally:
+                if self._play_tasks.get(receiver_id) is asyncio.current_task():
+                    self._play_tasks.pop(receiver_id, None)
+
+        self._play_tasks[receiver_id] = asyncio.create_task(
+            start(), name=f"dlna-play:{receiver_id}"
         )
 
-    async def play(self, receiver_id: str, *, advance_next: bool = False) -> None:
+    async def play(self, receiver_id: str, *, advance_next: bool = False, resume=None) -> None:
         receiver = self.receiver(receiver_id)
         state = self.state_for(receiver_id)
         if receiver is None or not state.uri:
             raise ValueError("No media URI or playback target")
         previous = copy(state)
+        resuming = state.state == "PAUSED_PLAYBACK" if resume is None else resume
         # Explicit compatibility opt-in for controllers that use Play as Next.
         # Ordinary repeated Play remains idempotent and preserves the queue.
         if advance_next and state.state != "PAUSED_PLAYBACK" and state.next_uri:
@@ -407,35 +508,41 @@ class DlnaService:
         if state.finished:
             self._positions[receiver_id] = 0
         state.finished = False
+        state.error = ""
         targets = settings.receiver_targets(receiver_id)
         state.volume_mode = state.volume_mode or settings.sender_volume_mode
-        if self.media is not None:
-            resuming = state.state == "PAUSED_PLAYBACK"
-            position = (
-                (self.media.position(receiver_id) or 0)
-                if resuming
-                else self._positions.get(receiver_id, 0)
+        requested_id = state.session_id
+        state.state = "TRANSITIONING"
+        try:
+            await self.delivery.play(
+                receiver_id, state, resume=resuming
             )
-            requested_id = state.session_id
-            try:
-                await self.media.play(receiver_id, state, position, resume=resuming)
-            except BaseException:
-                if state.session_id != requested_id:
-                    raise
-                current = self.sessions.current(self._owner(receiver_id))
-                if (
-                    current is not None
-                    and current.identity == previous.session_id
-                    and current.state == SessionState.ACTIVE
-                ):
-                    state.__dict__.update(previous.__dict__)
-                elif state.state != "PAUSED_PLAYBACK":
-                    state.state = "STOPPED"
-                    state.error = "播放启动失败"
+        except (asyncio.CancelledError, DeliverySuperseded):
+            raise
+        except BaseException:
+            if state.session_id != requested_id:
                 raise
-            state.state = "PLAYING"
-            state.error = ""
+            current = self.sessions.current(self._owner(receiver_id))
+            if (
+                current is not None
+                and current.identity == previous.session_id
+                and current.state == SessionState.ACTIVE
+            ):
+                state.__dict__.update(previous.__dict__)
+            elif state.state != "PAUSED_PLAYBACK":
+                state.state = "STOPPED"
+                state.error = "播放启动失败"
+            raise
+        state.state = "PLAYING"
+        state.error = ""
+        local = self.delivery.modes.get(receiver_id) == "local"
+        if local and self.media is not None:
             self.media.set_volume(receiver_id, state)
+        if settings.default_volume_enabled and state.volume_mode == "independent":
+            for did in targets:
+                if self.device_manager.owner_of(did) == self._owner(receiver_id):
+                    await self.device_manager.set_volume(did, settings.default_volume)
+        if local:
             if state.volume_mode == "linked" and (state.volume_received or state.muted):
                 for did in targets:
                     if self.device_manager.owner_of(did) == self._owner(receiver_id):
@@ -444,53 +551,13 @@ class DlnaService:
                         )
                 if state.volume_received:
                     await self._network_source_volume(receiver_id, state.volume)
-            if settings.default_volume_enabled and state.volume_mode == "independent":
-                for did in targets:
-                    if self.device_manager.owner_of(did) == self._owner(receiver_id):
-                        await self.device_manager.set_volume(did, settings.default_volume)
-            return
-        position = self._positions.get(receiver_id, 0)
-        url = (
-            self._media_url(receiver_id, position)
-            if state.volume_mode == "independent" or position
-            else state.uri
-        )
-
-        # DLNA casting has no per-speaker delay path — the speakers fetch the
-        # media URI (or the /dlna-media proxy) directly, outside the stream
-        # server's sink buffer — so every target plays the live edge together.
-        if not targets:
-            raise ValueError("Playback target has no speakers")
-        lease = self.sessions.begin(self._owner(receiver_id), "dlna", state.session_id)
-        results = await asyncio.gather(
-            *(
-                self.device_manager.play_stream(
-                    did, url, owner=self._owner(receiver_id), force=True
-                )
-                for did in targets
-            ),
-            return_exceptions=True,
-        )
-        accepted = sum(result is True for result in results)
-        if not accepted:
-            await self.sessions.close(lease.token, "start_failed")
-            failures = [str(result) for result in results if isinstance(result, Exception)]
-            if failures:
-                logger.warning("DLNA %s speaker commands failed: %s", receiver_id, failures)
-            raise ValueError("No speaker accepted the playback command")
-        state.state = "PLAYING"
-        self._register_speakers(receiver_id, lease, targets, results)
-        if accepted < len(targets):
-            logger.warning("DLNA %s started on %s/%s speakers", receiver_id, accepted, len(targets))
-        else:
-            logger.info("DLNA %s playing on %s speaker(s)", receiver_id, accepted)
-        if state.volume_mode == "linked" and (state.volume_received or state.muted):
-            for did in targets:
-                await self.device_manager.set_volume(did, 0 if state.muted else state.volume)
-        if settings.default_volume_enabled and state.volume_mode == "independent":
-            for did in targets:
-                if self.device_manager.owner_of(did) == self._owner(receiver_id):
-                    await self.device_manager.set_volume(did, settings.default_volume)
+        elif state.volume_received or state.muted:
+            if state.muted:
+                await self._set_speaker_mute(receiver_id, True)
+            else:
+                for did in self._owned_volume_targets(receiver_id):
+                    # Direct mode folds controller volume into cloud commands.
+                    await self.device_manager.set_volume(did, state.volume)
 
     def _register_speakers(self, receiver_id, lease, targets, results):
         for did, result in zip(targets, results, strict=True):
@@ -505,57 +572,19 @@ class DlnaService:
                 )
 
     async def seek(self, receiver_id: str, target_seconds: float) -> None:
-        """DLNA Seek (REL_TIME): replay the current media through the
-        transcoding proxy at the requested position."""
-
+        """DLNA Seek (REL_TIME), decoded from the already downloaded file."""
         state = self.state_for(receiver_id)
         if not state.uri:
             raise ValueError("No media URI for seek")
-        if state.state != "PLAYING":
-            if self.media is not None:
-                await self.media.seek_position(receiver_id, state, max(0, target_seconds))
-            self._positions[receiver_id] = max(0, target_seconds)
-            return
-        if self.media is not None:
-            previous_id = state.session_id
-            state.session_id = uuid.uuid4().hex
-            try:
-                await self.media.play(receiver_id, state, max(0, target_seconds), resume=True)
-            except BaseException:
-                current = self.sessions.current(self._owner(receiver_id))
-                if current is not None and current.identity == previous_id:
-                    state.session_id = previous_id
-                else:
-                    state.state = "STOPPED"
-                raise
-            state.state = "PLAYING"
-            return
-        lease = self.sessions.current(self._owner(receiver_id))
-        if lease:
-            await self.sessions.close(lease.token, "seek")
-        state.session_id = uuid.uuid4().hex
-        lease = self.sessions.begin(self._owner(receiver_id), "dlna", state.session_id)
-        proxy = self._media_url(receiver_id, max(0.0, target_seconds))
-        targets = settings.receiver_targets(receiver_id)
-        results = await asyncio.gather(
-            *(
-                self.device_manager.play_stream(
-                    did, proxy, owner=self._owner(receiver_id), force=True
-                )
-                for did in targets
-            ),
-            return_exceptions=True,
-        )
-        if not any(result is True for result in results):
-            await self.sessions.close(lease.token, "start_failed")
-            raise ValueError("No speaker accepted the seek command")
-        self._register_speakers(receiver_id, lease, targets, results)
-        state.state = "PLAYING"
+        self.delivery.cancel(receiver_id)
+        await self.delivery.seek(receiver_id, state, max(0, target_seconds))
 
     async def pause(self, receiver_id: str) -> None:
-        if self.media is not None:
+        self.delivery.cancel(receiver_id)
+        await self._cancel_play(receiver_id)
+        if self.delivery.modes.get(receiver_id) == "local" and self.media is not None:
             await self.media.cancel_pending(receiver_id)
-            self._positions[receiver_id] = self.media.position(receiver_id) or 0
+        self._positions[receiver_id] = self.delivery.position(receiver_id)
         await asyncio.gather(
             *(
                 self.device_manager.stop(did, owner=self._owner(receiver_id))
@@ -567,6 +596,9 @@ class DlnaService:
         if lease:
             self.sessions.pause(lease.token)
             await self.sessions.tick()
+        entry = self.cache.owners.get(receiver_id)
+        if entry and not entry.ready.is_set():
+            await self.cache.release(receiver_id)
 
     async def stop_playback(self, receiver_id: str) -> None:
         await self.cancel_next(receiver_id)
@@ -577,11 +609,13 @@ class DlnaService:
         self._positions[receiver_id] = 0
         if self.media is not None:
             self.media.set_position(receiver_id, 0)
+        await self.cache.release(receiver_id)
 
     async def next_track(self, receiver_id: str) -> None:
         state = self.state_for(receiver_id)
         if not state.next_uri:
             raise ValueError("No queued media URI")
+        self.delivery.cancel(receiver_id)
         # Next is distinct from resume, including when the current item is paused.
         previous = copy(state)
         previous_position = self._positions.get(receiver_id, 0)
@@ -605,12 +639,20 @@ class DlnaService:
             raise
 
     async def cancel_next(self, receiver_id: str) -> None:
+        self.delivery.cancel(receiver_id)
+        await self._cancel_play(receiver_id)
         if self.media is not None:
             cancel = getattr(self.media, "cancel_pending", None)
             if cancel is not None:
                 await cancel(receiver_id)
         self.state_for(receiver_id).finished = False
         task = self._next_tasks.pop(receiver_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _cancel_play(self, receiver_id):
+        task = self._play_tasks.get(receiver_id)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -635,6 +677,8 @@ class DlnaService:
                             and (current is None or current.token == lease.token)
                         ):
                             await self.next_track(receiver_id)
+                    except DeliverySuperseded:
+                        pass
                     except Exception:
                         logger.exception("DLNA next track failed for %s", receiver_id)
                     finally:
@@ -652,7 +696,8 @@ class DlnaService:
         ):
             state.state = "STOPPED"
         elif state and state.session_id == lease.identity and lease.state == SessionState.ACTIVE:
-            state.state = "PLAYING"
+            if state.state != "TRANSITIONING":
+                state.state = "PLAYING"
         elif state and state.session_id == lease.identity and lease.state == SessionState.PAUSED:
             state.state = "PAUSED_PLAYBACK"
         elif (
@@ -663,7 +708,7 @@ class DlnaService:
         ):
             state.state = "STOPPED"
             state.finished = lease.reason == "media_finished"
-            state.error = "媒体解码失败" if lease.reason == "media_error" else ""
+            state.error = "媒体播放失败" if lease.reason == "media_error" else ""
 
     def now_playing(self) -> dict:
         """Only current sessions contribute controller-supplied DIDL metadata."""
@@ -677,26 +722,47 @@ class DlnaService:
             ):
                 continue
             values, duration = self._media_metadata(state)
-            from urllib.parse import urlsplit
-
-            artwork = values.get("albumArtURI") or ""
-            try:
-                parts = urlsplit(artwork)
-                valid_artwork = parts.scheme in ("http", "https") and bool(parts.hostname)
-            except ValueError:
-                valid_artwork = False
-            if not valid_artwork:
-                artwork = ""
+            artwork = self.cover_artwork(receiver_id)
             result[self._owner(receiver_id)] = {
                 "title": values.get("title"),
                 "artist": values.get("artist") or values.get("creator"),
                 "album": values.get("album"),
                 "duration": duration,
-                "audio_id": None,
+                "audio_id": state.display_audio_id or None,
                 "lyric_lines": None,
-                "cover": {"url": artwork, "rev": state.session_id} if artwork else None,
+                # The cover contract is a MiCast-served endpoint URL (same
+                # shape as the AirPlay path): controller-hosted art URLs
+                # (WMP MDEServer and friends) refuse plain browser requests,
+                # so the cover endpoint proxies them with its own headers.
+                "cover": (
+                    {
+                        "url": f"api/playback/cover/{self._owner(receiver_id)}",
+                        "rev": state.session_id,
+                    }
+                    if artwork
+                    else None
+                ),
             }
         return result
+
+    def cover_artwork(self, receiver_id: str) -> str:
+        """Session artwork URL from the controller's DIDL metadata, or "".
+
+        Only absolute http(s) URLs qualify; the fetch itself happens in the
+        cover endpoint, on behalf of a browser the origin would otherwise
+        refuse.
+        """
+        state = self.states.get(receiver_id)
+        if state is None:
+            return ""
+        values, _ = self._media_metadata(state)
+        artwork = values.get("albumArtURI") or state.display_cover_url or ""
+        try:
+            parts = urlsplit(artwork)
+            valid = parts.scheme in ("http", "https") and bool(parts.hostname)
+        except ValueError:
+            valid = False
+        return artwork if valid else ""
 
     @staticmethod
     def _media_metadata(state):
@@ -746,6 +812,19 @@ class DlnaService:
                 self.media.set_volume(receiver_id, state)
             if state.muted_volumes is not None:
                 state.muted_volumes = dict.fromkeys(state.muted_volumes, volume)
+            if (
+                self.delivery.modes.get(receiver_id) == "proxy"
+                and state.state == "PLAYING"
+                and not state.muted
+            ):
+                # Compatibility for an already active raw session after a
+                # volume preference changes. New independent sessions use DSP.
+                await asyncio.gather(
+                    *(
+                        self.device_manager.set_volume(did, volume)
+                        for did in self._owned_volume_targets(receiver_id)
+                    )
+                )
             return
         await asyncio.gather(
             *(
@@ -787,26 +866,41 @@ class DlnaService:
         state = self.state_for(receiver_id)
         if state.muted == muted:
             return
-        if (state.volume_mode or settings.sender_volume_mode) == "linked":
-            if muted:
-                previous = {}
-                for did in self._owned_volume_targets(receiver_id):
-                    value = await self.device_manager.get_volume(did, refresh=True)
-                    if value is None:
-                        raise ValueError("无法读取音量，不能安全恢复静音")
-                    previous[did] = value
-                state.muted_volumes = previous
-                # Save each speaker's own level, not the group's average.
-                for did in previous:
-                    await self.device_manager.set_volume(did, 0)
-            else:
-                for did, value in (state.muted_volumes or {}).items():
-                    if did in self._owned_volume_targets(receiver_id):
-                        await self.device_manager.set_volume(did, value)
-                state.muted_volumes = None
+        if (
+            (state.volume_mode or settings.sender_volume_mode) == "linked"
+            or self.delivery.modes.get(receiver_id) == "proxy"
+        ):
+            await self._set_speaker_mute(receiver_id, muted)
         state.muted = muted
         if self.media is not None:
             self.media.set_volume(receiver_id, state)
+
+    async def _set_speaker_mute(self, receiver_id: str, muted: bool) -> None:
+        state = self.state_for(receiver_id)
+        targets = self._owned_volume_targets(receiver_id)
+        if muted:
+            previous = dict(state.muted_volumes or {})
+            for did in targets:
+                if did in previous:
+                    continue
+                value = (
+                    state.volume
+                    if self.delivery.modes.get(receiver_id) == "proxy"
+                    and state.volume_mode == "independent"
+                    and state.volume_received
+                    else await self.device_manager.get_volume(did, refresh=True)
+                )
+                if value is None:
+                    raise ValueError("无法读取音量，不能安全恢复静音")
+                previous[did] = value
+            state.muted_volumes = previous
+            for did in targets:
+                await self.device_manager.set_volume(did, 0)
+        else:
+            for did, value in (state.muted_volumes or {}).items():
+                if did in targets:
+                    await self.device_manager.set_volume(did, value)
+            state.muted_volumes = None
 
 
 def _headers(message: str) -> dict[str, str]:

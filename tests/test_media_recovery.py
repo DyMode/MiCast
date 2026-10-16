@@ -74,3 +74,27 @@ async def test_finite_eof_drain_is_not_ended_early_by_speaker_watchdog(monkeypat
         await asyncio.gather(task, return_exceptions=True)
         await manager.recovery.close()
         await sessions.close_all()
+
+async def test_cached_download_preparation_is_not_mistaken_for_eof(monkeypatch):
+    monkeypatch.setattr("micast.xiaomi.device_manager.STATUS_CHECK_INTERVAL_SECONDS", .001)
+    sessions, _ = registry()
+    manager, api = device_manager(sessions)
+    lease = sessions.begin("dlna:r1", "dlna", "track")
+    await manager.play_stream("a", "http://local/dlna-file/token", owner="dlna:r1")
+    transport = SimpleNamespace(state="TRANSITIONING")
+    manager.bridge = SimpleNamespace(dlna_service=SimpleNamespace(states={"r1":transport}))
+    api.get_status.return_value = {"status":0}
+    task = asyncio.create_task(manager._watchdog_loop("a"))
+    try:
+        async with asyncio.timeout(1):
+            while api.get_status.await_count < 5:
+                await asyncio.sleep(.001)
+        assert manager.owner_of("a") == "dlna:r1" and sessions.valid(lease.token)
+        transport.state = "PLAYING"
+        await asyncio.wait_for(task,1)
+        api.play_music_url.assert_awaited_once()
+        assert manager.owner_of("a") is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
+        await sessions.close_all()

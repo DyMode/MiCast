@@ -149,7 +149,7 @@ async def _dispatch(
             )
             return {}
         if action == "Play":
-            await service.play(receiver_id, advance_next=play_advances_next)
+            service.request_play(receiver_id, advance_next=play_advances_next)
             return {}
         if action == "Next":
             await service.next_track(receiver_id)
@@ -173,9 +173,7 @@ async def _dispatch(
                 "CurrentSpeed": "1",
             }
         if action == "GetPositionInfo":
-            seconds = (
-                int(service.media.position(receiver_id) or 0) if service.media is not None else 0
-            )
+            seconds = int(service.delivery.position(receiver_id))
             position = f"{seconds // 3600:02}:{seconds // 60 % 60:02}:{seconds % 60:02}"
             return {
                 "Track": 1,

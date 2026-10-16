@@ -1,7 +1,10 @@
 """Playback control routes."""
 
 import asyncio
+import logging
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import RedirectResponse
 
@@ -11,6 +14,8 @@ from micast.device_volume import DeviceVolume
 from micast.playback_lifecycle import stop_output
 from micast.volume import db_to_percent
 from micast.xiaomi.device_manager import DeviceManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/playback", tags=["playback"])
 
@@ -234,8 +239,10 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
     @router.get("/cover/{receiver_id}")
     async def cover(receiver_id: str):
         """Now-playing cover art: sender-pushed bytes first, library redirect
-        second, honest 404 when neither exists (the UI hides the slot)."""
-        server = bridge.local_server(receiver_id)
+        second, controller artwork proxied for DLNA third, honest 404 when
+        none exists (the UI hides the slot)."""
+        metadata_source = getattr(bridge, "metadata_source", bridge.local_server)
+        server = metadata_source(receiver_id)
         artwork = getattr(server, "artwork_bytes", b"") if server else b""
         if artwork:
             media_type = getattr(server, "artwork_content_type", "") or "image/jpeg"
@@ -248,9 +255,52 @@ def install(bridge: AudioBridge, device_manager: DeviceManager) -> APIRouter:
         cover_url = registry.enrichment_for(receiver_id).cover_url if registry is not None else ""
         if cover_url:
             return RedirectResponse(cover_url, status_code=302)
+        dlna_service = getattr(bridge, "dlna_service", None)
+        if dlna_service is not None:
+            # DLNA keys now-playing by owner ("dlna:{receiver_id}"); the
+            # metadata lookup takes either form.
+            artwork_url = dlna_service.cover_artwork(receiver_id.removeprefix("dlna:"))
+            if artwork_url:
+                return await _proxy_remote_artwork(artwork_url)
         raise HTTPException(status_code=404, detail="没有封面")
 
     return router
+
+
+# How long to wait for controller-hosted artwork (WMP MDEServer and similar).
+# Art transfers are small; a slow answer means the session URL is gone.
+_ARTWORK_FETCH_TIMEOUT_SECONDS = 5.0
+_ARTWORK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MiCast"
+
+
+async def _proxy_remote_artwork(url: str) -> Response:
+    """Fetch controller-hosted artwork on the browser's behalf.
+
+    WMP-style media servers answer art requests only for their own client
+    shape (UA/DLNA headers), which a browser cannot forge from another
+    origin — so the image would render broken without this hop. Only
+    absolute http(s) URLs with a host are fetched (same rule the DLNA
+    callback pin applies to schemes).
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=404, detail="没有封面")
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=_ARTWORK_FETCH_TIMEOUT_SECONDS
+        ) as client:
+            response = await client.get(url, headers={"User-Agent": _ARTWORK_UA})
+    except Exception:
+        logger.info("Cover fetch failed for %s", parsed.netloc)
+        raise HTTPException(status_code=404, detail="没有封面") from None
+    if response.status_code >= 400 or not response.content:
+        raise HTTPException(status_code=404, detail="没有封面")
+    media_type = response.headers.get("content-type", "").split(";")[0].strip() or "image/jpeg"
+    return Response(
+        content=response.content,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # Owners whose playback is MiCast measuring something by itself (the silent

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from uvicorn import Config, Server
 
 from micast.audio_encoder import (
@@ -25,6 +25,56 @@ from micast.ports import reserve_tcp
 from micast.test_tone import test_tone_wav
 
 logger = logging.getLogger(__name__)
+
+
+class CachedMediaResponse(Response):
+    """Range-capable finite file, including download wait, owned by its session."""
+
+    def __init__(self, entry, sessions, token):
+        super().__init__()
+        self.entry, self.sessions, self.token = entry, sessions, token
+
+    async def __call__(self, scope, receive, send):
+        task = asyncio.current_task()
+        key = f"cached-request:{id(task)}"
+
+        async def release():
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        if not self.sessions.register(self.token, key, release, kind="connection"):
+            await Response(status_code=410)(scope, receive, send)
+            return
+        sent = 0
+
+        async def counted_send(message):
+            nonlocal sent
+            await send(message)
+            if message["type"] == "http.response.body":
+                sent += len(message.get("body", b""))
+
+        logger.info("DLNA cached media requested: receiver=%s method=%s",
+                    self.entry.owner, scope["method"])
+        try:
+            try:
+                path = await self.entry.wait()
+            except ValueError:
+                self.sessions.quiet(self.token, "media_error", grace=0)
+                await Response(status_code=502)(scope, receive, send)
+                return
+            if not self.sessions.valid(self.token):
+                await Response(status_code=410)(scope, receive, send)
+                return
+            # Starlette handles HEAD, suffix/open-ended ranges and 416. The
+            # complete cached file provides a truthful Content-Length.
+            await FileResponse(path, media_type=self.entry.mime, headers={
+                "Cache-Control": "no-store", "transferMode.dlna.org": "Streaming",
+            })(scope, receive, counted_send)
+        finally:
+            logger.info("DLNA cached media served: receiver=%s bytes=%s",
+                        self.entry.owner, sent)
+            self.sessions.forget(self.token, key)
 
 
 class SessionStreamingResponse(StreamingResponse):
@@ -109,12 +159,6 @@ RATE_WINDOW_SECONDS = 3.0
 RATE_MIN_WINDOW_SECONDS = 0.6
 RATE_MIN_WINDOW_SAMPLES = 3
 
-_MEDIA_UA = (
-    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Mobile Safari/537.36"
-)
-
-
 def _receiver_id_of_stream_id(stream_id: str) -> str:
     """Receiver part of a stream id, with its ``-L``/``-R``/``-qN`` suffix stripped.
 
@@ -150,30 +194,52 @@ async def _serve_seekable_media(
     volume_provider=None,
     sessions=None,
     session_token=None,
+    client: str = "",
 ) -> StreamingResponse:
     """In-process transcode of a remote URL streamed back as MP3. Seeking the
     input container is fast when the origin supports Range requests (music
     CDNs do)."""
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="invalid url")
-    pump = MediaProxyPump(url, ss, _MEDIA_UA, volume_provider).start()
+    pump = MediaProxyPump(url, ss, volume_provider).start()
     resource_key = f"media:{id(pump)}"
     if sessions is not None and not sessions.register(
         session_token, resource_key, pump.close, kind="media"
     ):
         pump.abort()
+        logger.warning("DLNA media proxy rejected: playback session ended (%s)", client or "?")
         raise HTTPException(status_code=410, detail="Playback session ended")
 
     async def generator():
         completed = False
+        error = None
+        sent = 0
         try:
             while True:
                 chunk = await pump.read()
                 if not chunk:
                     completed = True
                     break
+                sent += len(chunk)
                 yield chunk
+        except Exception as exc:
+            error = exc
+            raise
         finally:
+            # One line per request: distinguishes a client that never pulled,
+            # a mid-stream drop, a transcode failure and a clean EOF.
+            if completed:
+                status = "completed"
+            elif error is not None:
+                status = f"failed: {error}"
+            else:
+                status = "aborted by client"
+            logger.info(
+                "DLNA media proxy stream %s, %d bytes sent (%s)",
+                status,
+                sent,
+                client or "?",
+            )
             pump.abort()
             if sessions is not None:
                 # Keep a still-running worker registered for bounded retries.
@@ -181,9 +247,14 @@ async def _serve_seekable_media(
                     sessions.forget(session_token, resource_key)
                 else:
                     sessions.release(session_token, resource_key)
+                # Only a genuine end-of-media marks the session finished. A
+                # dead transcode (open/decode error) or a client that went
+                # away mid-stream is not an EOF: ending the lease here has
+                # raced in-flight play commands into a false rejection.
                 lease = sessions.current(session_token.owner)
                 if (
                     completed
+                    and not pump.errors
                     and sessions.valid(session_token)
                     and lease
                     and not any(key.startswith("media:") for key in lease.resources)
@@ -241,11 +312,22 @@ class StreamServer:
         self.on_client_disconnected: Callable[[str, str], Awaitable[None]] | None = None
         self.media_volume = None
         self.media_session = None
+        self.media_cache = None
         self.sessions = None
         self.stream_owner = None
         self._setup_routes()
 
     def _setup_routes(self) -> None:
+        @self._app.api_route("/dlna-file/{token}", methods=["GET", "HEAD"])
+        async def cached_media(token: str):
+            entry = self.media_cache.entries.get(token) if self.media_cache else None
+            if entry is None or entry.closed:
+                raise HTTPException(404, "媒体缓存已失效")
+            lease = self.media_session(entry.owner, entry.identity) if self.media_session else None
+            if lease is None or self.sessions is None:
+                raise HTTPException(410, "Playback session ended")
+            return CachedMediaResponse(entry, self.sessions, lease)
+
         @self._app.api_route(
             "/stream/{device_id}/for/{receiver_id}/{sink}/audio.{ext}", methods=["GET", "HEAD"]
         )
@@ -371,27 +453,6 @@ class StreamServer:
                     "Cache-Control": "no-store",
                     "Content-Length": str(44 + 44100 * 4 * session.get("duration_seconds", 600)),
                 },
-            )
-
-        @self._app.get("/dlna-media")
-        async def dlna_media(url: str, ss: float = 0.0, receiver: str = "", session: str = ""):
-            """Transcode proxy for DLNA casting: lets speakers play remote media
-            from an arbitrary position (DLNA Seek) — the input container is
-            seeked directly and re-encoded to MP3. `ss` is seconds."""
-            provider = (
-                (lambda: self.media_volume(receiver, session))
-                if receiver and self.media_volume
-                else None
-            )
-            token = self.media_session(receiver, session) if self.media_session else None
-            if self.media_session and token is None:
-                raise HTTPException(status_code=410, detail="Playback session ended")
-            return await _serve_seekable_media(
-                url,
-                max(0.0, ss),
-                provider,
-                self.sessions if token is not None else None,
-                token,
             )
 
         @self._app.get("/diagnostic/builtin.wav")

@@ -78,8 +78,8 @@ class MinaAPI:
                 if self._plain_first
                 else self.service.play_plain_url(self.device_id, url)
             )
-            return await self._call(operation)
-        return await self._call(self.service.play_by_url(self.device_id, url))
+            return await self._checked(operation, "play_url")
+        return await self._checked(self.service.play_by_url(self.device_id, url), "play_url")
 
     async def play_music_url(self, url: str, audio_id: str | None = None) -> dict:
         """Use the newer player_play_music ubus method; works better on some devices.
@@ -92,9 +92,36 @@ class MinaAPI:
             model = self.service.device2hardware.get(self.device_id)
             self._plain_first = bool(model and model not in MUSIC_MODELS and not audio_id)
             if self._plain_first:
-                return await self._call(self.service.play_plain_url(self.device_id, url))
+                return await self._checked(
+                    self.service.play_plain_url(self.device_id, url), "play_music_url"
+                )
         kwargs = {"audio_id": audio_id} if audio_id else {}
-        return await self._call(self.service.play_by_music_url(self.device_id, url, **kwargs))
+        return await self._checked(
+            self.service.play_by_music_url(self.device_id, url, **kwargs), "play_music_url"
+        )
+
+    async def _checked(self, operation, what: str) -> dict:
+        """Cloud accepted the HTTP call is not the speaker accepting the command.
+
+        ubus responses carry the command verdict in data.code (checked in
+        cloud.ubus_request); the top-level code is checked here so a
+        shape-changed error response can never read as success. Without this,
+        play_stream reported "playing on N speakers" for commands the cloud
+        had already refused.
+        """
+        result = await self._call(operation)
+        code = result.get("code") if isinstance(result, dict) else None
+        if code not in (None, 0):
+            message = result.get("message") if isinstance(result, dict) else result
+            logger.warning(
+                "%s on %s rejected by cloud: code=%s message=%s",
+                what,
+                self.device_id,
+                code,
+                message,
+            )
+            raise RuntimeError(f"小米云端拒绝播放命令（{what}，code={code}）")
+        return result
 
     async def search_track(
         self, title: str, artist: str = "", fuzzy_fallback: bool = True

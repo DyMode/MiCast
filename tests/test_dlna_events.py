@@ -11,6 +11,7 @@ from micast.dlna import DlnaService
 from micast.dlna_events import DlnaEvents, SubscriptionError
 from micast.routes import dlna as routes
 from tests.test_dlna import FakeDeviceManager, configure
+from tests.test_dlna_delivery import FakeMedia
 
 
 async def until(condition):
@@ -38,7 +39,7 @@ async def test_actual_notify_initial_play_pause_and_volume_events(monkeypatch):
             await writer.wait_closed()
 
     server = await asyncio.start_server(callback, "127.0.0.1", 0)
-    service = DlnaService(FakeDeviceManager())
+    service = DlnaService(FakeDeviceManager(), media=FakeMedia())
     service.device_manager.stop_playback = AsyncMock()
     service.events.interval = 0.01
     # This in-process integration fixture uses an explicitly trusted local
@@ -180,3 +181,6 @@ def test_scpd_declares_evented_variables():
         root = ET.fromstring(routes._scpd(service))
         names = [node.findtext("u:name", namespaces=namespace) for node in root.findall("u:serviceStateTable/u:stateVariable", namespace) if node.attrib["sendEvents"] == "yes"]
         assert names == expected
+
+
+pytestmark = __import__("pytest").mark.usefixtures("cached_audio")

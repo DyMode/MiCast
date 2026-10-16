@@ -37,7 +37,7 @@ class MediaPlayback:
                 raise ValueError("播放请求已被替换")
             previous = self.bridge.sessions.current(owner)
             previous_state = previous.state if previous else None
-            source = MediaPCMSource(state.uri, seek_seconds, deferred=True)
+            source = MediaPCMSource(state.source_path or state.uri, seek_seconds, deferred=True)
             # Open and prime before retiring audible playback. A bad URI/seek
             # must not destroy the current source during a configuration rebuild.
             self._preparing[owner] = source
@@ -203,7 +203,7 @@ class MediaPlayback:
         owner = f"dlna:{receiver_id}"
         version = self._versions[owner]
         identity, transport = state.session_id, state.state
-        source = MediaPCMSource(state.uri, seconds, deferred=True)
+        source = MediaPCMSource(state.source_path or state.uri, seconds, deferred=True)
         self._preparing[owner] = source
         try:
             await source.start()

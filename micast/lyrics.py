@@ -55,7 +55,11 @@ class LyricsSession:
             while time.monotonic() < deadline:
                 meta = self.server.daap_meta
                 if meta.get("title"):
-                    hit = await self._search(meta.get("title", ""), meta, fuzzy=False)
+                    hit = None
+                    for title, fuzzy in self._candidates(meta):
+                        hit = await self._search(title, meta, fuzzy=fuzzy)
+                        if hit:
+                            break
                     if hit:
                         self._session_audio_id = hit["audio_id"]
                         await self._resend(hit)
@@ -69,9 +73,11 @@ class LyricsSession:
             logger.exception("Lyrics session failed for %s", self.receiver_id)
 
     async def _watch(self) -> None:
-        tried: set[str] = set()  # searched, no hit — don't spam the API
-        matched: dict[str, dict] = {}  # title -> hit, for "back to previous"
-        last_seq = self.server.daap_events[-1][0] if self.server.daap_events else 0
+        tried: set[tuple[str, str]] = set()  # searched, no hit — don't spam the API
+        matched: dict[tuple[str, str], dict] = {}  # title -> hit, for "back to previous"
+        # Replay the current event too: it may have arrived during the quick
+        # search (or carry a derived title the initial strict lookup missed).
+        last_seq = self.server.daap_events[-1][0] - 1 if self.server.daap_events else 0
         while True:
             await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
             events = [e for e in self.server.daap_events if e[0] > last_seq]
@@ -82,29 +88,33 @@ class LyricsSession:
                 title = meta.get("title", "")
                 if not title:
                     continue
-                candidates = [] if title.startswith(_CREDIT_PREFIXES) else [title]
-                derived = meta.get("derived") or ""
-                if derived and derived != title:
-                    candidates.append(derived)
                 hit = None
-                for cand in candidates:
-                    cached = matched.get(cand)
+                for cand, fuzzy in self._candidates(meta):
+                    key = (cand, meta.get("artist", ""))
+                    cached = matched.get(key)
                     if cached:
                         hit = cached
                         break
-                    if cand in tried:
+                    if key in tried:
                         continue
-                    tried.add(cand)
-                    # derived is a real song title (fuzzy ok); minm may be a
-                    # lyrics line — a fuzzy hit there would re-play on every line.
-                    hit = await self._search(cand, meta, fuzzy=(cand == derived))
+                    tried.add(key)
+                    hit = await self._search(cand, meta, fuzzy=fuzzy)
                     if hit:
-                        matched[cand] = hit
+                        matched[key] = hit
                         break
                 if hit and hit["audio_id"] != self._session_audio_id:
                     self._session_audio_id = hit["audio_id"]
                     logger.info("歌词/封面切换: %s -> audioID=%s", title, hit["audio_id"])
                     await self._resend(hit)
+
+    @staticmethod
+    def _candidates(meta: dict) -> list[tuple[str, bool]]:
+        title = meta.get("title") or ""
+        derived = meta.get("derived") or ""
+        result = [(title, False)] if title and not title.startswith(_CREDIT_PREFIXES) else []
+        if derived and derived != title and not derived.startswith(_CREDIT_PREFIXES):
+            result.append((derived, True))
+        return result
 
     async def _search(self, title: str, meta: dict, fuzzy: bool) -> dict | None:
         if not title:
@@ -116,5 +126,8 @@ class LyricsSession:
                 ),
                 timeout=5.0,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Track display lookup failed for %s (%s): %s", self.receiver_id, title, exc
+            )
             return None

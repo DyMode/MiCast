@@ -195,12 +195,12 @@ async def test_dlna_device_uses_rendering_control_and_readback():
 async def test_media_proxy_full_queue_still_delivers_eof(monkeypatch):
     import micast.audio_encoder as module
 
-    def produce(url, seek, emit, stop, ua, volume):
+    def produce(url, seek, emit, stop, volume, errors=None):
         for i in range(20):
             emit(bytes([i]))
 
     monkeypatch.setattr(module, "stream_media_as_mp3", produce)
-    pump = MediaProxyPump("unused", 0, "test").start()
+    pump = MediaProxyPump("unused", 0).start()
     try:
         result = []
         while chunk := await asyncio.wait_for(pump.read(), 2):
@@ -221,7 +221,7 @@ def test_media_proxy_gain_changes_encoded_audio(tmp_path):
         source.setframerate(44100)
         source.writeframes(struct.pack("<hh", 10000, -10000) * 8820)
     chunks = []
-    stream_media_as_mp3(str(path), 0, chunks.append, threading.Event(), "test", lambda: 0)
+    stream_media_as_mp3(str(path), 0, chunks.append, threading.Event(), lambda: 0)
     with av.open(io.BytesIO(b"".join(chunks)), format="mp3") as encoded:
         frames = list(encoded.decode(audio=0))
         assert frames
@@ -229,3 +229,6 @@ def test_media_proxy_gain_changes_encoded_audio(tmp_path):
         for frame in frames:
             for pcm in resampler.resample(frame):
                 assert bytes(pcm.planes[0])[: pcm.samples * 4] == bytes(pcm.samples * 4)
+
+
+pytestmark = __import__("pytest").mark.usefixtures("cached_audio")

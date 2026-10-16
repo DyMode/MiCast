@@ -174,3 +174,56 @@ async def test_miot_action_preserves_wire_shape_and_business_error():
         "in": ["hello"],
     }
     assert cookies == {"PassportDeviceId": "device"}
+
+
+@pytest.mark.asyncio
+async def test_rejected_play_command_warns_with_code_and_raises(caplog):
+    """A cloud-level refusal (top-level code != 0) must not read as success:
+    the delivery layer reports "every speaker rejected" only when the command
+    actually raised."""
+    import logging
+
+    from micast.xiaomi.mina_api import MinaAPI
+
+    account = SimpleNamespace(
+        mi_request=AsyncMock(return_value={"code": 10, "message": "device offline"})
+    )
+    service = MiNAService(account)
+    service.cache_devices([{"deviceID": "speaker", "hardware": "OH2"}])
+    api = MinaAPI(service, "speaker")
+    with (
+        caplog.at_level(logging.WARNING, logger="micast.xiaomi.mina_api"),
+        pytest.raises(RuntimeError, match="code=10"),
+    ):
+        await api.play_music_url("http://local/music.wav")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("code=10" in r.getMessage() and "device offline" in r.getMessage() for r in warnings)
+
+
+@pytest.mark.asyncio
+async def test_play_stream_style_fallback_after_rejected_music_command():
+    """What DeviceManager.play_stream does: play_music_url raising (rejected or
+    otherwise) falls back to play_url, which succeeds."""
+    from micast.xiaomi.mina_api import MinaAPI
+
+    account = SimpleNamespace(
+        mi_request=AsyncMock(
+            side_effect=[
+                {"code": 10, "message": "rejected"},
+                {"code": 0},
+            ]
+        )
+    )
+    service = MiNAService(account)
+    service.cache_devices([{"deviceID": "speaker", "hardware": "OH2"}])
+    api = MinaAPI(service, "speaker")
+    try:
+        await api.play_music_url("http://local/music.wav")
+        raise AssertionError("rejected command must raise")
+    except Exception:
+        result = await api.play_url("http://local/music.wav")
+    assert result == {"code": 0}
+    assert [call.args[2]["method"] for call in account.mi_request.await_args_list] == [
+        "player_play_music",
+        "player_play_url",
+    ]
