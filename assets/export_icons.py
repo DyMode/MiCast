@@ -46,12 +46,12 @@ def ico(name,sizes,source=svg):
         offset+=len(chunk)
     p=OUT/name; p.write_bytes(data+b''.join(chunks)); return p
 
-# fnOS: retain the existing 97% tile, increasing the speaker group's optical
-# weight instead of cropping away more transparent corners. Relative to the
-# previously cropped fnOS export, the group is about 12% larger.
+# fnOS: use the same 90% tile footprint as MiCast Go, retaining the existing
+# speaker artwork proportions inside the tile.
 fnos=svg.replace('x="5" y="5" width="90" height="90" rx="22"', 'x="1.5" y="1.5" width="97" height="97" rx="23.7"')
 fnos=fnos.replace('transform="translate(-3 -4.5) scale(1.08)"', 'transform="translate(50 50) scale(1.20) translate(-50 -50) translate(-3 -4.5) scale(1.08)"')
 fnos=fnos.replace('stroke-width="2.6"','stroke-width="3.05"')
+fnos=fnos.replace('viewBox="0 0 100 100">', 'viewBox="0 0 100 100"><g transform="translate(50 50) scale(0.9278350515463918) translate(-50 -50)">').replace('</svg>', '</g></svg>')
 fnos_small=fnos.replace('stroke-width="3.05"','stroke-width="3.25"')
 save('fnos/ICON.PNG',64,fnos_small); save('fnos/ICON_256.PNG',256,fnos)
 (OUT/'fnos/micast.svg').write_text(fnos,encoding='utf-8')
