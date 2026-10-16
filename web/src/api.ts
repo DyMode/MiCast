@@ -804,7 +804,8 @@ export const api = {
     dlna_recast_required: boolean;
   }> {
     return apiFetch("/api/config/sender-volume", {
-      method: "POST", body: JSON.stringify({ mode }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
     });
   },
 
@@ -1247,15 +1248,21 @@ export const api = {
     const blob = await res.blob();
     const disposition = res.headers.get("Content-Disposition") || "";
     const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] || "micast-diagnostic.json";
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch {
+      // Locked-down embedded webviews can block programmatic downloads;
+      // opening the blob in a tab lets the user save it manually instead.
+      window.open(objectUrl, "_blank", "noopener");
+    }
     // Embedded browsers may resolve the download after the click returns.
     // Keep the URL alive long enough for them to read the response.
-    const objectUrl = link.href;
-    link.remove();
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
     return { filename, size: blob.size, count };
   },

@@ -5,7 +5,7 @@
 
 html {
   font-family: var(--font-stack);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.47059;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -168,7 +168,7 @@ button {
   padding: 0.0625rem;
   box-sizing: border-box;
 }
-.provider-row { min-height: 4.5rem; }
+.provider-row { min-height: 3.5rem; }
 .provider-disconnect { margin-left: auto; white-space: nowrap; }
 .advanced-login-toggle { margin: var(--space-sm) var(--space-md); }
 
@@ -292,8 +292,8 @@ html.is-embedded {
 }
 
 .icon-button {
-  width: 2rem;
-  height: 2rem;
+  width: var(--control-height);
+  height: var(--control-height);
   border-radius: var(--radius-full);
   border: none;
   background: transparent;
@@ -408,12 +408,12 @@ html.is-embedded {
   .nav-item {
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
-    padding: var(--space-sm) var(--space-md);
+    gap: 0.625rem;
+    padding: 0.375rem 0.75rem;
     border-radius: var(--radius-md);
     color: var(--text);
     text-decoration: none;
-    font-size: 0.9375rem;
+    font-size: 0.875rem;
     font-weight: 500;
     transition: background 160ms var(--ease-out), transform 100ms var(--ease-out), color 160ms var(--ease-out);
     cursor: pointer;
@@ -422,7 +422,9 @@ html.is-embedded {
     background: transparent;
     font-family: inherit;
     text-align: left;
-  }
+
+  min-height: var(--nav-height);
+}
 
   .nav-item:hover {
     background: var(--surface-hover);
@@ -439,8 +441,8 @@ html.is-embedded {
   }
 
   .nav-icon {
-    width: 1.5rem;
-    height: 1.5rem;
+    width: 1.25rem;
+    height: 1.25rem;
     display: grid;
     place-items: center;
     font-size: 1rem;
@@ -574,13 +576,13 @@ html.is-embedded {
 .page-title {
   margin: 0 0 var(--space-md);
   font-family: var(--font-display);
-  font-size: 1.875rem;
+  font-size: 1.5rem;
   font-weight: 700;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
 }
 
 .page-heading {
-  margin-bottom: var(--space-xl);
+  margin-bottom: 1.25rem;
 }
 
 .page-heading .page-title {
@@ -591,15 +593,15 @@ html.is-embedded {
   max-width: 42rem;
   margin: 0;
   color: var(--text-secondary);
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   line-height: 1.45;
   text-wrap: pretty;
 }
 
 @media (min-width: 1024px) {
   .page-title {
-    font-size: 2rem;
-    margin-bottom: var(--space-lg);
+    font-size: 1.5rem;
+    margin-bottom: var(--space-md);
   }
 }
 
@@ -610,12 +612,12 @@ html.is-embedded {
   border: var(--card-border);
   box-shadow: var(--card-shadow);
   overflow: hidden;
-  margin-bottom: var(--space-lg);
+  margin-bottom: 0.75rem;
 }
 
 .group-header {
-  padding: var(--space-md) var(--space-sm) var(--space-2xs);
-  font-size: 0.8125rem;
+  padding: 0.75rem var(--row-padding-inline) 0.375rem;
+  font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0;
   color: var(--text-secondary);
@@ -625,13 +627,15 @@ html.is-embedded {
   margin-top: 0;
 }
 
+.page-heading + .group-header { padding-top: 0; }
+
 .cell {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-md);
+  gap: 0.75rem;
   padding: var(--row-padding-block) var(--row-padding-inline);
-  min-height: 3rem;
+  min-height: 2.75rem;
   border-bottom: 0.5px solid var(--separator);
   transition: background 160ms var(--ease-out);
 }
@@ -655,32 +659,34 @@ html.is-embedded {
 .cell-content {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2xs);
+  gap: 0.125rem;
   flex: 1;
   min-width: 0;
 }
 
 .cell-title {
-  font-size: 1rem;
+  font-size: 0.875rem;
   font-weight: 400;
+
+  line-height: 1.45;
 }
 
 .cell-subtitle {
   font-size: 0.8125rem;
   color: var(--text-secondary);
-  line-height: 1.3;
+  line-height: 1.4;
 }
 
 .cell-value {
-  font-size: 1rem;
+  font-size: 0.875rem;
   color: var(--text-secondary);
   font-weight: 400;
 }
 
 .cell-icon {
-  width: 1.75rem;
-  height: 1.75rem;
-  border-radius: var(--radius-sm);
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.4375rem;
   display: grid;
   place-items: center;
   font-size: 1rem;
@@ -698,8 +704,8 @@ html.is-embedded {
   display: inline-flex;
   background: var(--bg-secondary);
   border-radius: var(--radius-sm);
-  padding: var(--space-2xs);
-  gap: var(--space-2xs);
+  padding: 0.125rem;
+  gap: 0.125rem;
   flex-shrink: 0;
 }
 
@@ -710,14 +716,18 @@ html.is-embedded {
   background: transparent;
   color: var(--text);
   font-family: inherit;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   font-weight: 500;
-  padding: var(--space-xs) var(--space-md);
+  padding: 0 0.625rem;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 160ms var(--ease-out), transform 100ms var(--ease-out), color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
-  min-width: 3rem;
+  min-width: 2.5rem;
   text-align: center;
+
+  min-height: var(--segment-height);
+
+  line-height: 1.25;
 }
 
 .segment:disabled {
@@ -752,8 +762,8 @@ html.is-embedded {
 /* Switch */
 .switch {
   appearance: none;
-  width: 3.125rem;
-  height: 1.875rem;
+  width: var(--switch-width);
+  height: var(--switch-height);
   background: var(--bg-secondary);
   border-radius: var(--radius-full);
   position: relative;
@@ -767,8 +777,8 @@ html.is-embedded {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 1.625rem;
-  height: 1.625rem;
+  width: var(--switch-thumb);
+  height: var(--switch-thumb);
   background: var(--elevated);
   border-radius: 50%;
   box-shadow: var(--shadow-sm);
@@ -780,7 +790,7 @@ html.is-embedded {
 }
 
 .switch:checked::after {
-  transform: translateX(1.25rem);
+  transform: translateX(var(--switch-travel));
 }
 
 .switch:disabled {
@@ -819,12 +829,12 @@ html.is-embedded {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-sm);
-  padding: 0 var(--space-md);
+  gap: 0.375rem;
+  padding: 0 0.75rem;
   border-radius: var(--radius-md);
   font-family: inherit;
-  font-size: 0.9375rem;
-  font-weight: 600;
+  font-size: 0.8125rem;
+  font-weight: 500;
   border: none;
   cursor: pointer;
   white-space: nowrap;
@@ -833,12 +843,8 @@ html.is-embedded {
   min-height: var(--control-height);
 }
 
-/* Pointer-coarse (phones, tablets, trackpads on touch screens) gets the full
-   44px target; a mouse does not need one and the extra 8px per row added up
-   across a settings page. */
-@media (pointer: coarse) {
-  :root { --control-height: 2.75rem; }
-}
+/* Touch sizes are set together in accessibility.css. */
+
 
 .button:active {
   transform: scale(0.97);
@@ -851,13 +857,15 @@ html.is-embedded {
 
 .button.large {
   padding: var(--space-md) var(--space-lg);
-  min-height: 3.25rem;
-  font-size: 1.0625rem;
+  min-height: 2.75rem;
+  font-size: 0.9375rem;
 }
 
 .button.primary {
   background: var(--accent);
   color: var(--accent-text);
+
+  min-height: var(--control-height-primary);
 }
 
 .button.primary:hover:not(:disabled) {
@@ -887,7 +895,7 @@ html.is-embedded {
   gap: 0.125rem;
   padding: 0.125rem;
   flex: none;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-md);
   background: var(--fill-secondary);
 }
 
@@ -900,10 +908,10 @@ html.is-embedded {
   font-size: 0.8125rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  min-width: 2.5rem;
-  min-height: 1.75rem;
-  padding: 0 var(--space-sm);
-  border-radius: var(--radius-full);
+  min-width: 2rem;
+  min-height: var(--control-height-compact);
+  padding: 0 0.5rem;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 140ms var(--ease-out), transform 100ms var(--ease-out), opacity 140ms var(--ease-out);
 }
@@ -917,9 +925,7 @@ html.is-embedded {
   background: var(--separator-strong);
 }
 
-@media (pointer: coarse) {
-  .stepper button { min-height: 2.25rem; min-width: 2.75rem; }
-}
+
 
 .danger-text { color: var(--danger) !important; }
 .receiver-remove {

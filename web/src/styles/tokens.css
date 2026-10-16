@@ -25,10 +25,10 @@
 
   /* Radius */
   --radius-xs: 0.4375rem;
-  --radius-sm: 0.625rem;
-  --radius-md: 0.875rem;
-  --radius-lg: 1.25rem;
-  --radius-xl: 1.5rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.25rem;
   --radius-full: 9999px;
 
   /* Light palette — Liquid Glass world: a warm porcelain base and sunlight
@@ -78,7 +78,7 @@
      receiver cards, diagnostics). Liquid Glass edition: translucent tint +
      hairline rim layered on the border box, blur on the element, soft cool
      shadow carrying the specular top edge. */
-  --card-radius: 1.375rem;
+  --card-radius: 1rem;
   --card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0.34));
   --card-rim: linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.18) 32%, rgba(255, 255, 255, 0.04) 58%, rgba(255, 255, 255, 0.45));
   --card-border: 1px solid transparent;
@@ -105,9 +105,17 @@
   --tab-lens-rim: rgba(255, 255, 255, 0.85);
 
   /* Row rhythm: one dense step for desktop, one finger-sized step for touch. */
-  --row-padding-block: 0.6875rem;
+  --row-padding-block: 0.5rem;
   --row-padding-inline: 1rem;
-  --control-height: 2.25rem;
+  --control-height: 2rem;
+  --control-height-compact: 1.75rem;
+  --control-height-primary: 2.25rem;
+  --segment-height: 1.75rem;
+  --nav-height: 2.375rem;
+  --switch-width: 2.375rem;
+  --switch-height: 1.5rem;
+  --switch-thumb: 1.25rem;
+  --switch-travel: 0.875rem;
 
   /* Liquid-glass material shared by the floating player surfaces — the expanded
      panel and the collapsed pill are the same surface at two sizes, so both use

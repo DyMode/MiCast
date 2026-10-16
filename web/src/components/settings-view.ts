@@ -1,3 +1,4 @@
+import { reducedMotion, setReducedMotion } from '../ui/motion';
 import { renderProtocolRow, bindProtocolRecovery } from './protocol-settings';
 import type { AccessStatus, AirPlayProtocol, AudioConfig, FullConfig } from "../api";
 import { api } from "../api";
@@ -6,6 +7,7 @@ import { icon } from "../icons";
 import { renderThemeControl } from "./app-shell";
 import { SurfaceScope } from '../ui/lifecycle';
 import { openSupportDialog } from './support-dialog';
+import { openLegalDialog } from './legal-dialog';
 
 let settingsScope: SurfaceScope | null = null;
 export function disposeSettingsView() {
@@ -96,18 +98,16 @@ export function renderSettingsView(props: SettingsProps): string {
     </div>
 
     <div class="group-header">播放</div>
-    <p class="group-header-hint">AirPlay、AirPlay 2 和 DLNA 共用音频处理；编码、EQ、组合延迟与左右声道按输出目标应用。</p>
     <div class="group">
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">转码</span>
-          <span class="cell-subtitle">${transcoding ? "按下方设置编码 AirPlay 实时输出" : "AirPlay 使用 PCM 原始音频直出；部分型号不会出声，听不到就改回转码"}</span>
         </div>
         <input type="checkbox" class="switch" id="auto-transcode" ${audio?.auto_transcode ? "checked" : ""} aria-label="开启转码">
       </div>
-      ${renderCell("格式", transcoding ? "MP3 兼容性最好，FLAC/WAV 为无损" : "转码已关闭，此项不生效", formatHtml)}
-      ${renderCell("码率", !transcoding ? "转码已关闭，此项不生效" : audio?.format === "mp3" ? "仅对 MP3 生效" : "当前格式不使用码率", bitrateHtml)}
-      ${renderCell("采样率", transcoding ? "AirPlay 默认 48 kHz" : "转码已关闭，此项不生效", sampleRateHtml)}
+      ${renderCell("格式", "", formatHtml)}
+      ${renderCell("码率", "", bitrateHtml)}
+      ${renderCell("采样率", "", sampleRateHtml)}
       ${renderProtocolRow(config, 'airplay')}
       ${renderProtocolRow(config, 'dlna')}
     </div>
@@ -118,14 +118,18 @@ export function renderSettingsView(props: SettingsProps): string {
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">主题</span>
-          <span class="cell-subtitle">跟随系统时随设备的深浅色设置自动切换</span>
         </div>
         ${renderThemeControl(theme)}
       </div>
       <div class="cell">
         <div class="cell-content">
+          <label class="cell-title" for="reduced-motion">简化视觉效果</label>
+        </div>
+        <input type="checkbox" class="switch" id="reduced-motion" ${reducedMotion() ? "checked" : ""}>
+      </div>
+      <div class="cell">
+        <div class="cell-content">
           <span class="cell-title">应用名称</span>
-          <span class="cell-subtitle">仅用于网页标题；播放名称跟随音箱或组合名称</span>
         </div>
         <input type="text" class="input" id="app-name-input" value="${escapeHtml(appName)}" placeholder="MiCast" style="max-width: 160px;">
       </div>
@@ -178,14 +182,12 @@ export function renderSettingsView(props: SettingsProps): string {
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">触屏歌词与封面</span>
-          <span class="cell-subtitle">为带屏音箱匹配封面和滚动歌词</span>
         </div>
         <input type="checkbox" class="switch" id="touchscreen-lyrics" ${config?.touchscreen_lyrics ? "checked" : ""} aria-label="开启触屏歌词与封面">
       </div>
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">起播音量</span>
-          <span class="cell-subtitle">开始播放时设置音箱音量；关闭则保持原音量</span>
         </div>
         <div class="settings-inline-control">
           <input type="checkbox" class="switch" id="default-volume-enabled" ${config?.default_volume_enabled ? "checked" : ""} aria-label="启用起播音量">
@@ -199,14 +201,12 @@ export function renderSettingsView(props: SettingsProps): string {
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">音箱组合 <span class="feature-badge">实验性</span></span>
-          <span class="cell-subtitle">让两台或更多音箱一起播放；关闭后仍会保留已有组合</span>
         </div>
         <input type="checkbox" class="switch" id="sync-groups-enabled" ${syncGroupsEnabled ? "checked" : ""} aria-label="开启音箱组合">
       </div>
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">大延迟</span>
-          <span class="cell-subtitle">将音箱组合的延迟调节范围从 ±5 秒扩大到 ±15 秒</span>
         </div>
         <input type="checkbox" class="switch" id="large-delay-enabled" ${config?.large_delay_enabled ? "checked" : ""} aria-label="开启大延迟范围">
       </div>
@@ -214,7 +214,6 @@ export function renderSettingsView(props: SettingsProps): string {
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">网络发现 <span class="feature-badge">实验性</span></span>
-          <span class="cell-subtitle">扫描局域网中的 AirPlay / DLNA 播放设备；关闭会停止网络目标播放，已保存的入口仍会保留</span>
         </div>
         <input type="checkbox" class="switch" id="network-discovery-enabled" ${config?.network_discovery_enabled ? "checked" : ""} aria-label="开启网络发现">
       </div>
@@ -227,7 +226,7 @@ export function renderSettingsView(props: SettingsProps): string {
         <div class="cell-icon">${icon("settings")}</div>
         <div class="cell-content">
           <span class="cell-title">高级设置</span>
-          <span class="cell-subtitle">${portErrorCount ? `${portErrorCount} 个端口异常` : "端口、控制通道与播放行为"}</span>
+          <span class="cell-subtitle">${portErrorCount ? `${portErrorCount} 个端口异常` : ""}</span>
         </div>
         <span class="settings-link-arrow" aria-hidden="true">›</span>
       </button>
@@ -239,7 +238,6 @@ export function renderSettingsView(props: SettingsProps): string {
         <div class="cell-icon gray">${icon("folder")}</div>
         <div class="cell-content">
           <span class="cell-title">应用文件 · micast</span>
-          <span class="cell-subtitle">日志、诊断导出与脱敏配置副本</span>
           <span class="cell-subtitle">${escapeHtml(config.storage.shared_dir)}</span>
         </div>
       </div>` : ""}
@@ -263,7 +261,6 @@ export function renderSettingsView(props: SettingsProps): string {
         <div class="cell-content">
           <span class="cell-title">软件更新</span>
           <span class="cell-subtitle" data-update-status>当前版本读取中…</span>
-          <a class="cell-subtitle update-releases" href="https://github.com/DyMode/MiCast/releases" target="_blank" rel="noopener noreferrer">GitHub 发布页 ↗</a>
         </div>
         <div class="update-actions">
           <button class="button compact primary" type="button" data-update-download hidden>下载更新</button>
@@ -274,18 +271,20 @@ export function renderSettingsView(props: SettingsProps): string {
       <div class="cell">
         <div class="cell-icon red">${icon("trash")}</div>
         <div class="cell-content">
-          <span class="cell-title danger-text">清空数据</span>
-          <span class="cell-subtitle">删除全部配置、米家登录与管理账号，回到初始引导页</span>
+          <span class="cell-title danger-text">清空配置与登录</span>
+          <span class="cell-subtitle">日志、共享文件和浏览器偏好需另行清理</span>
         </div>
-        <button class="button compact secondary danger-text" type="button" data-reset-all>清空数据</button>
+        <button class="button compact secondary danger-text" type="button" data-reset-all>清空配置</button>
       </div>
     </div>
 
 
     <div class="group-header">关于与支持</div>
     <div class="group">
-      <button class="cell settings-link" type="button" data-support="donate"><div class="cell-content"><span class="cell-title">支持开发 ♡</span><span class="cell-subtitle">如果 MiCast 让听歌更方便，欢迎支持它继续完善</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
-      <button class="cell settings-link" type="button" data-support="contact"><div class="cell-content"><span class="cell-title">联系支持</span><span class="cell-subtitle">使用反馈与建议</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
+      <button class="cell settings-link" type="button" data-legal="agreement"><div class="cell-content"><span class="cell-title">用户协议</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
+      <button class="cell settings-link" type="button" data-legal="privacy"><div class="cell-content"><span class="cell-title">隐私政策</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
+      <button class="cell settings-link" type="button" data-support="donate"><div class="cell-content"><span class="cell-title">支持开发 ♡</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
+      <button class="cell settings-link" type="button" data-support="contact"><div class="cell-content"><span class="cell-title">联系支持</span></div><span class="settings-link-arrow" aria-hidden="true">›</span></button>
     </div>
   `;
 }
@@ -295,7 +294,7 @@ function renderCell(title: string, subtitle: string, control: string): string {
     <div class="cell">
       <div class="cell-content">
         <span class="cell-title">${title}</span>
-        <span class="cell-subtitle">${subtitle}</span>
+        ${subtitle ? `<span class="cell-subtitle">${subtitle}</span>` : ""}
       </div>
       ${control}
     </div>
@@ -340,8 +339,21 @@ export function bindSettingsView(
 ) {
   disposeSettingsView();
   const scope = settingsScope = new SurfaceScope();
+  const motionSwitch = container.querySelector<HTMLInputElement>('#reduced-motion');
+  if (motionSwitch) {
+    scope.listen(motionSwitch, 'change', () => setReducedMotion(motionSwitch.checked));
+    scope.listen(window, 'micast:motion-change', () => { motionSwitch.checked = reducedMotion(); });
+  }
   let closeSupport: (() => void) | undefined;
   scope.own(() => closeSupport?.());
+  let closeLegal: (() => void) | undefined;
+  scope.own(() => closeLegal?.());
+  container.querySelectorAll<HTMLElement>('[data-legal]').forEach(button => {
+    scope.listen(button, 'click', () => {
+      closeLegal?.();
+      closeLegal = openLegalDialog(button.dataset.legal === 'privacy' ? 'privacy' : 'agreement');
+    });
+  });
   container.querySelectorAll<HTMLElement>('[data-support]').forEach(button => {
     scope.listen(button, 'click', () => {
       closeSupport?.();
@@ -596,7 +608,7 @@ function bindResetAll(container: HTMLElement) {
       button.textContent = "确认清空？再点一次";
       confirmTimer = setTimeout(() => {
         confirmTimer = null;
-        button.textContent = "清空数据";
+        button.textContent = "清空配置";
       }, 3000);
       return;
     }
@@ -606,11 +618,11 @@ function bindResetAll(container: HTMLElement) {
     button.textContent = "正在清空…";
     try {
       await api.resetAll();
-      store.showToast("数据已清空，即将回到引导页");
+      store.showToast("配置与登录已清空，即将回到引导页");
       setTimeout(() => window.location.reload(), 800);
     } catch (e) {
       button.disabled = false;
-      button.textContent = "清空数据";
+      button.textContent = "清空配置";
       store.showToast(`清空失败: ${e instanceof Error ? e.message : "未知错误"}`);
     }
   });

@@ -1435,16 +1435,80 @@ function resolveClockInput(value: string, anchor: number): number | null {
   return date.getTime() / 1000;
 }
 
+/** Copy text with every fallback a non-secure context (http://IP:port, an
+ * embedded fnOS webview) allows: async clipboard first, then the legacy
+ * execCommand path, which still works there when called from a user gesture. */
+async function copyTextRobust(text: string): Promise<"clipboard" | "execcommand"> {
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return "clipboard";
+    } catch {
+      // Denied or unsupported — fall through to the synchronous path.
+    }
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  area.remove();
+  if (!copied) throw new Error("clipboard unavailable");
+  return "execcommand";
+}
+
+/** Last resort for locked-down browsers: show the records in a dialog with the
+ * text pre-selected so the user only needs Ctrl+C. */
+function showManualLogCopyDialog(text: string, count: number): void {
+  const dialog = document.createElement("dialog");
+  dialog.className = "confirm-dialog log-scope-dialog log-copy-dialog";
+  dialog.innerHTML = `<form method="dialog">
+    <div class="confirm-dialog-copy">
+      <h3>手动复制日志</h3>
+      <p>浏览器限制了剪贴板访问（非安全页面）。已全选下面 ${count} 条日志，请按 Ctrl+C 复制：</p>
+    </div>
+    <textarea readonly rows="16" style="width:100%;font-family:monospace;font-size:12px;">${escapeHtml(text)}</textarea>
+    <div class="confirm-dialog-actions">
+      <button class="button" value="confirm">关闭</button>
+    </div>
+  </form>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  dialog.showModal();
+  const area = dialog.querySelector("textarea");
+  area?.focus();
+  area?.select();
+}
+
 /** Run the chosen selection through the server, so the text and the file carry
  *  exactly the records the window names. */
 async function runLogScope(mode: LogScopeMode, query: LogQuery, scopeLabel: string): Promise<void> {
   if (mode === "copy") {
+    let text = "";
+    let count = 0;
     try {
-      const { text, count } = await api.copyRuntimeLog(query);
-      await navigator.clipboard.writeText(text);
-      store.showToast(`已复制 ${count} 条日志`);
-    } catch {
-      store.showToast("复制失败，请手动选择日志");
+      const fetched = await api.copyRuntimeLog(query);
+      text = fetched.text;
+      count = fetched.count;
+      const via = await copyTextRobust(text);
+      store.showToast(
+        via === "clipboard" ? `已复制 ${count} 条日志` : `已复制 ${count} 条日志（兼容模式）`,
+      );
+    } catch (e) {
+      if (text) {
+        showManualLogCopyDialog(text, count);
+      } else {
+        store.showToast(`读取日志失败: ${e instanceof Error ? e.message : "未知错误"}`);
+      }
     }
     return;
   }

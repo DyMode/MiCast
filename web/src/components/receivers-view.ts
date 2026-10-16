@@ -36,7 +36,10 @@ function resetCreateFormState() {
 
 export function renderReceiversView(state: State): string {
   setLargeDelayEnabled(Boolean(state.fullConfig?.large_delay_enabled));
-  const { receivers, fullConfig, status } = state;
+  const { fullConfig, status } = state;
+  const receivers = fullConfig
+    ? state.receivers.filter(receiver => fullConfig.receivers.some(entry => entry.id === receiver.did))
+    : state.receivers;
   const dlnaEnabled = fullConfig?.dlna_enabled ?? false;
 
   const content =
@@ -108,7 +111,7 @@ function renderAirPlay2Entries(state: State): string {
           <div class="receiver-entry-summary">
             <div class="receiver-entry-identity"><span class="device-name">${escapeHtml(item.name)}</span>
             <span class="protocol-badge protocol-airplay2">AirPlay 2</span>
-            </div><span class="caption">播放到 ${escapeHtml(item.target_name)}</span>
+            </div><span class="caption">${escapeHtml(item.target_name)}</span>
           </div>
           <span class="status-pill ${available ? "running" : item.status === "error" ? "error" : ""}">${available ? "可连接" : item.status === "error" ? "不可用" : "准备中"}</span>
         </div>

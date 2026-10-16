@@ -1,3 +1,4 @@
+import { reducedMotion } from '../ui/motion';
 /**
  * Live link-topology view: a dark "flight map" canvas where audio paths are
  * drawn as glowing arcs with particles flowing along them. Data arrives over
@@ -97,7 +98,6 @@ export function bindTopologyView(container: HTMLElement): () => void {
   // Default view: only flows that are actually moving. The HUD toggle reveals
   // the full configured topology for troubleshooting.
   let showAll = false;
-  const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   function isEdgeVisible(edge: RenderEdge): boolean {
     // Stalled edges (connected but no data) stay visible as a warning.
@@ -331,14 +331,21 @@ export function bindTopologyView(container: HTMLElement): () => void {
   function draw(now: number) {
     if (destroyed) return;
     raf = requestAnimationFrame(draw);
-    if (document.hidden || now - lastFrame < 33) return;
+    if (document.hidden || now - lastFrame < (reducedMotion() ? 250 : 33)) return;
     // Advance only while visible: returning from the background must not jump.
     const elapsed = lastFrame ? Math.min(now - lastFrame, 100) : 0;
     lastFrame = now;
-    if (!motionQuery.matches) windTime += elapsed;
+    if (!reducedMotion()) windTime += elapsed;
     // Simulation is fixed-rate; visual flow follows the display refresh rate.
     if (now - lastLayout >= 33) {
-      tickLayout();
+      if (reducedMotion()) {
+        const all = visibleNodes();
+        for (const node of all) {
+          const [x, y] = anchorFor(node, all);
+          node.x = x * canvas.clientWidth; node.y = y * canvas.clientHeight;
+          node.vx = node.vy = 0;
+        }
+      } else tickLayout();
       lastLayout = now;
     }
 
@@ -348,7 +355,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     // and hit targets share these positions, including after status updates.
     displayNodes.clear();
     const compact = w < 640;
-    const amplitude = motionQuery.matches ? 0 : 1 - Math.exp(-windTime / 1800);
+    const amplitude = reducedMotion() ? 0 : 1 - Math.exp(-windTime / 1800);
     for (const node of nodes.values()) {
       const phase = seeded(hashCode(node.data.id)) * Math.PI * 2;
       const breezeX = Math.sin(windTime / 9000) * .55 + Math.sin(windTime / 6200 + phase) * .45;
@@ -372,10 +379,10 @@ export function bindTopologyView(container: HTMLElement): () => void {
     const highlight = computeHighlight();
 
     for (const edge of edges) {
-      if (isEdgeVisible(edge)) drawEdge(edge, now, highlight);
+      if (isEdgeVisible(edge)) drawEdge(edge, reducedMotion() ? 0 : now, highlight);
     }
     for (const node of displayNodes.values()) {
-      if (isNodeVisible(node)) drawNode(node, now, highlight);
+      if (isNodeVisible(node)) drawNode(node, reducedMotion() ? 0 : now, highlight);
     }
   }
 
@@ -464,7 +471,7 @@ export function bindTopologyView(container: HTMLElement): () => void {
     if (active && !dimmed) {
       // Particles flow in the data direction: "pull" edges stream toward the
       // speaker, which is also the edge's `to` node in our model.
-      const speed = (control ? 0.00012 : 0.00045) * (motionQuery.matches ? .4 : 1);
+      const speed = (control ? 0.00012 : 0.00045) * (reducedMotion() ? .4 : 1);
       const size = control ? 4 : 6;
       for (const p of edge.particles) {
         const t = (p + now * speed) % 1;

@@ -75,9 +75,6 @@ export function renderDevicesView(props: DevicesProps): string {
           <span class="cell-title">${devices.length
             ? `已发现 ${devices.length} 台音箱`
             : loadError ? "音箱列表获取失败" : "尚未发现音箱"}</span>
-          <span class="cell-subtitle">${devices.length
-            ? `${onlineCount} 台在线${offlineCount ? `，${offlineCount} 台离线` : ""}${unknownCount ? `，${unknownCount} 台待确认` : ""}`
-            : loadError ? "账号里的音箱没有取到，可以重试或重新登录" : "登录后会自动显示账号下的音箱"}</span>
         </div>
         <span class="status-pill ${statusClass}" data-status-label>${statusText}</span>
       </div>
@@ -137,7 +134,7 @@ function renderMasterVolume(devices: Device[], playback: PlaybackState | null): 
       <div class="cell-icon ${mixed ? "gray" : "blue"}" data-master-icon>${icon("speaker")}</div>
       <div class="cell-content">
         <span class="cell-title">全部音量</span>
-        <span class="cell-subtitle" data-master-subtitle>${mixed ? `${online.length} 台音箱音量不同` : `${online.length} 台音箱`}</span>
+        ${mixed ? `<span class="cell-subtitle" data-master-subtitle>音量不同</span>` : `<span class="cell-subtitle" data-master-subtitle hidden></span>`}
       </div>
       <label class="volume-control device-volume-inline ${mixed ? "mixed" : ""}" title="全部音箱音量" data-master-control>
         <span class="volume-icon">${volume === 0 ? "×" : icon("speaker")}</span>
@@ -441,7 +438,7 @@ export function bindDevicesView(
         iconCell?.classList.remove("gray");
         iconCell?.classList.add("blue");
         const subtitle = container.querySelector<HTMLElement>("[data-master-subtitle]");
-        if (subtitle) subtitle.textContent = `同时调整 ${dids.length} 台在线音箱`;
+        if (subtitle) { subtitle.textContent = ''; subtitle.hidden = true; }
       } catch (e) {
         store.showToast(`音量调整失败: ${e instanceof Error ? e.message : "未知错误"}`);
       }

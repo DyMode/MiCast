@@ -1,25 +1,31 @@
 /* Functional glass floats above quieter content material. Geometry follows
    available space, not a collection of device-specific fixes. */
 :root {
-  --card-bg: linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,255,255,.72));
+  --card-bg: linear-gradient(180deg, #ffffff, #fcfcfd);
+  --field-bg: color-mix(in srgb, var(--text) 3%, var(--elevated));
   --card-blur: blur(10px) saturate(120%);
-  --card-shadow: 0 6px 24px rgba(45,42,38,.065), inset 0 1px 0 rgba(255,255,255,.8);
+  --card-shadow: 0 2px 5px rgba(45,42,38,.035), inset 0 1px 0 rgba(255,255,255,.8);
+  --card-shadow-raised: 0 4px 12px rgba(45,42,38,.06), inset 0 1px 0 rgba(255,255,255,.8);
   --card-rim: linear-gradient(145deg, rgba(255,255,255,.8), rgba(255,255,255,.18));
   --chrome-shadow: 0 10px 32px rgba(40,42,55,.13), 0 2px 6px rgba(40,42,55,.04), inset 0 1px 0 rgba(255,255,255,.7);
   --content-width: 58rem;
   --player-reserve: 5.25rem;
 }
 :root[data-theme="dark"] {
-  --card-bg: linear-gradient(180deg, rgba(37,41,51,.88), rgba(26,29,37,.8));
+  --card-bg: linear-gradient(180deg, #292e39, #242933);
+  --field-bg: #1c212b;
   --card-rim: linear-gradient(145deg, rgba(255,255,255,.14), rgba(255,255,255,.035));
-  --card-shadow: 0 6px 24px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.07);
+  --card-shadow: 0 2px 6px rgba(0,0,0,.1), inset 0 1px 0 rgba(255,255,255,.035);
+  --card-shadow-raised: 0 4px 14px rgba(0,0,0,.16), inset 0 1px 0 rgba(255,255,255,.05);
   --chrome-shadow: 0 10px 36px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.28);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --card-bg: linear-gradient(180deg, rgba(37,41,51,.88), rgba(26,29,37,.8));
+    --card-bg: linear-gradient(180deg, #292e39, #242933);
+    --field-bg: #1c212b;
     --card-rim: linear-gradient(145deg, rgba(255,255,255,.14), rgba(255,255,255,.035));
-    --card-shadow: 0 6px 24px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.07);
+    --card-shadow: 0 2px 6px rgba(0,0,0,.1), inset 0 1px 0 rgba(255,255,255,.035);
+    --card-shadow-raised: 0 4px 14px rgba(0,0,0,.16), inset 0 1px 0 rgba(255,255,255,.05);
     --chrome-shadow: 0 10px 36px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.28);
   }
 }
@@ -41,11 +47,11 @@
   background: radial-gradient(ellipse at var(--spec-x, 24%) var(--spec-y, 0%), rgba(255,255,255,.18), transparent 65%);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.48), inset 0 -1px 0 rgba(255,255,255,.08);
 }
-.button.primary { box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 3px 10px color-mix(in srgb, var(--accent) 18%, transparent); }
+.button.primary { box-shadow: none; }
 .button, .segment, .stepper button, .cell-title { word-break: keep-all; }
 .button, .segment, .stepper button { white-space: nowrap; flex-shrink: 0; }
 .cell-content, .device-info, .receiver-entry-summary { min-width: 0; }
-.cell-subtitle, .device-meta, .caption, .page-heading p { overflow-wrap: anywhere; line-height: 1.55; }
+.cell-subtitle, .device-meta, .caption, .page-heading p { overflow-wrap: anywhere; line-height: 1.4; }
 .cell-title, .device-name { overflow-wrap: anywhere; }
 .main-content { container-type: inline-size; }
 .tab-lens { transition: scale 220ms var(--ease-out), backdrop-filter 220ms var(--ease-out); }
@@ -61,7 +67,7 @@
 .receiver-management > summary .caption { color: var(--text-secondary); font-weight: 400; }
 .receiver-management-body { padding-top: .25rem; }
 .settings-index { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1.5rem; }
-.settings-index button { border: 0; background: var(--fill-secondary); color: var(--text-secondary); border-radius: 999px; padding: .5rem .875rem; min-height: 2.6rem; font-size: .8125rem; cursor: pointer; }
+.settings-index button { border: 0; background: var(--fill-secondary); color: var(--text-secondary); border-radius: 999px; padding: .25rem .75rem; min-height: var(--control-height); font-size: .8125rem; cursor: pointer; }
 .settings-index button:hover { color: var(--accent-foreground); background: var(--accent-soft); }
 .eq-point-editor { margin: .75rem 0 1.5rem; }
 .eq-point-editor > summary { cursor: pointer; padding: .65rem 0; font-weight: 600; }
@@ -75,7 +81,7 @@
 .topology-node-list { position: absolute; left: 1rem; bottom: 2.75rem; z-index: 5; max-width: calc(100% - 2rem); color: #e2e8f0; background: rgba(17, 31, 44, .94); backdrop-filter: blur(12px); border: 1px solid rgba(148, 163, 184, .18); border-radius: .875rem; font-size: .8125rem; }
 .topology-node-list summary { padding: .65rem .875rem; cursor: pointer; }
 .topology-node-list [data-topology-nodes] { max-height: 12rem; overflow-y: auto; }
-.topology-node-list button { display: flex; justify-content: space-between; gap: 1rem; width: 100%; min-height: 44px; padding: .65rem .875rem; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.topology-node-list button { display: flex; justify-content: space-between; gap: 1rem; width: 100%; min-height: var(--control-height); padding: .5rem .75rem; border: 0; background: transparent; color: inherit; cursor: pointer; }
 .topology-node-list button:hover { background: rgba(56, 189, 248, .08); }
 .topology-node-list button + button { border-top: 1px solid rgba(148, 163, 184, .08); }
 .topology-node-list button span:first-child { overflow-wrap: anywhere; text-align: left; }

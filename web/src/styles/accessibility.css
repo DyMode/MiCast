@@ -1,8 +1,26 @@
-/* Loaded last. These user preferences take precedence over every material. */
+/* Preferences and touch geometry; desktop sizes live with their controls. */
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-.button, .button.compact, .icon-button, .icon-button.compact, .group-toggle, .segment, .stepper button, .topology-toggle, .settings-index button { min-height: 44px; }
-.icon-button, .icon-button.compact, .group-toggle { min-width: 44px; }
-input[type="range"] { min-height: 44px; }
+/* Desktop controls stay compact; touch sizes are shared tokens. */
+.group-toggle, .topology-toggle { min-height: var(--control-height); }
+input[type="range"] { min-height: var(--control-height); }
+@media (max-width: 767px), (pointer: coarse) {
+  :root {
+    --control-height: 2.75rem;
+    --control-height-compact: 2.75rem;
+    --control-height-primary: 2.75rem;
+    --segment-height: 2.75rem;
+    --nav-height: 2.75rem;
+    --switch-width: 2.75rem;
+    --switch-height: 1.75rem;
+    --switch-thumb: 1.5rem;
+    --switch-travel: 1rem;
+    --row-padding-block: 0.625rem;
+  }
+  .icon-button, .icon-button.compact, .stepper button { min-width: 2.75rem; }
+  .input { font-size: 1rem; }
+  .switch { outline-offset: 8px; }
+  .switch::before { content: ""; position: absolute; inset: -8px 0; }
+}
 .sheet, .player-overlay-panel { overflow-y: auto; overscroll-behavior: contain; }
 
 @media (prefers-contrast: more), (prefers-reduced-transparency: reduce) {
@@ -23,7 +41,64 @@ input[type="range"] { min-height: 44px; }
   .app-header, .sidebar, .tab-bar, .now-playing, .group, .device-card,
   .receiver-card, .sheet, .confirm-dialog { border-color: var(--text); }
 }
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
-  .setup-progress { animation: setup-spin 1.5s linear infinite !important; }
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* The saved motion preference also opts into inexpensive, opaque materials. */
+html.reduce-motion ::backdrop {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.reduce-motion {
+  --glass-refract: none;
+  --glass-blur: none;
+  --chrome-blur: none;
+  --card-blur: none;
+  --chrome-shadow: none;
+  --glass-shadow: none;
+  --card-shadow: none;
+  --card-shadow-raised: none;
+}
+html.reduce-motion body::before,
+html.reduce-motion .app-header::before,
+html.reduce-motion .sidebar::before,
+html.reduce-motion .tab-bar::before,
+html.reduce-motion .now-playing::before,
+html.reduce-motion .player-overlay-dock::before,
+html.reduce-motion .sheet::before,
+html.reduce-motion .toast::before,
+html.reduce-motion .app-header::after,
+html.reduce-motion .sidebar::after,
+html.reduce-motion .tab-bar::after,
+html.reduce-motion .now-playing::after,
+html.reduce-motion .setup-brand::before,
+html.reduce-motion .setup-steps::before,
+html.reduce-motion .player-overlay-bg-img { display: none !important; }
+
+html.reduce-motion .app-header,
+html.reduce-motion .sidebar,
+html.reduce-motion .tab-bar,
+html.reduce-motion .now-playing,
+html.reduce-motion .player-overlay-dock,
+html.reduce-motion .sheet,
+html.reduce-motion .toast,
+html.reduce-motion .confirm-dialog,
+html.reduce-motion .setup-brand,
+html.reduce-motion .setup-steps,
+html.reduce-motion .setup-content {
+  background: var(--elevated) !important;
+  border-color: var(--separator-strong);
+  box-shadow: none !important;
+  filter: none !important;
+}
+html.reduce-motion .nav-lens,
+html.reduce-motion .tab-lens {
+  background: var(--accent-soft) !important;
+  border-color: transparent;
+  box-shadow: none !important;
 }

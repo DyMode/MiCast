@@ -1,3 +1,4 @@
+import "./ui/motion";
 import { disposeAccountView } from "./components/account-view";
 let debugInteraction = false;
 import { api } from "./api";

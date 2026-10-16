@@ -194,8 +194,8 @@
   justify-content: space-between;
   gap: var(--space-md);
   width: 100%;
-  min-height: 3.75rem;
-  padding: var(--space-md) var(--space-lg);
+  min-height: 3rem;
+  padding: 0.625rem 1rem;
   list-style: none;
   cursor: pointer;
   color: var(--text);
@@ -412,10 +412,10 @@
 .diagnostic-test {
   display: flex;
   align-items: center;
-  gap: var(--space-lg);
+  gap: 0.75rem;
   width: 100%;
-  min-height: 4rem;
-  padding: var(--space-md) var(--space-lg);
+  min-height: 3.25rem;
+  padding: 0.75rem 1rem;
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
@@ -1193,10 +1193,10 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-2xs);
-  padding: var(--space-2xs) var(--space-sm);
+  padding: 0.125rem 0.5rem;
   border-radius: var(--radius-full);
-  font-size: 0.8125rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 500;
   background: var(--bg-secondary);
   color: var(--text-secondary);
 }
@@ -1332,8 +1332,8 @@
   background: var(--elevated);
   color: var(--text);
   border-radius: var(--card-radius);
-  padding: var(--space-lg) var(--space-xl);
-  margin-bottom: var(--space-lg);
+  padding: 1rem;
+  margin-bottom: 1rem;
   border: var(--card-border);
   box-shadow: var(--card-shadow);
   position: relative;
@@ -1343,10 +1343,10 @@
 .hero-card::before {
   content: "";
   position: absolute;
-  width: 0.75rem;
-  height: 0.75rem;
-  top: var(--space-xl);
-  right: var(--space-xl);
+  width: 0.5rem;
+  height: 0.5rem;
+  top: 1rem;
+  right: 1rem;
   border-radius: 50%;
   background: var(--success);
   pointer-events: none;
@@ -1365,7 +1365,9 @@
 .hero-card .title-1 {
   position: relative;
   z-index: 1;
-  margin: var(--space-xs) 0;
+  margin: 0.25rem 0;
+
+  font-size: 1.5rem;
 }
 
 /* Empty state */
@@ -1419,8 +1421,8 @@
 .device-card-header {
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: var(--space-sm) var(--space-lg);
+  gap: 0.75rem;
+  padding: 0.625rem 1rem;
   min-height: 3.5rem;
   cursor: pointer;
 }
@@ -1435,10 +1437,10 @@
 }
 
 .device-card-body {
-  padding: var(--space-md) var(--space-lg) var(--space-lg);
+  padding: 0 1rem 0.5rem;
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: 0;
   animation: expand-body 180ms var(--ease-out);
 }
 
@@ -1462,7 +1464,7 @@
 }
 
 .device-name {
-  font-size: 1.0625rem;
+  font-size: 0.9375rem;
   font-weight: 500;
   color: var(--text);
   overflow: hidden;
@@ -1489,7 +1491,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-md);
-  padding: var(--space-sm) 0;
+  min-height: 2.75rem;
+  padding: 0.5rem 0;
   border-top: 0.5px solid var(--separator);
 }
 
@@ -1560,9 +1563,9 @@
   display: inline-flex;
   align-items: center;
   box-sizing: border-box;
-  height: 30px;
-  padding: 0 14px;
-  border-radius: 999px;
+  min-height: var(--control-height);
+  padding: 0 0.625rem;
+  border-radius: var(--radius-sm);
   border: 0.5px solid var(--separator-strong);
   background: var(--bg);
   color: var(--text-secondary);
@@ -1600,10 +1603,10 @@
    toolbar reads as one control family instead of chips + oversized blocks. */
 .tuning-toolbar .button {
   box-sizing: border-box;
-  min-height: 0;
-  height: 30px;
+  min-height: var(--control-height);
+  height: auto;
   padding: 0 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   font-size: 0.8125rem;
   font-weight: 500;
   gap: var(--space-xs);
@@ -2088,13 +2091,15 @@
 /* Alias input inline */
 .alias-input {
   width: 100%;
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-md);
+  min-height: var(--control-height);
+  padding: 0.375rem 0.625rem;
+  border-radius: var(--radius-sm);
   border: 0.5px solid var(--separator-strong);
-  background: var(--bg);
+  background: var(--field-bg);
   color: var(--text);
   font-family: inherit;
-  font-size: 1rem;
+  font-size: 0.875rem;
+  line-height: 1.25;
   outline: none;
   transition: border-color 150ms var(--ease-standard), box-shadow 150ms var(--ease-standard);
 }
@@ -2116,10 +2121,10 @@
   border-radius: var(--card-radius);
   border: var(--card-border);
   box-shadow: var(--card-shadow);
-  padding: var(--space-md) var(--space-lg);
+  padding: 0.75rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  gap: 0.5rem;
   transition: box-shadow 160ms var(--ease-out);
 }
 
@@ -2290,15 +2295,19 @@
 /* Form inputs */
 .input {
   width: 100%;
-  padding: var(--space-sm) var(--space-md);
+  padding: 0.375rem 0.625rem;
   border-radius: var(--radius-md);
   border: 0.5px solid var(--separator-strong);
   background: var(--elevated);
   color: var(--text);
   font-family: inherit;
-  font-size: 1rem;
+  font-size: 0.875rem;
   outline: none;
   transition: border-color 150ms var(--ease-standard), box-shadow 150ms var(--ease-standard);
+
+  min-height: var(--control-height);
+
+  line-height: 1.4;
 }
 
 .input:focus {
@@ -2627,8 +2636,8 @@
 .now-playing-copy span { color: var(--text-secondary); font-size: 0.75rem; }
 
 .icon-button.compact {
-  width: 2rem;
-  height: 2rem;
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
   flex: 0 0 auto;
 }
 
@@ -3413,9 +3422,9 @@
   background: transparent;
 }
 .settings-link:hover { background: var(--surface-hover); }
-.settings-link-arrow { color: var(--secondary-label); font-size: 1.75rem; line-height: 1; }
+.settings-link-arrow { color: var(--secondary-label); font-size: 1.25rem; line-height: 1; }
 .airplay2-heading { position: relative; }
-.back-link { min-height: 2.75rem; margin: 0 0 var(--space-sm); padding-inline: 0; color: var(--accent-foreground); }
+.back-link { min-height: var(--control-height); margin: 0 0 var(--space-sm); padding-inline: 0; color: var(--accent-foreground); }
 .airplay2-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: var(--space-lg); }
 .airplay2-summary {
   display: grid;
@@ -3432,7 +3441,7 @@
   align-items: center;
   gap: var(--space-xs) var(--space-sm);
   min-width: 0;
-  padding: var(--space-lg);
+  padding: 1rem;
 }
 .airplay2-summary-item + .airplay2-summary-item { box-shadow: inset 1px 0 0 var(--separator); }
 .airplay2-summary-item > span:not(.cell-icon) { color: var(--secondary-label); }
@@ -3469,7 +3478,7 @@
   margin-block: 0.75rem 1rem;
 }
 .tuning-edit-mode[hidden] { display: none; }
-.tuning-edit-mode .button { min-height: 44px; }
+.tuning-edit-mode .button { min-height: var(--control-height); }
 .tuning-edit-mode .caption { flex: 1 1 12rem; }
 
 .update-releases { color: var(--accent-foreground); width: fit-content; text-decoration: none; }

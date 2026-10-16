@@ -12,7 +12,7 @@
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .now-playing { --chrome-tint: linear-gradient(160deg,rgba(38,43,54,.96),rgba(26,30,39,.92)); } }
 .now-playing::before { backdrop-filter: blur(28px) saturate(130%); -webkit-backdrop-filter: blur(28px) saturate(130%); }
 .now-playing-controls { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: .125rem; }
-.now-playing-controls .icon-button.compact { width: 100%; min-width: 0; height: 44px; }
+.now-playing-controls .icon-button.compact { width: 100%; min-width: 0; height: var(--control-height); }
 .now-playing-expand { grid-column: 1 / -1; justify-self: center; max-width: 44px; }
 @media (max-width: 1023px) {
   .now-playing.is-minimized { display: none; }

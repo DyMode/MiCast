@@ -105,7 +105,7 @@ html.is-embedded {
 
 .sidebar {
   isolation: isolate;
-  border-radius: 1.75rem;
+  border-radius: var(--card-radius);
 }
 
 /* Gloss: the glass passes OVER the surface's own content — icons and labels
@@ -193,7 +193,7 @@ html.is-embedded {
   left: 0.375rem;
   right: 0.375rem;
   top: 0.5rem;
-  height: 2.75rem;
+  height: var(--nav-height);
   border-radius: var(--radius-md);
   background: var(--tab-lens);
   border: 1px solid var(--tab-lens-rim);
@@ -271,17 +271,17 @@ html.is-embedded {
   box-shadow: inset 0 1px 0 color-mix(in srgb, white 40%, transparent);
 }
 
-/* Cards: regular glass over the wallpaper. */
+/* Content surfaces are quiet and opaque; glass is reserved for chrome. */
 .group,
 .device-card,
 .receiver-card,
 .hero-card,
 .diagnostic-details {
-  background: var(--card-bg) padding-box, var(--card-rim) border-box;
-  border: var(--card-border);
+  background: var(--card-bg);
+  border: 1px solid var(--separator);
   box-shadow: var(--card-shadow);
-  backdrop-filter: var(--card-blur);
-  -webkit-backdrop-filter: var(--card-blur);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .device-card.expanded {
@@ -375,9 +375,9 @@ html.is-embedded {
   }
 }
 
-/* Controls: the iOS 26 round language. */
+/* Controls use the same continuous corners at a smaller scale. */
 .button {
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-sm);
 }
 
 .button.primary {
@@ -400,7 +400,7 @@ html.is-embedded {
 /* iOS 26 selection: the active segment is a rounded rectangle with
    continuous corners, not a full capsule. */
 .segment {
-  border-radius: 0.625rem;
+  border-radius: 0.375rem;
 }
 
 .segment.active {
@@ -418,8 +418,8 @@ html.is-embedded {
 }
 
 .input {
-  background: color-mix(in srgb, var(--text) 4%, transparent);
-  border: 0.5px solid var(--separator);
+  background: var(--field-bg);
+  border: 1px solid var(--separator);
 }
 
 .input:focus {

@@ -1,6 +1,6 @@
 /* Geometry fixes apply after accessibility; optical preferences stay intact. */
-:root[data-theme="dark"] { --bg: #181d28; --wallpaper: radial-gradient(ellipse at 15% 10%,rgba(110,128,174,.22),transparent 55%),radial-gradient(ellipse at 90% 85%,rgba(82,118,146,.16),transparent 55%),linear-gradient(145deg,#252b39,#181d28); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #181d28; --wallpaper: radial-gradient(ellipse at 15% 10%,rgba(110,128,174,.22),transparent 55%),radial-gradient(ellipse at 90% 85%,rgba(82,118,146,.16),transparent 55%),linear-gradient(145deg,#252b39,#181d28); } }
+:root[data-theme="dark"] { --bg: #181d28; --wallpaper: radial-gradient(ellipse at 15% 10%,rgba(110,128,174,.09),transparent 55%),radial-gradient(ellipse at 90% 85%,rgba(82,118,146,.07),transparent 55%),linear-gradient(145deg,#252b39,#181d28); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #181d28; --wallpaper: radial-gradient(ellipse at 15% 10%,rgba(110,128,174,.09),transparent 55%),radial-gradient(ellipse at 90% 85%,rgba(82,118,146,.07),transparent 55%),linear-gradient(145deg,#252b39,#181d28); } }
 .main-content, .has-playback .main-content { padding-bottom: max(2rem,env(safe-area-inset-bottom)); }
 @media (min-width: 1024px) {
  .app-lane { overflow: visible; max-height: none; padding-bottom: 2rem; }
@@ -26,7 +26,7 @@
  .player-overlay-body:not(:has(.player-overlay-lyrics)) { grid-template-rows: minmax(0,1fr); }
  .player-overlay-lyrics { align-self: stretch; }
 }
-.eq-point-editor { margin: .875rem 0 1.25rem; padding: 1rem; border-radius: 1.25rem; background: var(--elevated); border: 1px solid var(--separator); box-shadow: var(--shadow-sm); }
+.eq-point-editor { margin: .75rem 0 1rem; padding: .75rem; border-radius: var(--card-radius); background: var(--elevated); border: 1px solid var(--separator); box-shadow: var(--shadow-sm); }
 .eq-point-editor-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .eq-point-editor-header strong { font-size: .875rem; }
 .eq-point-editor .eq-point-row { margin-bottom: 0; }
@@ -89,7 +89,7 @@
 
 /* Group identity is one disclosure, with format metadata on its own line. */
 .sync-group > .cell.sync-group-header { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: .625rem 1rem; }
-.sync-group-header > .group-toggle.group-identity { grid-column: 1; grid-row: 1; display: flex; justify-content: space-between; gap: .75rem; width: 100%; height: auto; min-height: 44px; padding: 0; margin: 0; text-align: left; color: var(--text); transform: none; }
+.sync-group-header > .group-toggle.group-identity { grid-column: 1; grid-row: 1; display: flex; justify-content: space-between; gap: .75rem; width: 100%; height: auto; min-height: var(--control-height); padding: 0; margin: 0; text-align: left; color: var(--text); transform: none; }
 .group-identity-copy { display: grid; gap: .25rem; min-width: 0; }
 .group-identity-copy strong { font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
 .group-identity-copy small { color: var(--text-secondary); font-size: .8125rem; }
@@ -144,7 +144,7 @@
 
 .main-content .group-header {
   margin-top: 0;
-  padding-top: var(--space-xs);
+  padding-top: var(--space-md);
   padding-bottom: var(--space-xs);
 }
 
@@ -172,4 +172,19 @@
 
 .main-content .section-note {
   margin: 0 var(--space-sm) var(--space-sm);
+}
+
+/* Fields share a nearby label column; utility rows retain their own layout. */
+@media (min-width: 768px) {
+  .device-detail-row:not(.eq-title-row) {
+    display: grid;
+    grid-template-columns: 7rem minmax(0, 1fr);
+    gap: 1rem;
+  }
+  .device-detail-row > .alias-input { justify-self: start; }
+  .device-detail-row > .cell-value { text-align: left; overflow-wrap: anywhere; }
+  .device-detail-row > .codec-chips { justify-content: flex-start; }
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .device-card-body .alias-input { font-size: 1rem; min-height: var(--control-height); }
 }

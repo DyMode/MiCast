@@ -1,3 +1,4 @@
+import { reducedMotion } from '../ui/motion';
 /**
  * Drawable EQ curve editor on <canvas>.
  *
@@ -212,7 +213,19 @@ export class EqCurveCanvas {
 
   /** Push the latest spectrum bands (0..1, log-spaced over the freq axis);
    *  null hides the bars and stops the animation loop. */
+  private lastReducedSpectrum = 0;
   setSpectrum(bands: number[] | null) {
+    if (reducedMotion()) {
+      cancelAnimationFrame(this.spectrumRaf);
+      this.spectrumRaf = 0;
+      this.spectrumTarget = bands;
+      const now = performance.now();
+      if (bands && now - this.lastReducedSpectrum < 250) return;
+      this.lastReducedSpectrum = now;
+      this.spectrumDisplay = bands ? [...bands] : [];
+      this.repaint();
+      return;
+    }
     this.spectrumTarget = bands;
     if (bands && this.spectrumDisplay.length !== bands.length) {
       this.spectrumDisplay = new Array<number>(bands.length).fill(0);
@@ -226,6 +239,11 @@ export class EqCurveCanvas {
     this.spectrumRaf = 0;
     if (this.destroyed) return;
     const target = this.spectrumTarget;
+    if (reducedMotion()) {
+      this.spectrumDisplay = target ? [...target] : [];
+      this.repaint();
+      return;
+    }
     if (!target) {
       // Fade out whatever is still on screen, then stop.
       const alive = this.spectrumDisplay.some((v) => v > 0.01);

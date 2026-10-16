@@ -19,18 +19,14 @@ export function openSupportDialog(kind: 'donate' | 'contact'): () => void {
   dialog.innerHTML = `
     <header class="support-header"><h2 id="support-title">${kind === 'donate' ? '支持开发' : '联系支持'}</h2><button class="button plain" data-support-close aria-label="关闭">关闭</button></header>
     ${kind === 'donate' ? `
-      <div class="support-intro"><h3>让好声音继续流动</h3><p>如果 MiCast 让你的音箱更好用了，欢迎随心赞赏，支持后续开发与维护。</p></div>
       <div class="support-channels">${channels.map(channel => {
         const image = escapeHtml(appUrl(`assets/support/${channel.file}`));
         return `<figure class="support-qr"><figcaption>${channel.name}</figcaption><div class="support-qr-window is-${channel.key}"><img src="${image}" alt="${channel.name}收款二维码"></div><a class="button secondary" href="${image}" download="MiCast-${channel.name}.jpg">保存收款图</a></figure>`;
       }).join('')}</div>
-      <p class="support-hint">使用对应应用扫码，或保存收款图后从相册识别。</p>
-      <p class="support-hint">赞赏完全自愿，不影响任何功能的使用，不对应功能开通或优先支持。</p>
+      <p class="support-hint">自愿支持开发，不影响功能使用。不构成购买或订阅，不附带专属服务或更新承诺；误付请联系 ${supportEmail}。</p>
     ` : `
-      <div class="support-intro"><h3>DyMode 支持</h3><p>遇到问题，或有建议？欢迎来信。</p></div>
       <div class="support-contact"><a class="support-email" href="mailto:${supportEmail}">${supportEmail}</a><div class="support-actions"><a class="button secondary" href="mailto:${supportEmail}?subject=${subject}&amp;body=${body}">打开邮件应用</a><button class="button secondary" data-copy-support>复制邮箱</button></div></div>
-      <p class="support-hint">邮件草稿提供反馈模板，请补充应用版本和问题详情，由你确认发送。未配置邮件应用时，可复制邮箱自行写信。</p>
-      <p class="support-hint">误付或重复付款，也可通过此邮箱联系核实处理。</p>
+      <a class="support-github" href="https://github.com/DyMode/MiCast/releases" target="_blank" rel="noopener noreferrer">GitHub 发布页 ↗</a>
       <p class="support-hint" role="status" aria-live="polite" data-support-status></p>
     `}`;
   const remove = () => {

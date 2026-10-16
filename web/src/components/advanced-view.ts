@@ -1,7 +1,7 @@
+import { renderControlChannel, bindControlChannel, refreshCapabilities } from "./device-capabilities";
 import { api, type FullConfig, type PortStatus } from "../api";
 import { store } from "../state";
 import { SurfaceScope } from '../ui/lifecycle';
-import { renderControlChannel, bindControlChannel, refreshCapabilities } from "./device-capabilities";
 
 let advancedScope: SurfaceScope | null = null;
 export function disposeAdvancedView() {
@@ -19,7 +19,7 @@ export function renderAdvancedView(props: AdvancedProps): string {
     <div class="page-heading">
       <button class="button plain back-link" data-advanced-back>‹ 返回设置</button>
       <h2 class="page-title">高级设置</h2>
-      <p>端口、控制通道与播放行为。</p>
+      <p>端口与播放行为。</p>
     </div>
     ${config?.ports?.length ? `
     <div class="group-header">服务端口</div>
@@ -27,22 +27,20 @@ export function renderAdvancedView(props: AdvancedProps): string {
       ${config.ports.map(renderPortRow).join("")}
     </div>
     ` : ""}
-    <div class="group-header">控制通道</div>
-    <p class="group-header-hint">协议声明不代表实际出声。自动模式按设备与音频格式判断，播放开始后保持同一通道。</p>
+    <div class="group-header">播放连接方式</div>
+    <p class="group-header-hint">用于米家播放入口；切换前请停止播放。</p>
     ${renderControlChannel()}
     <div class="group-header">播放行为</div>
     <div class="group">
       <div class="cell">
         <div class="cell-content">
-          <span class="cell-title">暂停会话过期</span>
-          <span class="cell-subtitle">AirPlay 暂停超过该时长后自动结束会话并停止音箱播放；0 表示不自动结束（秒）</span>
+          <span class="cell-title">暂停后结束（秒）</span>
         </div>
         <input type="number" class="input settings-number" id="stale-session-timeout" min="0" max="3600" step="10" value="${config?.stale_session_timeout ?? 60}" aria-label="暂停会话过期时间（秒）">
       </div>
       <div class="cell">
         <div class="cell-content">
           <span class="cell-title">投放音量控制</span>
-            <span class="cell-subtitle">独立音量保留音箱设置；音量联动直接控制音箱。AirPlay 下次连接生效，DLNA 下次投放生效</span>
         </div>
         <select class="input" id="sender-volume-mode" aria-label="投放音量控制" style="max-width: 10rem">
           <option value="independent" ${config?.sender_volume_mode !== "linked" ? "selected" : ""}>独立音量</option>
@@ -60,9 +58,9 @@ export function bindAdvancedView(
 ) {
   disposeAdvancedView();
   const scope = advancedScope = new SurfaceScope();
-  container.querySelector("[data-advanced-back]")?.addEventListener("click", onBack);
   bindControlChannel(container);
   refreshCapabilities();
+  container.querySelector("[data-advanced-back]")?.addEventListener("click", onBack);
 
   container.querySelector<HTMLSelectElement>("#sender-volume-mode")?.addEventListener("change", async (event) => {
     const select = event.currentTarget as HTMLSelectElement;
@@ -177,7 +175,7 @@ function renderPortRow(p: PortStatus): string {
     <div class="cell port-row">
       <div class="cell-content">
         <span class="cell-title">${escapeHtml(p.name)} <span class="feature-badge">${portModeLabels[p.mode]}</span></span>
-        <span class="cell-subtitle">${escapeHtml(p.detail)}</span>
+        ${p.status === "error" ? `<span class="cell-subtitle">${escapeHtml(p.detail)}</span>` : ""}
       </div>
       <div class="port-control">
         <span class="plain-state ${stateClass}" data-port-status="${p.id}" aria-live="polite" title="${escapeHtml(portActualTitle(p))}">${stateText}</span>

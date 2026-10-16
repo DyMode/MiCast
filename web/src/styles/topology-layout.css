@@ -335,8 +335,8 @@
 .update-actions { display: flex; align-items: center; gap: var(--space-xs); flex-shrink: 0; }
 
 .button.compact {
-  min-height: 1.875rem;
-  padding: 0 var(--space-md);
+  min-height: var(--control-height-compact);
+  padding: 0 0.625rem;
   font-size: 0.8125rem;
   border-radius: var(--radius-sm);
 }

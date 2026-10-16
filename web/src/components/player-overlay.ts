@@ -1,3 +1,4 @@
+import { reducedMotion } from '../ui/motion';
 import { updateLyricViewport } from "./lyric-viewport";
 import type { Device, PlaybackState } from "../api";
 import { icon } from "../icons";
@@ -235,7 +236,7 @@ export function refreshPlayerOverlay(): void {
     lyricsBox.hidden = !presentation.hasLyrics;
     updateLyricViewport(lyricsBox, track?.lyric_lines ?? []);
   }
-  if (changing && before && identity && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  if (changing && before && identity && !reducedMotion()) {
     const after = identity.getBoundingClientRect();
     identity.animate([
       {transform: `translateX(${before.x + before.width / 2 - after.x - after.width / 2}px)`, opacity: .8},

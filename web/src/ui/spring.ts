@@ -1,3 +1,4 @@
+import { reducedMotion } from './motion';
 /** Critically damped navigation motion; retargeting keeps presentation and
  * velocity, while direct manipulation tracks the pointer without latency. */
 type Axis = 'x' | 'y';
@@ -14,7 +15,7 @@ export function moveLens(element: HTMLElement, axis: Axis, target: number, direc
     return;
   }
   spring.target = target;
-  if (direct || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  if (direct || reducedMotion()) {
     cancelAnimationFrame(spring.raf);
     spring.raf = 0;
     spring.velocity = direct ? Math.max(-1200, Math.min(1200, (target - spring.value) / Math.max(.008, (now - spring.time)/1000))) : 0;
@@ -23,6 +24,7 @@ export function moveLens(element: HTMLElement, axis: Axis, target: number, direc
   if (spring.raf) return;
   spring.time = now;
   const frame = (time: number) => {
+    if (reducedMotion()) { spring!.value = spring!.target; spring!.velocity = 0; spring!.raf = 0; paint(spring!.target); return; }
     if (!element.isConnected) { spring!.raf = 0; return; }
     const dt = Math.min(.032, Math.max(.001, (time - spring!.time)/1000));
     spring!.time = time;

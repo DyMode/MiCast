@@ -13,28 +13,28 @@
 @import "./styles/support.css";
 
 /* Local AirPlay → DLNA setup shares the existing grouped settings language. */
-.local-bridge { margin-top: 28px; }
+.local-bridge { margin-top: 24px; }
 .group-header.with-action { display: flex; align-items: center; gap: 8px; }
 .group-header.with-action > .button { margin-left: auto; }
 /* Control-channel selects sit in a flex cell; unconstrained they squeeze the
    title column into a vertical strip. */
-.cell > select[data-cap-policy], .cell > select[data-cap-target] { width: 100%; max-width: 16rem; }
+.cell > select[data-cap-policy], .cell > select[data-cap-target] { width: 11rem; max-width: 45%; flex-shrink: 0; }
 @media (max-width: 600px) {
   .cell:has(> select[data-cap-policy]), .cell:has(> select[data-cap-target]) { flex-wrap: wrap; }
-  .cell > select[data-cap-policy], .cell > select[data-cap-target] { max-width: none; }
+  .cell > select[data-cap-policy], .cell > select[data-cap-target] { width: 100%; max-width: none; }
 }
 .local-bridge .group-header { display: flex; align-items: center; gap: 8px; }
 
 .local-device-row + .local-device-row { border-top: 1px solid var(--separator); }
-.local-bridge .local-device-row > .cell { display: grid; grid-template-columns: 24px minmax(0,1fr) auto auto; align-items: start; gap: 12px 16px; border-bottom: 0; }
-.local-device-row .cell-icon { margin-top: 3px; }
+.local-bridge .local-device-row > .cell { display: grid; grid-template-columns: 24px minmax(0,1fr) auto auto; align-items: center; gap: 12px 16px; border-bottom: 0; }
+.local-device-row .cell-icon { margin-top: 0; }
 .local-bridge .local-device-row .cell-content { min-width: 0; width: auto; grid-column: 2; }
 .local-device-row .receiver-visibility { grid-column: 3; align-self: center; white-space: nowrap; }
 .local-device-row .cell > .button { grid-column: 4; align-self: center; white-space: nowrap; margin: 0; }
 .local-device-row .cell:not(:has(.receiver-visibility)) > .button { grid-column: 3 / 5; }
 .local-bridge .cell-title { overflow-wrap: break-word; }
 .local-bridge .cell-subtitle { overflow-wrap: anywhere; line-height: 1.5; }
-.local-bridge-editor { display: grid; gap: 10px; padding: 0 20px 20px 64px; min-width: 0; }
+.local-bridge-editor { display: grid; gap: 10px; padding: 0 16px 16px 56px; min-width: 0; }
 .local-bridge-editor label { display: grid; gap: 6px; font-size: 13px; min-width: 0; }
 .local-bridge-editor .input { width: 100%; min-width: 0; }
 .local-bridge-editor .caption { margin: 0; line-height: 1.5; }

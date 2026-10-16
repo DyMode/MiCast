@@ -27,7 +27,8 @@ const levels: Record<string, string> = { unknown: '未知', declared: '协议声
 const actions: Record<string, string> = { play_file: '文件播放', play_stream: '持续流播放', pause: '暂停', resume: '继续', stop: '停止', get_volume: '读取音量', set_volume: '设置音量', status: '读取状态' };
 const failureLabels: Record<string, string> = { control_timeout: '控制请求超时', control_failed: '控制请求失败', no_stream_pull: '设备未取流', stream_interrupted: '设备取流中断', source_idle: '音源暂无数据', unreachable: '设备离线', manual_retry_failed: '手动重试失败', stop_failed: '旧播放停止失败' };
 const proofKey = (device: Device, proof: Proof) => `confirm:${device.id}:${proof.action}:${proof.format}:${proof.pulled_at}`;
-const policies: Record<string, string> = { legacy: '沿用原配置', auto: '已验证时优先本地', local: '仅本地', cloud: '仅云端' };
+const policies: Record<string, string> = { legacy: '默认方式', auto: '优先局域网', local: '仅局域网', cloud: '仅米家云端' };
+const policyHints: Record<string, string> = { legacy: '按原有配置，通过米家云端控制音箱。', auto: '对应音箱在线，且当前音频格式已确认能出声时走局域网，否则通过米家云端。', local: '只通过对应的局域网音箱播放；连接失败时不会切换到米家云端。', cloud: '始终通过米家云端控制音箱。' };
 const timingLabels: Record<string, string> = { control: '控制响应', first_http_pull: '首次取流' };
 
 function requestRender(): void {
@@ -81,40 +82,30 @@ export function renderControlChannel(): string {
   if (!speakerEntries.length) {
     return `<div class="group">${feedbackRow()}<div class="cell"><div class="cell-content"><span class="cell-title">没有使用云端控制的播放入口</span><span class="cell-subtitle">添加云端音箱的播放入口后，可在此设置本地优先或仅本地的控制通道</span></div></div></div>`;
   }
-  // One card per entry: with several speakers a flat cell list makes the
-  // 关联本地设备 row read as belonging to whichever name sits above it.
-  return `${feedbackRow() ? `<div class="group">${feedbackRow()}</div>` : ''}
+  // One list; shared setup guidance belongs to the section, not every entry.
+  return `<div class="group control-channel-list">${feedbackRow()}
   ${speakerEntries.map(entry => {
     const key = `${entry.kind}:${entry.id}`;
     const draft = drafts.get(key) || { policy: entry.policy, target: entry.local_target_id || '' };
     const pending = busy.has(key);
-    return `<div class="group">
-      <div class="cell">
-        <div class="cell-content"><span class="cell-title">${esc(entry.name)}</span><span class="cell-subtitle">${esc(entry.route.reason)}</span></div>
-        <select class="input" data-cap-policy="${esc(key)}" ${pending ? 'disabled' : ''} aria-label="${esc(entry.name)} 控制策略">
-          ${Object.entries(policies).map(([value, label]) => `<option value="${value}" ${draft.policy === value ? 'selected' : ''}>${label}</option>`).join('')}
+    return `<div class="cell control-channel-row">
+        <div class="cell-content"><span class="cell-title">${esc(entry.name)}</span>${!entry.local_target_id ? '<span class="cell-subtitle">未绑定本地目标</span>' : ''}</div>
+        <select class="input" data-cap-policy="${esc(key)}" ${pending ? 'disabled' : ''} aria-label="${esc(entry.name)} 播放连接方式" title="${esc(policyHints[draft.policy] || entry.route.reason)}">
+          ${Object.entries(policies).map(([value, label]) => `<option value="${value}" ${draft.policy === value ? 'selected' : ''} ${!entry.local_target_id && (value === 'auto' || value === 'local') ? 'disabled' : ''}>${label}</option>`).join('')}
         </select>
-      </div>
-      <div class="cell">
-        <div class="cell-content"><span class="cell-title">关联本地设备</span></div>
-        <select class="input" data-cap-target="${esc(key)}" ${pending ? 'disabled' : ''} aria-label="${esc(entry.name)} 关联本地设备">
-          <option value="">未关联</option>
-          ${data!.devices.filter(device => device.id.startsWith('dlna:')).map(device => `<option value="${esc(device.id.replace(/^dlna:/, ''))}" ${draft.target === device.id.replace(/^dlna:/, '') ? 'selected' : ''}>${esc(device.name || device.id)} · ${device.availability === 'online' ? '在线' : '离线'}</option>`).join('')}
-        </select>
-      </div>
     </div>`;
-  }).join('')}`;
+  }).join('')}</div>${speakerEntries.some(entry => !entry.local_target_id) ? '<p class="group-header-hint">未绑定本地目标的入口暂不支持局域网选项。局域网播放请在“播放 → 局域网设备”创建桥接入口。</p>' : ''}`;
 }
 
 export function bindControlChannel(container: HTMLElement): void {
-  container.querySelectorAll<HTMLSelectElement>('[data-cap-policy],[data-cap-target]').forEach(select => {
+  container.querySelectorAll<HTMLSelectElement>('[data-cap-policy]').forEach(select => {
     select.addEventListener('change', async () => {
-      const key = select.dataset.capPolicy ?? select.dataset.capTarget ?? '';
+      const key = select.dataset.capPolicy ?? '';
       if (busy.has(key)) return;
       const kind = key.split(':', 1)[0];
       const id = key.slice(kind.length + 1);
       const policy = container.querySelector<HTMLSelectElement>(`[data-cap-policy="${CSS.escape(key)}"]`)?.value ?? 'auto';
-      const target = container.querySelector<HTMLSelectElement>(`[data-cap-target="${CSS.escape(key)}"]`)?.value ?? '';
+      const target = drafts.get(key)?.target ?? data?.entries.find(entry => entry.kind === kind && entry.id === id)?.local_target_id ?? '';
       const current = store.beginRead(`capabilities-save:${key}`, true);
       drafts.set(key, { policy, target }); busy.add(key); requestRender();
       try {
