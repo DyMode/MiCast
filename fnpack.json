@@ -60,17 +60,36 @@
               "size": 77776552
             }
           }
+        },
+        "0.4.0": {
+          "changelog": "0.4.0\n【修复】DLNA 投送后无法播放、部分音源起播失败的问题，改善暂停、继续播放和进度拖动体验。\n【修复】AirPlay 2 开启调音台、均衡器或左右声道分配后无法播放的问题。\n【修复】部分播放场景下，歌曲封面、歌词匹配及切歌后信息更新异常的问题。\n【优化】调整桌面与手机界面的间距、按钮和布局，让操作更紧凑、清晰。\n【新增】“简化视觉效果”开关，可关闭动画、玻璃模糊和动态高光，减轻界面运行负担。\n【优化】飞牛应用启动与启停体验，减少启动等待和重复启用引发的异常。\n【优化】飞牛安装流程，自动分配可用端口；升级保留已有配置，卸载时可选择数据保留方式。\n【新增】用户协议、隐私政策、联系支持与支持开发入口。",
+          "updated_at": "2026-10-16T13:20:30.0000000+00:00",
+          "os_min_version": "1.2.0602",
+          "run_as": "root",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/DyMode/MiCast/releases/download/v0.4.0/micast-x86-0.4.0.fpk",
+              "sha256": "0cc0c3736142a22f65be26e4342447672e784e0d0b8ccf0f8e4747b5269fecd2",
+              "size": 119019089
+            },
+            "arm": {
+              "download_url": "https://github.com/DyMode/MiCast/releases/download/v0.4.0/micast-arm-0.4.0.fpk",
+              "sha256": "ceb27adab011be43ce7f7cab9a272bdb42884f390b1b761184b793ff04950b11",
+              "size": 76271290
+            }
+          }
         }
       },
-      "icon_url": "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/assets/icons/web/icon-256.png",
+      "icon_url": "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/assets/icons/web/icon-256.png",
       "preview_urls": [
-        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/docs/screenshots/01-player.png",
-        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/docs/screenshots/02-speakers.png",
-        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/docs/screenshots/03-eq.png",
-        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/docs/screenshots/04-links.png",
-        "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/docs/screenshots/05-stereo.png"
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/docs/screenshots/01-player.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/docs/screenshots/02-speakers.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/docs/screenshots/03-eq.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/docs/screenshots/04-links.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/docs/screenshots/05-stereo.png",
+        "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/docs/screenshots/06-mobile.png"
       ],
-      "readme_url": "https://raw.githubusercontent.com/DyMode/MiCast/v0.3.3/README.md"
+      "readme_url": "https://raw.githubusercontent.com/DyMode/MiCast/v0.4.0/README.md"
     }
   }
 }
