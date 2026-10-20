@@ -7,10 +7,6 @@ if [ ! -x "$PYTHON_BIN" ]; then
   echo "缺少飞牛 Python 3.12 运行时。" > "$TRIM_TEMP_LOGFILE"
   exit 1
 fi
-if ! "$PYTHON_BIN" "$(dirname "$0")/lifecycle.py" check-consent > "$TRIM_TEMP_LOGFILE" 2>&1; then
-  echo "请阅读并同意当前版本的用户协议与隐私政策后安装。" >> "$TRIM_TEMP_LOGFILE"
-  exit 1
-fi
 PREFLIGHT="$(dirname "$0")/port-preflight.py"
 if [ ! -f "$PREFLIGHT" ]; then
   echo "应用包缺少统一端口预检程序，请重新构建安装包。" > "$TRIM_TEMP_LOGFILE"

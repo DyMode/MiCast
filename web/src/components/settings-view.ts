@@ -351,7 +351,7 @@ export function bindSettingsView(
   container.querySelectorAll<HTMLElement>('[data-legal]').forEach(button => {
     scope.listen(button, 'click', () => {
       closeLegal?.();
-      closeLegal = openLegalDialog(button.dataset.legal === 'privacy' ? 'privacy' : 'agreement');
+      closeLegal = openLegalDialog(button.dataset.legal === 'privacy' ? 'privacy' : 'agreement', button);
     });
   });
   container.querySelectorAll<HTMLElement>('[data-support]').forEach(button => {

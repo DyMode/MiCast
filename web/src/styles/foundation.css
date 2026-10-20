@@ -144,11 +144,17 @@ button {
   width: 1.2em;
   height: 1.2em;
   display: block;
+  flex-shrink: 0;
 }
 .brand-device-symbol { width: 1.15rem; height: 1.15rem; display: block; }
 .cell-icon.device-brand.xiaomi {
   color: white;
   background: #ff6900;
+}
+.cell-icon.device-brand.dlna {
+  color: #48a842;
+  background: white;
+  border: 1px solid color-mix(in srgb, #48a842 24%, transparent);
 }
 .cell-icon.device-brand.mijia,
 .cell-icon.device-brand.device-product {

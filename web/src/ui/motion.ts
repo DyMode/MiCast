@@ -1,8 +1,9 @@
 const key = 'micast-reduced-motion';
-const system = window.matchMedia('(prefers-reduced-motion: reduce)');
 let preference: boolean | null = null;
 try { const saved = localStorage.getItem(key); if (saved === 'true' || saved === 'false') preference = saved === 'true'; } catch {}
-export function reducedMotion(): boolean { return preference ?? system.matches; }
+// Simplified visuals are the default; users can opt out in settings or at the
+// end of onboarding.
+export function reducedMotion(): boolean { return preference ?? true; }
 function applyMotion() {
   document.documentElement.classList.toggle('reduce-motion', reducedMotion());
   if (reducedMotion()) document.getAnimations?.().forEach(animation => { try { animation.finish(); } catch { animation.cancel(); } });
@@ -13,7 +14,6 @@ export function setReducedMotion(enabled: boolean) {
   try { localStorage.setItem(key, String(enabled)); } catch {}
   applyMotion();
 }
-system.addEventListener('change', applyMotion);
 window.addEventListener('storage', event => {
   if (event.key !== key && event.key !== null) return;
   preference = event.newValue === 'true' ? true : event.newValue === 'false' ? false : null;

@@ -136,8 +136,9 @@ sed -i "s/^platform=.*/platform=$PLATFORM/" "$STAGE_DIR/manifest"
 
 cp "$ROOT_DIR/web/public/icons/fnos-64.png" "$STAGE_DIR/ICON.PNG"
 cp "$ROOT_DIR/web/public/icons/fnos-256.png" "$STAGE_DIR/ICON_256.PNG"
-cp "$ROOT_DIR/web/public/icons/fnos-64.png" "$STAGE_DIR/app/ui/images/icon_64.png"
-cp "$ROOT_DIR/web/public/icons/fnos-256.png" "$STAGE_DIR/app/ui/images/icon_256.png"
+for size in 32 48 64 96 128 192 256 512; do
+  cp "$ROOT_DIR/web/public/icons/fnos-$size.png" "$STAGE_DIR/app/ui/images/icon_$size.png"
+done
 
 find "$STAGE_DIR/cmd" -type f -exec chmod 0755 {} +
 find "$STAGE_DIR/app" -type d -name '__pycache__' -prune -exec rm -rf {} +

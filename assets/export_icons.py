@@ -46,36 +46,42 @@ def ico(name,sizes,source=svg):
         offset+=len(chunk)
     p=OUT/name; p.write_bytes(data+b''.join(chunks)); return p
 
-# fnOS: use the same 90% tile footprint as MiCast Go, retaining the existing
-# speaker artwork proportions inside the tile.
-fnos=svg.replace('x="5" y="5" width="90" height="90" rx="22"', 'x="1.5" y="1.5" width="97" height="97" rx="23.7"')
-fnos=fnos.replace('transform="translate(-3 -4.5) scale(1.08)"', 'transform="translate(50 50) scale(1.20) translate(-50 -50) translate(-3 -4.5) scale(1.08)"')
-fnos=fnos.replace('stroke-width="2.6"','stroke-width="3.05"')
-fnos=fnos.replace('viewBox="0 0 100 100">', 'viewBox="0 0 100 100"><g transform="translate(50 50) scale(0.9278350515463918) translate(-50 -50)">').replace('</svg>', '</g></svg>')
+# fnOS: the master already uses the Xiaomi-style n=3 superellipse and the
+# centred, full-canvas speaker group; only the stroke weight changes.
+fnos=svg.replace('stroke-width="2.6"','stroke-width="3.05"')
 fnos_small=fnos.replace('stroke-width="3.05"','stroke-width="3.25"')
 save('fnos/ICON.PNG',64,fnos_small); save('fnos/ICON_256.PNG',256,fnos)
+for s in [32,48,64,96,128,192,256,512]: save(f'fnos/icon-{s}.png',s,fnos_small if s<=64 else fnos)
 (OUT/'fnos/micast.svg').write_text(fnos,encoding='utf-8')
 # Windows shell/app and installer
 for s in [16,20,24,32,40,48,64,96,128,256]: save(f'windows/micast-{s}.png',s,win_svg)
 ico('windows/micast.ico',[16,20,24,32,40,48,64,96,128,256],win_svg); ico('windows/setup.ico',[16,24,32,48,256],win_svg)
+for size,name in ((55,'wizard-small.bmp'),(110,'wizard-small-2x.bmp')):
+    im=render(size,win_svg); flat=Image.new('RGB',(size,size),'white'); flat.paste(im,(0,0),im); flat.save(OUT/'windows'/name)
+render(512,svg).save(ROOT/'assets'/'brand-approved'/'micast-preview.png',icc_profile=ICC,optimize=True)
 # Tray: simplified glyph on transparent canvas, light and dark taskbar variants
 tray_svg=svg.replace('fill="#B94B36"','fill="none"').replace('fill="#FFF7ED"','fill="#17212F"')
+# Keep the tray glyph at its original 1.08 size instead of the full-canvas
+# 1.2371 optical scale used by the app icon.
+tray_svg=tray_svg.replace('transform="translate(50 50) scale(1.2371) translate(-50 -50) translate(-5.0 -2.8) scale(1.08)"', 'transform="translate(-5.0 -2.8) scale(1.08)"')
 tray_dark=tray_svg.replace('#17212F','#FFFFFF')
 for theme,src in [('light',tray_svg),('dark',tray_dark)]:
     for s in [16,20,24,32,40,48,64]: save(f'tray/tray-{theme}-{s}.png',s,src)
     ico(f'tray/tray-{theme}.ico',[16,20,24,32,40,48,64],src)
 # Web
 for s in [16,32,48,64,96,128,192,256,512]: save(f'web/icon-{s}.png',s)
-# Browser tabs have only ~16 CSS pixels: use the whole tile and enlarge the
-# approved speaker group while retaining the regular mark for in-page branding.
-favicon=svg.replace('x="5" y="5" width="90" height="90" rx="22"', 'x="0" y="0" width="100" height="100" rx="24"')
-favicon=favicon.replace('transform="translate(-3 -4.5) scale(1.08)"', 'transform="translate(50 50) scale(1.28) translate(-50 -50) translate(-3 -4.5) scale(1.08)"')
-favicon=favicon.replace('stroke-width="2.6"','stroke-width="3.2"')
+# Browser tabs have only ~16 CSS pixels: keep the superellipse tile and thicken
+# the whisk outlines for legibility at small sizes.
+favicon=svg.replace('stroke-width="2.6"','stroke-width="3.2"')
 ico('web/favicon.ico',[16,32,48],favicon)
 (OUT/'web/favicon.svg').write_text(favicon,encoding='utf-8')
 for s in [16,32,48]: save(f'web/favicon-{s}.png',s,favicon)
 (OUT/'web/micast.svg').write_text(svg,encoding='utf-8')
-mask=svg.replace('<rect x="5" y="5" width="90" height="90" rx="22" fill="#B94B36"/>','<rect width="100" height="100" fill="#B94B36"/>')
+def full_square(source, color):
+    start=source.index('<path d="M ')
+    end=source.index('/>',start)+2
+    return source[:start]+f'<rect width="100" height="100" fill="{color}"/>'+source[end:]
+mask=full_square(svg,'#B94B36')
 touch=render(180,mask).convert('RGB')
 touch.save(OUT/'web/apple-touch-icon.png',icc_profile=ICC,optimize=True)
 for s in [192,512]: save(f'web/maskable-{s}.png',s,mask)
@@ -97,6 +103,7 @@ for p in (OUT/'web').iterdir():
 # Both fnOS packaging scripts consume these public paths.
 shutil.copy2(OUT/'fnos/ICON.PNG',public/'fnos-64.png')
 shutil.copy2(OUT/'fnos/ICON_256.PNG',public/'fnos-256.png')
+for s in [32,48,64,96,128,192,256,512]: shutil.copy2(OUT/f'fnos/icon-{s}.png',public/f'fnos-{s}.png')
 with zipfile.ZipFile(ROOT/'assets/micast-icons.zip','w',zipfile.ZIP_DEFLATED) as archive:
     for p in OUT.rglob('*'):
         if p.is_file(): archive.write(p,p.relative_to(OUT))

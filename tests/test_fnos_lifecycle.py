@@ -17,17 +17,6 @@ lifecycle = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lifecycle)
 
 
-@pytest.mark.parametrize("value", ["", "false", "true", "[]", '["old"]', '["2026-10-16", "old"]'])
-def test_consent_rejects_missing_boolean_and_wrong_versions(value):
-    with pytest.raises(ValueError):
-        lifecycle.require_consent(value, "2026-10-16")
-
-
-@pytest.mark.parametrize("value", ["2026-10-16", '["2026-10-16"]'])
-def test_consent_accepts_exact_version(value):
-    lifecycle.require_consent(value, "2026-10-16")
-
-
 @pytest.mark.parametrize("policy", ["keep_config", "unknown"])
 def test_default_uninstall_removes_all_credentials_preserves_audio(tmp_path, policy):
     profile = {
@@ -108,20 +97,15 @@ def test_generated_docs_and_install_ui_match_bundled_source():
     sync_spec.loader.exec_module(sync)
     for path, expected in sync.outputs().items():
         assert path.read_text(encoding="utf-8") == expected
-    wizard = json.loads((ROOT / "packaging/fnos/wizard/install").read_text(encoding="utf-8"))
-    checkbox = wizard[-1]["items"][-1]
-    # fnpack serialises the control as one string value: a list (the natural
-    # "unchecked" spelling) is rejected by its content validation, so the
-    # default stays the empty string and the option value marks consent.
-    assert checkbox["initValue"] == ""
-    assert isinstance(checkbox["initValue"], str)
-    assert checkbox["options"][0]["value"] == "2026-10-16"
-    assert checkbox["rules"][0]["required"] is True
+    for name in ("install", "upgrade"):
+        assert not (ROOT / f"packaging/fnos/wizard/{name}").exists()
+    license_text = (ROOT / "packaging/fnos/LICENSE").read_text(encoding="utf-8")
+    assert license_text.startswith("MiCast 用户协议")
+    assert "MiCast 隐私政策" in license_text
 
 
 def test_consent_receipt_contains_only_version_time_and_source(tmp_path, monkeypatch):
     monkeypatch.setenv("TRIM_PKGVAR", str(tmp_path))
-    monkeypatch.setenv("wizard_legal_accept", "2026-10-16")
     monkeypatch.setattr("sys.argv", ["lifecycle", "record-consent"])
     lifecycle.main()
     receipt = json.loads((tmp_path / "legal-consent.json").read_text())

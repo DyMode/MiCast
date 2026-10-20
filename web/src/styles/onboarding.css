@@ -20,6 +20,10 @@
 .setup-actions, .setup-actions.split { gap: .625rem; flex-wrap: wrap; margin-top: 1rem; }
 .setup-actions .button { min-height: var(--control-height-primary); }
 .setup-provider, .setup-success, .setup-qr { gap: 1rem; }
+.setup-provider-brand { width: 2.75rem; height: 2.75rem; border-radius: .75rem; }
+.setup-provider-brand .brand-device-symbol { width: 1.75rem; height: 1.75rem; }
+.setup-motion { display: inline-flex; align-items: center; gap: .5rem; font-size: .9375rem; font-weight: 600; cursor: pointer; }
+.setup-motion .switch { margin: 0; }
 .setup-provider > div, .setup-success > div, .setup-qr > div { min-width: 0; overflow-wrap: anywhere; }
 .setup-complete { min-height: 20rem; }
 @media (max-width: 639px) {
@@ -148,4 +152,11 @@
 
 /* Discovery lists can grow: scroll inside setup without clipping its actions. */
 .setup-content { max-height: calc(100dvh - 112px); overflow-y: auto; overscroll-behavior: contain; }
-@media (max-width: 639px) { .setup-content { max-height: calc(100dvh - 160px); } }
+@media (max-width: 639px) {
+  /* Pin the rail to the top and give the remaining height to the scroller, so an
+     expanded QR code can always reach the actions instead of overflowing the
+     viewport from the centre. svh stays inside in-app browser chrome. */
+  .setup-page { height: 100svh; }
+  .setup-shell { align-content: start; grid-template-rows: auto minmax(0, 1fr); gap: .5rem; }
+  .setup-content { align-self: start; max-height: 100%; }
+}

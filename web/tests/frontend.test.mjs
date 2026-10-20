@@ -11,17 +11,18 @@ for (const [theme, width] of [['light', 1280], ['dark', 320]]) {
       const dialog = page.getByRole('dialog', {name:title});
       await dialog.waitFor();
       await dialog.getByText('版本与更新日期：2026-10-16').waitFor();
-      assert.equal(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), true);
+      const dims = await dialog.evaluate(el => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
+      assert.ok(dims.scrollWidth <= dims.clientWidth + 1, `legal dialog overflows: ${JSON.stringify(dims)}`);
       const article = await dialog.locator('article').textContent();
       assert.ok(article.includes(kind === 'agreement' ? '自愿打赏' : 'xiaomi-tokens.enc'));
       await dialog.evaluate(el => el.scrollTop = el.scrollHeight);
       await dialog.getByRole('button', {name:'关闭', exact:true}).click();
       assert.equal(await dialog.count(), 0);
-      assert.equal(await entry.evaluate(el => document.activeElement === el), true);
+      await page.waitForFunction(value => document.activeElement?.getAttribute('data-legal') === value, kind);
     }
     await page.locator('[data-legal="privacy"]').click();
     await page.keyboard.press('Escape');
-    assert.equal(await page.locator('.legal-dialog').count(), 0);
+    await page.waitForFunction(() => document.querySelectorAll('.legal-dialog').length === 0);
   });
 }
 
@@ -124,10 +125,11 @@ before(async () => {
 after(async () => { await browser?.close(); await server?.close(); });
 
 async function open(t, options = {}, overrides = {}) {
-  const {skipPlayer, ...browserOptions} = options;
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...browserOptions });
+  const {skipPlayer, reducedMotion, ...browserOptions} = options;
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, ...browserOptions, ...(reducedMotion ? {reducedMotion} : {}) });
   t.after(() => context.close());
   const page = await context.newPage();
+  await page.addInitScript(value => localStorage.setItem('micast-reduced-motion', value), reducedMotion === 'reduce' ? 'true' : 'false');
   page.setDefaultTimeout(7000);
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -1086,11 +1088,57 @@ for (const viewport of [{width:1440,height:900},{width:390,height:844},{width:39
   }
  });
 }
-test('fresh setup ignores stale dark preference',async t=>{
+test('reduced-motion setup keeps the step rail bare and the DLNA mark aligned',async t=>{
+ const {page}=await open(t,{viewport:{width:1100,height:700}});
+ await page.evaluate(async()=>{
+  const {setReducedMotion}=await import('/app/micast/src/ui/motion.ts');setReducedMotion(true);
+  const {store}=await import('/app/micast/src/state.ts');store.set({access:{...store.get().access,setup_complete:false,access_configured:true},onboardingStep:'xiaomi',xiaomi:{logged_in:false},qr:{...store.get().qr,open:false}});window.dispatchEvent(new Event('micast:request-render'));
+ });
+ await page.waitForSelector('[data-setup-local]');
+ const rail=await page.locator('.setup-steps').evaluate(e=>getComputedStyle(e).backgroundColor);
+ assert.equal(rail,'rgba(0, 0, 0, 0)');
+ const marks=await page.locator('.setup-provider').evaluateAll(nodes=>nodes.map(node=>{const r=node.querySelector('img, .setup-provider-brand').getBoundingClientRect();return [r.width,r.height,r.x];}));
+ assert.deepEqual(marks[0],marks[1]);
+});
+test('onboarding defaults to simplified visuals and can turn them off',async t=>{
+ const context=await browser.newContext({viewport:{width:1100,height:700}});t.after(()=>context.close());const page=await context.newPage();
+ await installFixtures(page,{'/api/access/status':async()=>({access_configured:false,setup_complete:false,auth_enabled:false,authenticated:true})});
+ await page.goto(url);await page.waitForSelector('[data-setup-access]');
+ assert.equal(await page.locator('html').evaluate(el=>el.classList.contains('reduce-motion')),true);
+ await page.evaluate(async()=>{const {store}=await import('/app/micast/src/state.ts');store.set({access:{...store.get().access,access_configured:true,setup_complete:false},onboardingStep:'complete'});window.dispatchEvent(new Event('micast:request-render'));});
+ const toggle=page.locator('[data-setup-reduced-motion]');
+ await toggle.waitFor();
+ assert.equal(await toggle.isChecked(),true);
+ await toggle.uncheck();
+ assert.equal(await page.locator('html').evaluate(el=>el.classList.contains('reduce-motion')),false);
+ assert.equal(await page.evaluate(()=>localStorage.getItem('micast-reduced-motion')),'false');
+});
+test('mobile setup pins the rail and scrolls an expanded QR to the actions',async t=>{
+ const {page}=await open(t,{viewport:{width:390,height:500}});
+ await page.evaluate(async()=>{
+  const {store}=await import('/app/micast/src/state.ts');
+  store.set({access:{...store.get().access,setup_complete:false,access_configured:true},onboardingStep:'xiaomi',xiaomi:{logged_in:false},qr:{open:true,qrUrl:null,scanToken:'test',state:'waiting',error:''}});
+  window.dispatchEvent(new Event('micast:request-render'));
+ });
+ await page.waitForSelector('[data-setup-local]');
+ const top=await page.evaluate(()=>{const steps=document.querySelector('.setup-steps').getBoundingClientRect();const content=document.querySelector('.setup-content');const box=content.getBoundingClientRect();return{stepsTop:steps.top,stepsBottom:steps.bottom,contentTop:box.top,scrollH:content.scrollHeight,clientH:content.clientHeight};});
+ assert.ok(top.stepsBottom<=top.contentTop+1,'rail sits above the card');
+ assert.ok(top.contentTop-top.stepsBottom<=10,'rail and card stay close');
+ assert.ok(top.scrollH>top.clientH,'expanded QR overflows inside the card');
+ await page.locator('.setup-content').evaluate(el=>{el.scrollTop=el.scrollHeight;});
+ await page.waitForTimeout(100);
+ const bottom=await page.evaluate(()=>{const actions=document.querySelector('.setup-actions').getBoundingClientRect();const steps=document.querySelector('.setup-steps').getBoundingClientRect();const content=document.querySelector('.setup-content');return{actionsBottom:actions.bottom,stepsTop:steps.top,inner:innerHeight,scrollTop:content.scrollTop};});
+ assert.ok(bottom.actionsBottom<=bottom.inner+1,'actions are reachable at the bottom');
+ assert.ok(bottom.scrollTop>0,'the card scrolled');
+ assert.ok(Math.abs(bottom.stepsTop-top.stepsTop)<.5,'the rail stays pinned');
+});
+test('fresh setup ignores stale dark preference and uses the default light theme',async t=>{
  const context=await browser.newContext({colorScheme:'dark'});t.after(()=>context.close());const page=await context.newPage();
  await page.addInitScript(()=>localStorage.setItem('micast-ui',JSON.stringify({theme:'dark'})));
  await installFixtures(page,{'/api/access/status':async()=>({access_configured:false,setup_complete:false,auth_enabled:false,authenticated:true})});
- await page.goto(url);await page.waitForSelector('[data-setup-access]');assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+ await page.goto(url);await page.waitForSelector('[data-setup-access]');
+ assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+ assert.equal(await page.evaluate(async()=>(await import('/app/micast/src/state.ts')).store.get().ui.theme),'light');
 });
 test('mobile mini centers cover and fallback and separates drag from click',async t=>{
  const {page}=await open(t);
@@ -1120,7 +1168,7 @@ for (const [device, viewport] of [['desktop', {width:1280,height:900}], ['mobile
   });
   await navigate(page,'receivers');
   const section=page.locator('[data-local-bridge]');
-  await section.getByRole('button',{name:'添加 AirPlay 入口',exact:true}).click();
+  await section.getByRole('button',{name:'添加入口',exact:true}).click();
   const input=section.locator('input[name=name]');
   await input.fill('书房本地播放');
   await page.evaluate(()=>window.dispatchEvent(new Event('micast:request-render')));
@@ -1201,7 +1249,7 @@ test('Local bridge uses the fixed AirPlay 2 entry on single-instance installs',a
  });
  await navigate(page,'receivers');
  const section=page.locator('[data-local-bridge]');
- await section.getByRole('button',{name:'添加 AirPlay 入口',exact:true}).click();
+ await section.getByRole('button',{name:'添加入口',exact:true}).click();
  await section.getByText('当前安装提供一个固定 AirPlay 2 入口。绑定其他设备会替换它的播放目标。').waitFor();
  await section.getByRole('button',{name:'创建入口',exact:true}).click();
  await section.getByRole('button',{name:'编辑入口',exact:true}).waitFor();

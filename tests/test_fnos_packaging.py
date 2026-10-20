@@ -216,23 +216,41 @@ def test_fnos_package_validator_rejects_list_init_value_on_checkbox(tmp_path):
     be caught before staging."""
     module = _package_validator()
     package = _validator_fixture(tmp_path)
-    payload = _wizard(package, "install")
+    payload = _wizard(package, "uninstall")
+    payload[-1]["items"].append(
+        {
+            "type": "checkbox",
+            "field": "wizard_test_accept",
+            "label": "测试",
+            "initValue": "",
+            "options": [{"label": "同意", "value": "1"}],
+        }
+    )
     payload[-1]["items"][-1]["initValue"] = []
-    _save_wizard(package, "install", payload)
+    _save_wizard(package, "uninstall", payload)
 
     problems = module.validate(package)
 
     assert any("initValue 必须是字符串" in problem for problem in problems)
-    assert all("wizard/install" in problem for problem in problems)
+    assert all("wizard/uninstall" in problem for problem in problems)
 
 
 def test_fnos_package_validator_rejects_empty_options_and_unknown_types(tmp_path):
     module = _package_validator()
     package = _validator_fixture(tmp_path)
-    payload = _wizard(package, "upgrade")
+    payload = _wizard(package, "uninstall")
+    payload[-1]["items"].append(
+        {
+            "type": "checkbox",
+            "field": "wizard_test_accept",
+            "label": "测试",
+            "initValue": "",
+            "options": [{"label": "同意", "value": "1"}],
+        }
+    )
     payload[-1]["items"][-1]["options"] = []
     payload[-1]["items"].append({"type": "slider", "field": "wizard_x", "label": "x"})
-    _save_wizard(package, "upgrade", payload)
+    _save_wizard(package, "uninstall", payload)
 
     problems = module.validate(package)
 

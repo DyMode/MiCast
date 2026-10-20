@@ -1,27 +1,18 @@
 {
   "canvas": 100,
-  "tile": 90,
-  "old_bounds": [
-    25.5,
-    22.7,
-    76.3,
-    75
+  "tile": 100,
+  "tile_shape": "superellipse n=3",
+  "glyph_bounds": [
+    16.016,
+    15.039,
+    83.984,
+    84.961
   ],
-  "new_bounds": [
-    24.54,
-    20.016,
-    79.404,
-    76.5
+  "glyph_canvas_percent": [
+    67.969,
+    69.922
   ],
-  "new_glyph_canvas_percent": [
-    54.864,
-    56.484
-  ],
-  "new_glyph_tile_percent": [
-    60.96,
-    62.76
-  ],
-  "rear_stroke_at_64px": 1.7971200000000003,
-  "rear_stroke_at_16px": 0.44928000000000007,
-  "note": "Bounds derived from SVG geometry. Optical placement is a design judgment, not platform certification."
+  "rear_stroke_at_64px": 1.664,
+  "rear_stroke_at_16px": 0.416,
+  "note": "Bounds derived from the 512px master. The fnOS export uses thicker strokes at small sizes."
 }

@@ -1,7 +1,6 @@
 #!/bin/bash
 set -eu
 umask 077
-/var/apps/python312/target/bin/python3 "$(dirname "$0")/lifecycle.py" check-consent >> "$TRIM_TEMP_LOGFILE" 2>&1 || exit 1
 
 mkdir -p "$TRIM_PKGVAR"
 /var/apps/python312/target/bin/python3 "$(dirname "$0")/lifecycle.py" backup >> "$TRIM_TEMP_LOGFILE" 2>&1 || {

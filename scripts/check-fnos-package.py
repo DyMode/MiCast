@@ -46,7 +46,9 @@ REQUIRED_CMD_FILES = (
     "config_init",
     "config_callback",
 )
-REQUIRED_WIZARDS = ("install", "upgrade", "uninstall")
+# Install/upgrade have no custom wizard: fnOS shows the package-root LICENSE
+# as the official agreement. Only uninstall needs to collect a data policy.
+REQUIRED_WIZARDS = ("uninstall",)
 REQUIRED_JSON = (
     "config/privilege",
     "config/resource",

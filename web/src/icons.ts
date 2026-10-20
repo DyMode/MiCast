@@ -1,4 +1,4 @@
-import { lucideIcons, siXiaomi } from "./icon-data";
+import { lucideIcons, siDlna, siXiaomi } from "./icon-data";
 
 export type IconName = "airplay" | "antenna" | "speaker" | "settings" |
   "person" | "terminal" | "sun" | "moon" | "appearance" | "wave" | "check" |
@@ -26,7 +26,7 @@ export function brandMark(): string {
   return `<img class="brand-symbol" src="icons/micast.svg" alt="" aria-hidden="true">`;
 }
 
-export function brandIcon(brand: "xiaomi", className = "brand-device-symbol"): string {
-  const source = brand === "xiaomi" ? siXiaomi : siXiaomi;
+export function brandIcon(brand: "xiaomi" | "dlna", className = "brand-device-symbol"): string {
+  const source = brand === "dlna" ? siDlna : siXiaomi;
   return `<svg class="${className}" viewBox="0 0 24 24" aria-label="${source.title}" role="img" fill="currentColor"><path d="${source.path}"/></svg>`;
 }

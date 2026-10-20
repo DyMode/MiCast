@@ -1,7 +1,6 @@
 #!/bin/bash
 set -eu
 umask 077
-/var/apps/python312/target/bin/python3 "$(dirname "$0")/lifecycle.py" check-consent >> "$TRIM_TEMP_LOGFILE" 2>&1 || exit 1
 mkdir -p "$TRIM_PKGVAR"
 chmod 0700 "$TRIM_PKGVAR"
 chown -R "$TRIM_USERNAME" "$TRIM_PKGVAR"

@@ -1,6 +1,7 @@
 import { renderLocalBridge } from "./local-bridge";
 import type { State, Theme } from "../state";
 import { brandIcon, brandMark } from "../icons";
+import { reducedMotion } from "../ui/motion";
 import { renderThemeControl } from "./app-shell";
 
 function logo(): string {
@@ -79,7 +80,7 @@ export function renderOnboarding(state: State): string {
           ${state.xiaomi.logged_in || state.qr.state === "confirmed"
             ? `<div class="setup-success"><span>✓</span><div><strong>米家已连接</strong><p>${state.qr.state === "confirmed" ? "正在进入下一步…" : "音箱将在进入应用后自动同步。"}</p></div></div>`
             : state.qr.open ? qrPanel(state) : `<div class="setup-provider"><img src="assets/brands/mijia-app.png" alt=""><div><strong>米家</strong><p>使用米家 App 扫码连接</p></div><button class="button primary" type="button" data-setup-xiaomi>开始连接</button></div>`}
-          ${!xiaomiReady ? `<div class="setup-provider"><span class="cell-icon">${brandMark()}</span><div><strong>局域网 DLNA 设备</strong><p>无需米家登录，添加 AirPlay 播放入口</p></div><button class="button primary" type="button" data-setup-local>发现设备</button></div>` : ""}
+          ${!xiaomiReady ? `<div class="setup-provider"><span class="cell-icon device-brand dlna setup-provider-brand">${brandIcon("dlna")}</span><div><strong>局域网 DLNA 设备</strong><p>无需米家登录，添加 AirPlay 播放入口</p></div><button class="button primary" type="button" data-setup-local>发现设备</button></div>` : ""}
           ${state.qr.state === "confirmed" ? "" : `<div class="setup-actions split">${backButton}${state.xiaomi.logged_in
             ? `<button class="button primary" type="button" data-setup-skip>继续</button>`
             : `<button class="button plain" type="button" data-setup-skip>暂时跳过</button>`}${state.qr.state === "expired" ? `<button class="button primary" type="button" data-setup-xiaomi>刷新二维码</button>` : ""}</div>`}`
@@ -100,7 +101,9 @@ export function renderOnboarding(state: State): string {
             <div class="setup-actions split">${backButton}<button class="button primary" type="submit">继续</button></div>
           </form>`
           : `<div class="setup-complete"><span>✓</span><h1>已经准备好了</h1><p>之后可随时在设置中调整。</p>
-          <div class="setup-appearance"><strong>外观</strong>${renderThemeControl(state.ui.theme)}</div>
+          <div class="setup-appearance"><strong>外观</strong>${renderThemeControl(state.ui.theme)}
+            <label class="setup-motion"><span>简化视觉效果</span><input type="checkbox" class="switch" data-setup-reduced-motion ${reducedMotion() ? "checked" : ""}></label>
+          </div>
           <div class="setup-actions"><button class="button primary" type="button" data-setup-enter>开始使用</button></div></div>`}
       </section>
     </div>
@@ -118,6 +121,7 @@ export function bindOnboarding(container: HTMLElement, handlers: {
   onRefreshReceivers: () => Promise<void>;
   onAirPlay2: (enabled: boolean, target: string | null) => Promise<void>;
   onTheme: (theme: Theme) => void;
+  onMotion: (enabled: boolean) => void;
   onComplete: () => Promise<void>;
 }) {
   container.querySelector("[data-setup-local]")?.addEventListener("click", handlers.onLocal);
@@ -218,6 +222,9 @@ export function bindOnboarding(container: HTMLElement, handlers: {
   container.querySelectorAll<HTMLElement>("[data-theme]").forEach((el) =>
     el.addEventListener("click", () => handlers.onTheme(el.dataset.theme as Theme))
   );
+  container.querySelector<HTMLInputElement>("[data-setup-reduced-motion]")?.addEventListener("change", (event) => {
+    handlers.onMotion((event.target as HTMLInputElement).checked);
+  });
 }
 
 export function renderAccessLogin(access: NonNullable<State["access"]>): string {

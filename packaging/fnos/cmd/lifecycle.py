@@ -64,15 +64,6 @@ def atomic_write(path, payload):
         Path(temporary).unlink(missing_ok=True)
 
 
-def require_consent(value, version):
-    try:
-        parsed = json.loads(value)
-    except (ValueError, TypeError):
-        parsed = value
-    if parsed != version and parsed != [version]:
-        raise ValueError("请阅读并同意当前版本的用户协议与隐私政策后安装。")
-
-
 def backup(private):
     archive = private / BACKUP
     files = [private / name for name in PERSISTENT if (private / name).is_file()]
@@ -139,17 +130,13 @@ def uninstall(private, policy):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "action", choices=("check-consent", "record-consent", "backup", "restore", "uninstall")
+        "action", choices=("record-consent", "backup", "restore", "uninstall")
     )
     parser.add_argument(
         "--source", choices=("fnos-install", "fnos-upgrade"), default="fnos-install"
     )
     args = parser.parse_args()
     version = (Path(__file__).parent / "legal-version").read_text(encoding="utf-8").strip()
-    if args.action in {"check-consent", "record-consent"}:
-        require_consent(os.environ.get("wizard_legal_accept", ""), version)  # noqa: SIM112 -- fnOS field
-    if args.action == "check-consent":
-        return
     raw_private = Path(os.environ["TRIM_PKGVAR"])
     if not raw_private.is_absolute():
         raise ValueError("应用私有数据路径无效。")

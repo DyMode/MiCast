@@ -65,3 +65,6 @@ docker/.micast-ports-*.env
 # Generated review output and frontend cache
 artifacts/
 .vite/
+
+# Generated icon export bundle
+assets/micast-icons.zip

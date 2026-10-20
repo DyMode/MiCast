@@ -89,16 +89,38 @@ html.reduce-motion .sheet,
 html.reduce-motion .toast,
 html.reduce-motion .confirm-dialog,
 html.reduce-motion .setup-brand,
-html.reduce-motion .setup-steps,
 html.reduce-motion .setup-content {
   background: var(--elevated) !important;
   border-color: var(--separator-strong);
   box-shadow: none !important;
   filter: none !important;
 }
+
+/* The setup rail is a card on small screens but a bare list on desktop. */
+html.reduce-motion .setup-steps {
+  background: var(--elevated) !important;
+  border-color: var(--separator-strong);
+  box-shadow: none !important;
+  filter: none !important;
+}
+@media (min-width: 640px) {
+  html.reduce-motion .setup-steps { background: transparent !important; }
+}
 html.reduce-motion .nav-lens,
 html.reduce-motion .tab-lens {
   background: var(--accent-soft) !important;
   border-color: transparent;
   box-shadow: none !important;
+}
+
+/* Opaque materials retain the shape and boundary of the glass surfaces. */
+html.reduce-motion :is(.app-header, .sidebar, .tab-bar, .now-playing,
+  .player-overlay-dock, .sheet, .toast, .confirm-dialog) {
+  border: 1px solid var(--separator-strong);
+}
+html.reduce-motion :is(.sidebar, .now-playing, .sheet, .confirm-dialog) {
+  border-radius: var(--card-radius);
+}
+html.reduce-motion :is(.nav-lens, .tab-lens) {
+  border: 1px solid var(--separator);
 }

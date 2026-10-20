@@ -54,9 +54,10 @@ export function renderReceiversView(state: State): string {
             const mapped = Boolean(definition && settingsTargetIds(definition, state).length);
             const local = definition?.target_type === "dlna";
             const offline = local && (!fullConfig?.network_discovery_enabled || !localDevice(definition?.target_id || "")?.online);
-            const available = r.status === "running" && mapped && !offline;
+            const unavailable = offline || (!local && !state.xiaomi.logged_in && !fullConfig?.network_discovery_enabled);
+            const available = r.status === "running" && mapped && !unavailable;
             return `
-              <div class="receiver-card">
+              <div class="receiver-card ${unavailable || !mapped ? "is-unavailable" : ""}">
                 <div class="receiver-heading">
                   <div>
                     <div class="device-name">${escapeHtml(r.name)}</div>
@@ -67,7 +68,7 @@ export function renderReceiversView(state: State): string {
                     ${detail ? `<span class="caption">${escapeHtml(detail)}</span>` : ""}
                   </div>
                 <span class="status-pill ${available ? "running" : r.status === "error" ? "error" : ""}">
-                  ${offline ? fullConfig?.network_discovery_enabled ? "目标离线" : "发现已暂停" : !mapped ? "未设置" : casting ? "投送中" : paused ? "已暂停" : available ? "可连接" : r.status === "error" ? "不可用" : "准备中"}
+                  ${unavailable && !offline ? "未连接" : offline ? fullConfig?.network_discovery_enabled ? "目标离线" : "发现已暂停" : !mapped ? "未设置" : casting ? "投送中" : paused ? "已暂停" : available ? "可连接" : r.status === "error" ? "不可用" : "准备中"}
                 </span>
                 </div>
               </div>

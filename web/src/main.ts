@@ -1,4 +1,4 @@
-import "./ui/motion";
+import { setReducedMotion } from "./ui/motion";
 import { disposeAccountView } from "./components/account-view";
 let debugInteraction = false;
 import { api } from "./api";
@@ -178,6 +178,9 @@ function render(state: State) {
         store.setUi({ theme });
         applyTheme(theme);
         render(store.get());
+      },
+      onMotion: (enabled) => {
+        setReducedMotion(enabled);
       },
       onComplete: finishOnboarding,
     });
@@ -962,7 +965,8 @@ async function init() {
 
   try {
     const access = await api.getAccessStatus();
-    // A fresh installation must not inherit an old browser theme preference.
+    // A fresh installation must not inherit an old browser theme preference;
+    // onboarding always starts from the default light theme.
     if (!access.access_configured && !access.setup_complete) {
       store.setUi({ theme: "light" });
       applyTheme("light");
